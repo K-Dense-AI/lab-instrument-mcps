@@ -11,3 +11,5 @@ build/
 !**/fixtures/*.jsonl
 .idea/
 .vscode/
+
+CLAUDE.md

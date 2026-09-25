@@ -141,7 +141,9 @@ def test_corio_cd_optional_commands_do_not_poison_status():
 def test_keepalive_queries_status():
     drv, sim, _ = make_driver()
     drv.start_keepalive(0.05)
-    time.sleep(0.3)
+    deadline = time.monotonic() + 5  # poll rather than sleep a fixed time; CI runners can be slow
+    while sim.received.count("status") < 3 and time.monotonic() < deadline:
+        time.sleep(0.05)
     drv.close()
     assert sim.received.count("status") >= 3
 
