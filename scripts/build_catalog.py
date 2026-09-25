@@ -205,8 +205,8 @@ def main() -> None:
         text,
         "<!-- COUNTS:START -->",
         "<!-- COUNTS:END -->",
-        f"[![Servers](https://img.shields.io/badge/Servers-{len(servers)}-brightgreen.svg)](#-server-catalog) "
-        f"[![Tools](https://img.shields.io/badge/Tools-{n_tools}-blue.svg)](#-server-catalog)\n",
+        f"[![Servers](https://img.shields.io/badge/Servers-{len(servers)}-brightgreen.svg)](#-supported-instruments) "
+        f"[![Tools](https://img.shields.io/badge/Tools-{n_tools}-blue.svg)](#-supported-instruments)\n",
     )
     outputs[readme] = text
 

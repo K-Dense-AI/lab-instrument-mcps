@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         Thanks! Requests with a **link to the communication manual or SDK** get built first.
-        Please check the [catalog](https://github.com/K-Dense-AI/lab-instrument-mcps#-server-catalog) and [official servers list](https://github.com/K-Dense-AI/lab-instrument-mcps/blob/main/docs/official-servers.md) first.
+        Please check the [catalog](https://github.com/K-Dense-AI/lab-instrument-mcps#-supported-instruments) and [official servers list](https://github.com/K-Dense-AI/lab-instrument-mcps/blob/main/docs/official-servers.md) first.
   - type: input
     id: instrument
     attributes:
