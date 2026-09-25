@@ -1,0 +1,34 @@
+[project]
+name = "labmcp-bench-psu"
+version = "0.1.0"
+description = "MCP server for programmable DC bench power supplies (Rigol DP700/DP800/DP900, Siglent SPD3303X/SPD1000X, Aim-TTi CPX/MX/QL/PL-P): set, measure, switch outputs, OVP/OCP."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "K-Dense and LabMCP contributors" }]
+keywords = ["mcp", "lab-instrument", "power-supply", "scpi", "rigol", "siglent", "aim-tti", "visa"]
+dependencies = ["labmcp[visa]>=0.1,<0.2"]
+
+[project.scripts]
+labmcp-bench-psu = "labmcp_bench_psu.server:main"
+
+[project.urls]
+Homepage = "https://github.com/K-Dense-AI/lab-instrument-mcps/tree/main/servers/engineering/bench-power-supply"
+
+[tool.labmcp]
+name = "Bench DC Power Supply"
+domain = "engineering"
+category = "Power Supplies"
+vendor = "Rigol, Siglent, Aim-TTi"
+models = ["Rigol DP832/DP831/DP822/DP821/DP811/DP813", "Rigol DP711/DP712", "Rigol DP932A/U/E", "Siglent SPD3303X/X-E", "Siglent SPD1168X/SPD1305X", "Aim-TTi CPX400D/DP", "Aim-TTi MX100TP/MX180TP", "Aim-TTi QL355/QL564 (P/TP)", "Aim-TTi PL-P"]
+interfaces = ["USB (USB-TMC / virtual COM)", "LAN (VISA / raw socket)", "RS-232", "GPIB (via VISA)"]
+protocol = "SCPI (Rigol, Siglent) and Aim-TTi remote commands"
+summary = "Read setpoints and measured V/I/CV-CC per channel, set voltage and current limits, switch outputs on/off, set OVP/OCP, read errors."
+status = "simulated"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/labmcp_bench_psu"]

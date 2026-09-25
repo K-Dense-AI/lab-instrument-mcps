@@ -1,0 +1,34 @@
+[project]
+name = "labmcp-cavro"
+version = "0.1.0"
+description = "MCP server for Tecan Cavro syringe pumps (XLP 6000, XMP 6000, XCalibur) over the DT protocol: initialize, aspirate/dispense µL, switch valve ports, terminate."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "K-Dense and LabMCP contributors" }]
+keywords = ["mcp", "lab-instrument", "syringe-pump", "tecan", "cavro", "xcalibur", "xlp6000", "liquid-handling"]
+dependencies = ["labmcp>=0.1,<0.2"]
+
+[project.scripts]
+labmcp-cavro = "labmcp_cavro.server:main"
+
+[project.urls]
+Homepage = "https://github.com/K-Dense-AI/lab-instrument-mcps/tree/main/servers/biology/tecan-cavro-pump"
+
+[tool.labmcp]
+name = "Tecan Cavro Syringe Pump"
+domain = "biology"
+category = "Liquid handling"
+vendor = "Tecan"
+models = ["Cavro XLP 6000", "Cavro XMP 6000", "Cavro XCalibur"]
+interfaces = ["RS-232", "RS-485 (via adapter)", "Serial-to-Ethernet"]
+protocol = "Cavro Data Terminal (DT) protocol"
+summary = "Initialize, aspirate and dispense microlitre volumes at set flow rates, switch valve ports, read plunger/valve status, terminate moves."
+status = "simulated"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/labmcp_cavro"]

@@ -1,0 +1,159 @@
+# Example LabMCP register map: a generic single-loop PID temperature controller.
+#
+# This is an ILLUSTRATIVE layout, not any vendor's real map. It is what the
+# built-in simulator (`labmcp-modbus --simulate`) implements. Copy it and edit it
+# to match your controller's Modbus manual.
+#
+#   * address  = 0-based protocol (PDU) address. Manual says "40001"? -> holding address 0.
+#               "30001" -> input 0, "10001" -> discrete 0, "00001" -> coil 0.
+#   * table    = holding | input | coil | discrete
+#   * type     = uint16 | int16 | uint32 | int32 | float32 | float64 | bool
+#   * value    = raw * scale + offset   (in `unit`)
+#   * writable points MUST declare min/max (engineering units) or an enum;
+#     the server refuses anything outside them before sending.
+#   * safe_state = point writes run, in order, by the `apply_safe_state` tool.
+
+device:
+  name: Generic PID temperature controller (example)
+  manufacturer: LabMCP example
+  model: PID-100
+  unit_id: 1
+  word_order: big        # 32/64-bit values: most significant register first
+  byte_order: big        # standard Modbus byte order inside each register
+
+points:
+  # ---- measurements (input registers, function code 04)
+  process_temperature:
+    table: input
+    address: 0
+    type: int16
+    scale: 0.1
+    unit: °C
+    description: Measured process temperature (PV)
+  output_power:
+    table: input
+    address: 1
+    type: uint16
+    scale: 0.1
+    unit: "%"
+    description: Heater output power
+  process_temperature_precise:
+    table: input
+    address: 2
+    type: float32
+    unit: °C
+    description: Process temperature as an IEEE 754 float (registers 2-3)
+  uptime:
+    table: input
+    address: 4
+    type: uint32
+    unit: s
+    description: Seconds since the controller powered up (registers 4-5)
+  working_setpoint:
+    table: input
+    address: 6
+    type: int16
+    scale: 0.1
+    unit: °C
+    description: Setpoint currently used by the loop (follows the ramp)
+
+  # ---- settings (holding registers, function codes 03/06/16)
+  setpoint:
+    table: holding
+    address: 0
+    type: int16
+    scale: 0.1
+    unit: °C
+    writable: true
+    min: 0
+    max: 150            # lab limit; the controller itself accepts -50 to 400 °C
+    description: Target temperature (SP)
+  control_mode:
+    table: holding
+    address: 1
+    type: uint16
+    writable: true
+    enum: {0: standby, 1: auto, 2: manual}
+    description: standby = output off, auto = PID control, manual = fixed output power
+  manual_output:
+    table: holding
+    address: 2
+    type: uint16
+    scale: 0.1
+    unit: "%"
+    writable: true
+    min: 0
+    max: 50
+    description: Output power used in manual mode
+  ramp_rate:
+    table: holding
+    address: 3
+    type: uint16
+    scale: 0.1
+    unit: °C/min
+    writable: true
+    min: 0
+    max: 20
+    description: Setpoint ramp rate (0 = step changes)
+  proportional_band:
+    table: holding
+    address: 4
+    type: float32
+    unit: °C
+    writable: true
+    min: 0.5
+    max: 100
+    description: PID proportional band (registers 4-5)
+  integral_time:
+    table: holding
+    address: 6
+    type: float32
+    unit: s
+    writable: true
+    min: 0
+    max: 3600
+    description: PID integral time, 0 = off (registers 6-7)
+  derivative_time:
+    table: holding
+    address: 8
+    type: float32
+    unit: s
+    writable: true
+    min: 0
+    max: 600
+    description: PID derivative time (registers 8-9)
+  high_alarm:
+    table: holding
+    address: 10
+    type: int16
+    scale: 0.1
+    unit: °C
+    writable: true
+    min: 0
+    max: 200
+    description: High-temperature alarm threshold
+
+  # ---- switches (coils, function codes 01/05)
+  output_enable:
+    table: coil
+    address: 0
+    writable: true
+    description: Heater output enabled (run/stop)
+
+  # ---- status bits (discrete inputs, function code 02)
+  high_alarm_active:
+    table: discrete
+    address: 0
+    description: Process temperature is above high_alarm
+  sensor_fault:
+    table: discrete
+    address: 1
+    description: Temperature sensor open or shorted
+  at_setpoint:
+    table: discrete
+    address: 2
+    description: Process temperature within 0.5 °C of the working setpoint
+
+safe_state:
+  - {point: output_enable, value: false}
+  - {point: control_mode, value: standby}

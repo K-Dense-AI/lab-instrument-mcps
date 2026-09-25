@@ -1,0 +1,35 @@
+name: 🐛 Bug report
+description: A server misbehaves, crashes, or returns wrong data.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: "⚠️ If this is a **safety** issue (limit bypass, wrong command sent, read-only mode not enforced), report it privately instead: see SECURITY.md."
+  - type: input
+    id: server
+    attributes:
+      label: Server package and version
+    validations:
+      required: true
+  - type: input
+    id: instrument
+    attributes:
+      label: Instrument model / firmware (or "simulator")
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: MCP client and OS
+      placeholder: "Claude Desktop 1.x on Windows 11"
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Command log (`get_command_log`) / error output
+      render: text

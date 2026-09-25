@@ -1,0 +1,34 @@
+[project]
+name = "labmcp-labjack"
+version = "0.1.0"
+description = "MCP server for LabJack T4, T7/T7-Pro and T8 DAQ devices (LJM): analog inputs, streaming, thermocouples, DACs and digital I/O with safety limits."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "K-Dense and LabMCP contributors" }]
+keywords = ["mcp", "lab-instrument", "daq", "labjack", "ljm", "data-acquisition", "t7", "t4", "t8"]
+dependencies = ["labmcp>=0.1,<0.2", "labjack-ljm>=1.21"]
+
+[project.scripts]
+labmcp-labjack = "labmcp_labjack.server:main"
+
+[project.urls]
+Homepage = "https://github.com/K-Dense-AI/lab-instrument-mcps/tree/main/servers/engineering/labjack"
+
+[tool.labmcp]
+name = "LabJack T-series DAQ"
+domain = "engineering"
+category = "Data acquisition"
+vendor = "LabJack"
+models = ["T4", "T7", "T7-Pro", "T8"]
+interfaces = ["USB", "Ethernet", "WiFi (T7-Pro)"]
+protocol = "LJM library (Modbus TCP register map)"
+summary = "Read analog inputs, stream waveforms, read thermocouples and the device temperature, read/set digital I/O and set DACs, with voltage and stream limits."
+status = "simulated"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/labmcp_labjack"]

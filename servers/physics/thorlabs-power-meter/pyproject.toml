@@ -1,0 +1,34 @@
+[project]
+name = "labmcp-thorlabs-pm"
+version = "0.1.0"
+description = "MCP server for Thorlabs optical power meters (PM100D/PM100A/PM100USB/PM400/PM101/PM5020, SCPI over USBTMC/VISA): read power, log stability, set wavelength, averaging, range, zero."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "K-Dense and LabMCP contributors" }]
+keywords = ["mcp", "lab-instrument", "power-meter", "thorlabs", "pm100d", "pm100usb", "pm400", "laser", "optics", "scpi"]
+dependencies = ["labmcp[visa]>=0.1,<0.2"]
+
+[project.scripts]
+labmcp-thorlabs-pm = "labmcp_thorlabs_pm.server:main"
+
+[project.urls]
+Homepage = "https://github.com/K-Dense-AI/lab-instrument-mcps/tree/main/servers/physics/thorlabs-power-meter"
+
+[tool.labmcp]
+name = "Thorlabs Optical Power Meter"
+domain = "physics"
+category = "Optical power meters"
+vendor = "Thorlabs"
+models = ["PM100D", "PM100A", "PM100USB", "PM400", "PM101 (unverified)", "PM5020 (unverified)"]
+interfaces = ["USB (USBTMC / VISA)"]
+protocol = "SCPI (Thorlabs PM100 / PM400 command set)"
+summary = "Read optical power (W and dBm), log power stability series, set wavelength correction, averaging and range, dark-zero the sensor, read sensor head temperature."
+status = "simulated"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/labmcp_thorlabs_pm"]

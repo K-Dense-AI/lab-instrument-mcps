@@ -1,0 +1,34 @@
+[project]
+name = "labmcp-ocean-spectrometer"
+version = "0.1.0"
+description = "MCP server for Ocean Insight / Ocean Optics spectrometers (python-seabreeze): acquire spectra, auto integration time, dark/reference, absorbance and transmittance, peak finding."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "K-Dense and LabMCP contributors" }]
+keywords = ["mcp", "lab-instrument", "spectrometer", "ocean-insight", "ocean-optics", "seabreeze", "uv-vis", "absorbance", "spectroscopy"]
+dependencies = ["labmcp>=0.1,<0.2", "numpy>=1.21", "seabreeze[pyseabreeze]>=2.9"]
+
+[project.scripts]
+labmcp-ocean-spectrometer = "labmcp_ocean_spectrometer.server:main"
+
+[project.urls]
+Homepage = "https://github.com/K-Dense-AI/lab-instrument-mcps/tree/main/servers/chemistry/ocean-spectrometer"
+
+[tool.labmcp]
+name = "Ocean Insight Spectrometer"
+domain = "chemistry"
+category = "Spectroscopy"
+vendor = "Ocean Insight (Ocean Optics)"
+models = ["USB2000+", "USB2000", "USB4000", "USB650", "Flame-S", "Flame-NIR", "Flame-X", "HR2000/HR2000+", "HR4000", "Maya2000/Maya2000 Pro/Maya LSL", "QE65000", "QE Pro", "STS", "NIRQuest256/512", "Jaz", "Torus", "Spark", "Apex", "Ventana", "HDX", "ADC1000-USB", "HR2/HR4/HR6", "SR2/SR4/SR6", "ST-VIS"]
+interfaces = ["USB"]
+protocol = "python-seabreeze (SeaBreeze / OOI and OBP protocols)"
+summary = "Acquire averaged/smoothed spectra with saturation checks, auto integration time, dark and reference storage, absorbance and transmittance spectra, peak positions with FWHM, detector TEC (QE Pro)."
+status = "simulated"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/labmcp_ocean_spectrometer"]

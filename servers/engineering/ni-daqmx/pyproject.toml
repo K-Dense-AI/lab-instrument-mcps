@@ -1,0 +1,34 @@
+[project]
+name = "labmcp-ni-daqmx"
+version = "0.1.0"
+description = "MCP server for National Instruments DAQ devices (NI-DAQmx): analog/thermocouple acquisition, digital I/O and analog outputs with safety limits."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "K-Dense and LabMCP contributors" }]
+keywords = ["mcp", "lab-instrument", "daq", "national-instruments", "ni-daqmx", "nidaqmx", "data-acquisition"]
+dependencies = ["labmcp>=0.1,<0.2", "nidaqmx>=0.9"]
+
+[project.scripts]
+labmcp-ni-daqmx = "labmcp_ni_daqmx.server:main"
+
+[project.urls]
+Homepage = "https://github.com/K-Dense-AI/lab-instrument-mcps/tree/main/servers/engineering/ni-daqmx"
+
+[tool.labmcp]
+name = "NI-DAQmx DAQ Devices"
+domain = "engineering"
+category = "Data acquisition"
+vendor = "National Instruments (NI)"
+models = ["USB-6001/6002/6003", "USB-6008/6009", "USB-621x", "USB/PCIe-63xx (M/X series)", "CompactDAQ C Series modules", "NI MAX simulated devices"]
+interfaces = ["USB", "PCI/PCIe", "PXI", "Ethernet (cDAQ)"]
+protocol = "NI-DAQmx driver via the nidaqmx Python API"
+summary = "List devices, acquire finite analog voltage and thermocouple data, read/write digital lines and set analog outputs, with voltage, rate and sample limits."
+status = "simulated"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/labmcp_ni_daqmx"]

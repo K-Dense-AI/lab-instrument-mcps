@@ -1,0 +1,42 @@
+[project]
+name = "labmcp-modbus"
+version = "0.1.0"
+description = "MCP server for Modbus TCP and Modbus RTU devices (temperature controllers, chillers, PLCs, sensors, VFDs) with typed, scaled register maps, per-point limits and a safe state."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "K-Dense and LabMCP contributors" }]
+keywords = ["mcp", "lab-instrument", "modbus", "modbus-tcp", "modbus-rtu", "rs-485", "temperature-controller", "plc", "chiller"]
+dependencies = ["labmcp>=0.1,<0.2", "pymodbus>=3.8,<4", "pyyaml>=6"]
+
+[project.scripts]
+labmcp-modbus = "labmcp_modbus.server:main"
+
+[project.urls]
+Homepage = "https://github.com/K-Dense-AI/lab-instrument-mcps/tree/main/servers/protocols/modbus"
+
+[tool.labmcp]
+name = "Modbus TCP/RTU Device"
+domain = "protocols"
+category = "Industrial I/O & Process Control"
+vendor = "Any (Modbus)"
+models = [
+    "PID temperature controllers (e.g. Watlow, Eurotherm, Omega, Autonics)",
+    "Recirculating chillers and thermostats",
+    "PLCs and remote I/O",
+    "Process sensors and transmitters",
+    "Variable-frequency drives",
+    "Data loggers and power meters",
+    "Any other Modbus TCP / RTU / ASCII device",
+]
+interfaces = ["Ethernet (Modbus TCP)", "RS-485 / RS-232 (Modbus RTU, ASCII)", "Serial-to-Ethernet gateways"]
+protocol = "Modbus Application Protocol V1.1b3 (TCP, RTU, ASCII)"
+summary = "Read and write named, typed, scaled points from a YAML/JSON register map with per-point min/max, raw register/coil access, and a map-defined safe state."
+status = "simulated"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/labmcp_modbus"]

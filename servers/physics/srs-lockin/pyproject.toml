@@ -1,0 +1,34 @@
+[project]
+name = "labmcp-srs-lockin"
+version = "0.1.0"
+description = "MCP server for Stanford Research Systems lock-in amplifiers (SR810/SR830, SR860/SR865A): read X/Y/R/θ, set reference, sensitivity and time constant, frequency sweeps."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "K-Dense and LabMCP contributors" }]
+keywords = ["mcp", "lab-instrument", "lock-in-amplifier", "stanford-research-systems", "sr830", "sr860", "physics"]
+dependencies = ["labmcp[visa]>=0.1,<0.2"]
+
+[project.scripts]
+labmcp-srs-lockin = "labmcp_srs_lockin.server:main"
+
+[project.urls]
+Homepage = "https://github.com/K-Dense-AI/lab-instrument-mcps/tree/main/servers/physics/srs-lockin"
+
+[tool.labmcp]
+name = "SRS Lock-in Amplifier"
+domain = "physics"
+category = "Lock-in amplifiers"
+vendor = "Stanford Research Systems"
+models = ["SR830", "SR810", "SR860", "SR865A"]
+interfaces = ["GPIB", "RS-232", "USB (USBTMC)", "Ethernet (VXI-11)"]
+protocol = "SRS remote command set (IEEE-488.2 style ASCII)"
+summary = "Read X/Y/R/θ snapshots, set reference frequency/harmonic/phase, sine amplitude, sensitivity, time constant, auto phase/gain/range, bounded frequency sweeps."
+status = "simulated"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/labmcp_srs_lockin"]

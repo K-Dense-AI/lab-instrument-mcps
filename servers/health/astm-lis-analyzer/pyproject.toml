@@ -1,0 +1,40 @@
+[project]
+name = "labmcp-astm-lis"
+version = "0.1.0"
+description = "MCP server that receives results from clinical/lab analyzers over ASTM E1381/E1394 (CLSI LIS1/LIS2): serial, TCP client or TCP listener."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "K-Dense and LabMCP contributors" }]
+keywords = ["mcp", "lab-instrument", "astm", "e1381", "e1394", "lis", "lis2-a2", "analyzer", "hematology", "chemistry", "research"]
+dependencies = ["labmcp>=0.1,<0.2"]
+
+[project.scripts]
+labmcp-astm-lis = "labmcp_astm_lis.server:main"
+
+[project.urls]
+Homepage = "https://github.com/K-Dense-AI/lab-instrument-mcps/tree/main/servers/health/astm-lis-analyzer"
+
+[tool.labmcp]
+name = "ASTM LIS Analyzer Receiver"
+domain = "health"
+category = "Clinical / lab analyzers"
+vendor = "Any (ASTM E1381/E1394, CLSI LIS1-A/LIS2-A2)"
+models = [
+    "Hematology analyzers",
+    "Clinical chemistry analyzers",
+    "Immunoassay analyzers",
+    "Urinalysis and coagulation analyzers",
+    "e.g. Sysmex, Roche cobas, Abbott, Beckman Coulter, Mindray models with an ASTM host interface",
+]
+interfaces = ["RS-232", "TCP/IP (client)", "TCP/IP (listener)"]
+protocol = "ASTM E1381 / CLSI LIS1-A low-level protocol + ASTM E1394 / CLSI LIS2-A2 records (receive-only)"
+summary = "Receive-only LIS: ACK/NAK frames with checksum validation, reassemble messages, and query results by sample, patient, test or time. Patient name/DOB redacted by default. Research use only."
+status = "simulated"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/labmcp_astm_lis"]

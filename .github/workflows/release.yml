@@ -1,0 +1,51 @@
+name: Release
+
+# Tag a package to publish it, e.g.
+#   git tag labmcp-mettler-toledo-v0.1.0 && git push --tags
+#   git tag labmcp-v0.1.0               && git push --tags   (core library)
+on:
+  push:
+    tags: ["labmcp-v*", "labmcp-*-v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # PyPI trusted publishing + MCP Registry GitHub OIDC
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Resolve package from tag
+        id: pkg
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          PACKAGE="${TAG%-v*}"
+          VERSION="${TAG##*-v}"
+          if [ "$PACKAGE" = "labmcp" ]; then DIR="packages/labmcp"; else
+            DIR=$(grep -l "^name = \"$PACKAGE\"" servers/*/*/pyproject.toml | xargs dirname)
+          fi
+          test -n "$DIR" || { echo "No package named $PACKAGE"; exit 1; }
+          grep -q "^version = \"$VERSION\"" "$DIR/pyproject.toml" || { echo "Tag version $VERSION != pyproject version"; exit 1; }
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+          echo "package=$PACKAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        run: |
+          uv sync --all-packages --python 3.12
+          uv run pytest ${{ steps.pkg.outputs.dir }}
+
+      - name: Build
+        run: uv build --package ${{ steps.pkg.outputs.package }} --out-dir dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Publish to the MCP Registry
+        if: steps.pkg.outputs.package != 'labmcp'
+        run: |
+          curl -sL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+          ./mcp-publisher login github-oidc
+          cd ${{ steps.pkg.outputs.dir }} && ../../../mcp-publisher publish

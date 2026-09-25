@@ -1,0 +1,34 @@
+[project]
+name = "labmcp-alicat"
+version = "0.1.0"
+description = "MCP server for Alicat mass flow and pressure meters/controllers: read flow, set setpoints, select gas, tare, hold/close valves."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "K-Dense and LabMCP contributors" }]
+keywords = ["mcp", "lab-instrument", "alicat", "mass-flow-controller", "mfc", "pressure-controller", "gas-flow"]
+dependencies = ["labmcp>=0.1,<0.2"]
+
+[project.scripts]
+labmcp-alicat = "labmcp_alicat.server:main"
+
+[project.urls]
+Homepage = "https://github.com/K-Dense-AI/lab-instrument-mcps/tree/main/servers/engineering/alicat-flow-controller"
+
+[tool.labmcp]
+name = "Alicat Mass Flow & Pressure Controller"
+domain = "engineering"
+category = "Gas Flow & Pressure Control"
+vendor = "Alicat Scientific"
+models = ["MC/MCR/MCS/MCE/MCV/MCW mass flow controllers", "M/MS/MW mass flow meters", "PC/PCD pressure controllers", "P pressure gauges", "L/LC liquid flow devices"]
+interfaces = ["RS-232", "RS-485", "USB (virtual COM)", "Ethernet (serial bridge)"]
+protocol = "Alicat ASCII serial (Serial Communications Primer)"
+summary = "Read mass/volumetric flow, pressure and temperature, set setpoints, select gases, tare, hold or close valves, log flow series."
+status = "simulated"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/labmcp_alicat"]

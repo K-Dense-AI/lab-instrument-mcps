@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --all-packages --python 3.12
+      - run: uv run ruff check .
+      - name: Catalog and generated docs are up to date
+        run: uv run python scripts/build_catalog.py --check
+
+  test:
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.10", "3.12", "3.13"]
+        include:
+          - os: macos-latest
+            python: "3.12"
+          - os: windows-latest
+            python: "3.12"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --all-packages --python ${{ matrix.python }}
+      - run: uv run pytest
+      - name: Every server starts in simulation mode
+        shell: bash
+        run: |
+          for cmd in $(uv run python -c "import json;print(' '.join(s['command'] for s in json.load(open('catalog.json'))['servers']))"); do
+            echo "::group::$cmd"; uv run "$cmd" --simulate --check > /dev/null || exit 1; echo "::endgroup::"
+          done

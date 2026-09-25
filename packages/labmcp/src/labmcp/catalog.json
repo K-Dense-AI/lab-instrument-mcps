@@ -1,0 +1,2643 @@
+{
+  "schema": 1,
+  "repository": "https://github.com/K-Dense-AI/lab-instrument-mcps",
+  "servers": [
+    {
+      "name": "Atlas Scientific EZO Sensors",
+      "domain": "biology",
+      "category": "Water Quality & Bioprocess Sensors",
+      "vendor": "Atlas Scientific",
+      "models": [
+        "EZO-pH",
+        "EZO-ORP",
+        "EZO-DO",
+        "EZO-EC",
+        "EZO-RTD",
+        "EZO-HUM",
+        "EZO-CO2",
+        "EZO-PRS"
+      ],
+      "interfaces": [
+        "UART (USB-serial adapter)",
+        "Ethernet (serial bridge)"
+      ],
+      "protocol": "Atlas Scientific EZO UART command set",
+      "summary": "Read pH, ORP, dissolved oxygen, conductivity/TDS/salinity, temperature, humidity, CO2 or pressure; calibrate, set temperature compensation, log series.",
+      "status": "simulated",
+      "package": "labmcp-atlas-ezo",
+      "version": "0.1.0",
+      "description": "MCP server for Atlas Scientific EZO sensor circuits (pH, ORP, DO, EC, RTD, HUM, CO2, PRS) over UART: read, calibrate, compensate, log.",
+      "command": "labmcp-atlas-ezo",
+      "module": "labmcp_atlas_ezo.server",
+      "path": "servers/biology/atlas-ezo-sensors",
+      "extras": {},
+      "tools": [
+        {
+          "name": "calibrate",
+          "kind": "control",
+          "description": "Store one calibration point. The probe must already be in the named standard (buffer, air, dry, ...) with a stable reading. Point names are validated per circuit type. pH: a `mid` calibration erases existing low/high points, so always do mid first. EC: do `dry` first."
+        },
+        {
+          "name": "clear_calibration",
+          "kind": "control",
+          "description": "Delete all stored calibration data (Cal,clear). pH/ORP/DO/EC/RTD return to uncalibrated; CO2/PRS return to their factory calibration. The probe must be recalibrated afterwards."
+        },
+        {
+          "name": "get_calibration_status",
+          "kind": "read",
+          "description": "Report how many calibration points are stored and what that means for this circuit type; for pH also the probe slope (acid/base % of ideal and zero offset in mV)."
+        },
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_info",
+          "kind": "read",
+          "description": "Report the circuit type, firmware, device name, supply voltage and last restart reason, LED state, calibration state, temperature compensation and type-specific settings (enabled outputs, EC probe constant K, DO salinity/pressure compensation)."
+        },
+        {
+          "name": "log_series",
+          "kind": "read",
+          "description": "Record a series of readings (e.g. to watch a probe stabilise before calibrating, follow pH or DO in a bioreactor, or log temperature). Returns every point plus mean, stdev, min, max and drift per minute for each output."
+        },
+        {
+          "name": "read_value",
+          "kind": "read",
+          "description": "Take one reading (about 1 s) and return every enabled output with its unit: pH; ORP in mV; DO in mg/L (and % saturation if enabled); EC in µS/cm plus TDS (ppm), salinity (PSU) and specific gravity if enabled; RTD temperature; humidity %RH (+ air temperature, dew point); CO2 ppm; or pressure."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "set_do_compensation",
+          "kind": "control",
+          "description": "DO circuits only: set salinity compensation (irrelevant below ~2500 µS/cm) and/or atmospheric pressure compensation (default 101.3 kPa; lower at altitude). Neither is retained through a power cycle."
+        },
+        {
+          "name": "set_led",
+          "kind": "control",
+          "description": "Turn the circuit's status LED on or off. Returns the new LED state."
+        },
+        {
+          "name": "set_probe_constant",
+          "kind": "control",
+          "description": "EC circuits only: set the conductivity probe's cell constant K to match the probe (printed on it). Recalibrate after changing it. Returns the K now in use."
+        },
+        {
+          "name": "set_temperature_compensation",
+          "kind": "control",
+          "description": "Set the sample temperature used to compensate pH, EC or DO readings (T,n; always °C). Not retained through a power cycle. Returns the value the circuit now uses."
+        }
+      ]
+    },
+    {
+      "name": "Micro-Manager Microscope",
+      "domain": "biology",
+      "category": "Microscopy",
+      "vendor": "Micro-Manager (open source; hundreds of camera, stage, filter and light-source vendors)",
+      "models": [
+        "Any microscope with a Micro-Manager hardware configuration (.cfg)",
+        "Micro-Manager demo configuration"
+      ],
+      "interfaces": [
+        "USB",
+        "Serial",
+        "Camera Link / CoaXPress / GigE (through Micro-Manager device adapters)"
+      ],
+      "protocol": "Micro-Manager MMCore API via pymmcore-plus",
+      "summary": "Snap images (stats + preview + TIFF), z-stacks and time-lapses, move XY/Z within step and soft limits, channel/objective presets, exposure, shutter, autofocus.",
+      "status": "simulated",
+      "package": "labmcp-micro-manager",
+      "version": "0.1.0",
+      "description": "MCP server for microscopes controlled by Micro-Manager (pymmcore-plus): snap images, z-stacks and time-lapses, move stages safely, switch channels and objectives, autofocus.",
+      "command": "labmcp-micro-manager",
+      "module": "labmcp_micro_manager.server",
+      "path": "servers/biology/micro-manager",
+      "extras": {},
+      "tools": [
+        {
+          "name": "acquire_time_lapse",
+          "kind": "hazard",
+          "description": "Acquire a time-lapse at the current position: images every `interval_s` (optionally several channels per timepoint), saves a multi-page TIFF and reports per-frame statistics and the intensity change (bleaching). Bounded by `max_frames` and `max_acquisition_duration_s`; `stop_stage` aborts it."
+        },
+        {
+          "name": "acquire_z_stack",
+          "kind": "hazard",
+          "description": "Acquire a z-stack around the current focus: moves Z through the slices (optionally imaging several channels at each), saves a multi-page TIFF, reports per-slice statistics and the sharpest slice, and returns Z to where it started. Every slice must stay within `max_z_step_um` of the start and the Z soft limits."
+        },
+        {
+          "name": "autofocus",
+          "kind": "hazard",
+          "description": "Run the configured autofocus device (e.g. a hardware focus lock) once; it moves the focus drive. If the result is outside the Z step or soft limits, the focus is moved back and an error is raised."
+        },
+        {
+          "name": "close_shutter",
+          "kind": "safety",
+          "description": "Close the shutter (stop illuminating the sample) and abort any running acquisition."
+        },
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_exposure",
+          "kind": "read",
+          "description": "Return the camera exposure time in milliseconds."
+        },
+        {
+          "name": "get_position",
+          "kind": "read",
+          "description": "Read the XY stage and focus (Z) positions in micrometres, and which way increasing Z moves the objective."
+        },
+        {
+          "name": "get_system_info",
+          "kind": "read",
+          "description": "Describe the microscope: loaded devices (camera, stages, shutters, filter wheels...), which device has which role, camera size/bit depth/exposure, pixel size, config groups with their presets, the current position, and the soft limits. Call this first."
+        },
+        {
+          "name": "list_config_groups",
+          "kind": "read",
+          "description": "List Micro-Manager config groups (e.g. Channel, Objective) with their presets and the preset currently active."
+        },
+        {
+          "name": "move_stage_xy",
+          "kind": "hazard",
+          "description": "Move the XY stage. Moves longer than `max_xy_step_um` or outside the XY soft limits are refused before anything moves. Make sure the objective and condenser clear the sample holder."
+        },
+        {
+          "name": "move_z",
+          "kind": "hazard",
+          "description": "Move the focus drive (Z). Moving the objective toward the sample can crash it into the slide: moves larger than `max_z_step_um` or outside the Z soft limits are refused before anything moves."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "set_config",
+          "kind": "control",
+          "description": "Apply a config-group preset (e.g. switch the channel: filter cube, light source, emission filter). Objective/turret groups are refused here: use `set_objective`."
+        },
+        {
+          "name": "set_exposure",
+          "kind": "control",
+          "description": "Set the camera exposure time (ms). Longer exposures give brighter images but more photobleaching. Returns the exposure the camera accepted."
+        },
+        {
+          "name": "set_objective",
+          "kind": "hazard",
+          "description": "Switch the objective (rotates the nosepiece/turret). A longer or immersion objective can hit the sample holder or need oil/water: confirm with the user first. Pixel size changes with the objective."
+        },
+        {
+          "name": "set_shutter",
+          "kind": "control",
+          "description": "Open or close the current shutter, and optionally switch auto-shutter. An open shutter illuminates (and bleaches) the sample until it is closed again."
+        },
+        {
+          "name": "snap_image",
+          "kind": "control",
+          "description": "Acquire one image with the current channel, exposure and position. The sample is illuminated during the exposure. Saves the full image as TIFF and returns summary statistics (min/max/mean, saturation, sharpness) plus an optional contrast-stretched preview."
+        },
+        {
+          "name": "stop_stage",
+          "kind": "safety",
+          "description": "Immediately stop XY and Z stage motion and abort any z-stack or time-lapse in progress."
+        }
+      ]
+    },
+    {
+      "name": "New Era Syringe Pump",
+      "domain": "biology",
+      "category": "Liquid handling",
+      "vendor": "New Era Pump Systems",
+      "models": [
+        "NE-1000",
+        "NE-1002X",
+        "NE-1010",
+        "NE-4000",
+        "NE-500 OEM",
+        "NE-8000",
+        "other NE-1000-series pumps with RS-232"
+      ],
+      "interfaces": [
+        "RS-232",
+        "USB (RS-232 adapter)",
+        "Serial-to-Ethernet"
+      ],
+      "protocol": "New Era RS-232 Basic mode",
+      "summary": "Set the syringe (presets or diameter), infuse or withdraw an exact volume at a set rate, track dispensed volume, stop.",
+      "status": "simulated",
+      "package": "labmcp-new-era",
+      "version": "0.1.0",
+      "description": "MCP server for New Era Pump Systems syringe pumps (NE-1000 family, RS-232): set syringe, infuse/withdraw volumes, monitor, stop.",
+      "command": "labmcp-new-era",
+      "module": "labmcp_new_era.server",
+      "path": "servers/biology/new-era-syringe-pump",
+      "extras": {},
+      "tools": [
+        {
+          "name": "clear_dispensed_volume",
+          "kind": "control",
+          "description": "Reset the infused and withdrawn volume accumulators to zero. Only possible while stopped."
+        },
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_dispensed_volume",
+          "kind": "read",
+          "description": "Return the accumulated infused and withdrawn volumes (pump command DIS)."
+        },
+        {
+          "name": "get_status",
+          "kind": "read",
+          "description": "Report what the pump is doing (infusing/withdrawing/stopped/paused, alarms), the syringe diameter, rate, target volume, direction and the accumulated dispensed volumes."
+        },
+        {
+          "name": "infuse",
+          "kind": "hazard",
+          "description": "Push `volume_ml` out of the syringe at `rate_ml_min`, then stop. Returns as soon as pumping has started, with the estimated duration. Requires the correct syringe diameter (`set_syringe`) and a stopped pump. Overwrites phases 1-2 of the pump's stored Pumping Program."
+        },
+        {
+          "name": "list_syringe_presets",
+          "kind": "read",
+          "description": "List the syringe inside diameters from the New Era manual's reference table (BD, Monoject, Terumo, HSW Norm-Ject, Poulten & Graf glass, stainless steel, SGE, Hamilton), with the NE-1000 rate range each allows. Use a name with `set_syringe`."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "set_syringe",
+          "kind": "control",
+          "description": "Set the syringe inside diameter, either from a preset or a measured value. The pump must be stopped. Changing the diameter also resets the dispensed-volume accumulators and may switch the pump's volume units (µL below 14.0 mm, mL above)."
+        },
+        {
+          "name": "stop_pump",
+          "kind": "safety",
+          "description": "Stop the pump immediately (STP). A paused program is also cancelled so it cannot resume."
+        },
+        {
+          "name": "withdraw",
+          "kind": "hazard",
+          "description": "Pull `volume_ml` into the syringe at `rate_ml_min`, then stop. Returns as soon as pumping has started. Make sure the syringe has room for the volume. Overwrites phases 1-2 of the pump's stored Pumping Program."
+        }
+      ]
+    },
+    {
+      "name": "Opentrons OT-2 / Flex",
+      "domain": "biology",
+      "category": "Liquid handling",
+      "vendor": "Opentrons",
+      "models": [
+        "Flex",
+        "OT-2"
+      ],
+      "interfaces": [
+        "Ethernet",
+        "Wi-Fi",
+        "USB (network over USB)"
+      ],
+      "protocol": "Opentrons robot-server HTTP API (port 31950)",
+      "summary": "Upload and analyze protocols, review deck layout, start/pause/stop/resume runs, track progress, home, lights, read pipettes and modules, switch modules off.",
+      "status": "simulated",
+      "package": "labmcp-opentrons",
+      "version": "0.1.0",
+      "description": "MCP server for Opentrons OT-2 and Flex liquid-handling robots (HTTP API): upload and analyze protocols, start, pause and stop runs, monitor progress, modules and pipettes.",
+      "command": "labmcp-opentrons",
+      "module": "labmcp_opentrons.server",
+      "path": "servers/biology/opentrons",
+      "extras": {},
+      "tools": [
+        {
+          "name": "deactivate_modules",
+          "kind": "safety",
+          "description": "Switch attached modules off: stop heating/cooling (Temperature Module, Thermocycler block and lid, Heater-Shaker heater), stop shaking, and lower Magnetic Module magnets. Only possible when no run is in progress: stop the run first."
+        },
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_protocol",
+          "kind": "read",
+          "description": "Show a stored protocol's analysis: whether it is ready to run, analysis errors, the deck layout it expects (labware and modules per slot, pipettes per mount, liquids), the number of steps and the highest module temperature / shake speed it requests. Review this with the user before start_run."
+        },
+        {
+          "name": "get_robot_status",
+          "kind": "read",
+          "description": "Report the robot's name, model (Flex/OT-2), software and firmware versions, lights, door and E-stop state, and the current run. Call this first to check the robot is ready."
+        },
+        {
+          "name": "get_run_status",
+          "kind": "read",
+          "description": "Report a run's status, the step it is on, progress, recent steps and any errors, plus advice on what to do next (e.g. when the run is waiting for error recovery)."
+        },
+        {
+          "name": "home_robot",
+          "kind": "hazard",
+          "description": "Home all axes of the robot (the gantry and pipettes move to their home positions). Refused while a run is active. Make sure nothing is in the robot's path and the door is closed."
+        },
+        {
+          "name": "list_instruments",
+          "kind": "read",
+          "description": "List attached pipettes (and the Flex gripper): mount, name, channels, volume range, and whether a tip is detected and calibration data exists."
+        },
+        {
+          "name": "list_modules",
+          "kind": "read",
+          "description": "List attached modules (Temperature Module, Heater-Shaker, Thermocycler, Magnetic Module, Absorbance Plate Reader, ...) with live temperatures, targets, shake speed and status."
+        },
+        {
+          "name": "list_protocols",
+          "kind": "read",
+          "description": "List protocols stored on the robot (newest last) with their analysis status and result."
+        },
+        {
+          "name": "list_runs",
+          "kind": "read",
+          "description": "List recent protocol runs, newest first, with their status."
+        },
+        {
+          "name": "pause_run",
+          "kind": "safety",
+          "description": "Pause a running protocol. The robot finishes its current step and then holds; resume_run continues it."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "resume_run",
+          "kind": "hazard",
+          "description": "Resume a paused run (the robot starts moving again), or leave error recovery. Refused while the door is open. For a run awaiting recovery, `error_recovery` must be given."
+        },
+        {
+          "name": "set_lights",
+          "kind": "control",
+          "description": "Turn the robot's deck (rail) lights on or off."
+        },
+        {
+          "name": "start_run",
+          "kind": "hazard",
+          "description": "Create a run of an analyzed protocol and start it: the robot begins moving and pipetting. Refused unless the protocol's analysis completed without errors, its module setpoints are within the safety limits, no other run is active, the door is closed and the E-stop is released."
+        },
+        {
+          "name": "stop_run",
+          "kind": "safety",
+          "description": "Stop (cancel) a run immediately. A stopped run cannot be resumed; the robot homes and drops any attached tips into the trash. Use this whenever something looks wrong."
+        },
+        {
+          "name": "upload_protocol",
+          "kind": "control",
+          "description": "Upload a protocol file (plus optional custom labware) to the robot. The robot analyzes it (simulates it) and this tool returns the analysis: errors, deck layout and whether it is ready to run. Uploading does not move the robot. Uploading identical files returns the existing protocol."
+        }
+      ]
+    },
+    {
+      "name": "Tecan Cavro Syringe Pump",
+      "domain": "biology",
+      "category": "Liquid handling",
+      "vendor": "Tecan",
+      "models": [
+        "Cavro XLP 6000",
+        "Cavro XMP 6000",
+        "Cavro XCalibur"
+      ],
+      "interfaces": [
+        "RS-232",
+        "RS-485 (via adapter)",
+        "Serial-to-Ethernet"
+      ],
+      "protocol": "Cavro Data Terminal (DT) protocol",
+      "summary": "Initialize, aspirate and dispense microlitre volumes at set flow rates, switch valve ports, read plunger/valve status, terminate moves.",
+      "status": "simulated",
+      "package": "labmcp-cavro",
+      "version": "0.1.0",
+      "description": "MCP server for Tecan Cavro syringe pumps (XLP 6000, XMP 6000, XCalibur) over the DT protocol: initialize, aspirate/dispense µL, switch valve ports, terminate.",
+      "command": "labmcp-cavro",
+      "module": "labmcp_cavro.server",
+      "path": "servers/biology/tecan-cavro-pump",
+      "extras": {},
+      "tools": [
+        {
+          "name": "aspirate_ul",
+          "kind": "hazard",
+          "description": "Draw `volume_ul` into the syringe at `flow_ul_s` through the current (or given) valve port, and wait until the move has finished. The pump must be initialized and have room for the volume."
+        },
+        {
+          "name": "dispense_ul",
+          "kind": "hazard",
+          "description": "Push `volume_ul` out of the syringe at `flow_ul_s` through the current (or given) valve port, and wait until the move has finished. The syringe must contain at least that volume."
+        },
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_status",
+          "kind": "read",
+          "description": "Report whether the pump is ready or busy, any error (decoded), the plunger position as the volume in the syringe, the valve position, resolution mode and current top speed."
+        },
+        {
+          "name": "initialize",
+          "kind": "hazard",
+          "description": "Initialize the pump: drive the plunger to the top of the syringe (expelling its contents through the valve), set that as position 0 and home the valve. Needed after power-up, a plunger overload or `terminate`. Route the valve output to waste first. Takes a few seconds."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "set_valve",
+          "kind": "hazard",
+          "description": "Turn the valve to a named position (3/4-port valves) or to a numbered port (distribution valves). In bypass the plunger cannot move. Returns the new status."
+        },
+        {
+          "name": "terminate",
+          "kind": "safety",
+          "description": "Stop any plunger move, loop or delay immediately (DT command T). A valve move in progress still completes. Re-initialize afterwards: the plunger may have lost steps."
+        }
+      ]
+    },
+    {
+      "name": "IKA Hotplate & Overhead Stirrer",
+      "domain": "chemistry",
+      "category": "Heating & stirring",
+      "vendor": "IKA",
+      "models": [
+        "C-MAG HS 7 control",
+        "IKA Plate (RCT digital)",
+        "EUROSTAR 60 control",
+        "EUROSTAR 100 control"
+      ],
+      "interfaces": [
+        "RS-232",
+        "USB (virtual COM)"
+      ],
+      "protocol": "IKA NAMUR command set",
+      "summary": "Read plate/probe temperature and speed, set and start heating and stirring, hardware watchdog, wait for temperature, stop all.",
+      "status": "simulated",
+      "package": "labmcp-ika",
+      "version": "0.1.0",
+      "description": "MCP server for IKA hotplate stirrers and overhead stirrers (NAMUR commands): heat, stir, watchdog, wait for temperature.",
+      "command": "labmcp-ika",
+      "module": "labmcp_ika.server",
+      "path": "servers/chemistry/ika-stirrer",
+      "extras": {},
+      "tools": [
+        {
+          "name": "disable_watchdog",
+          "kind": "control",
+          "description": "Cancel watchdog mode 2 (OUT_WD2@0) and stop the background refresh. Watchdog mode 1 has no cancel command; this tool reports an error for it."
+        },
+        {
+          "name": "enable_watchdog",
+          "kind": "control",
+          "description": "Arm the hotplate's communication watchdog (OUT_WD1@m / OUT_WD2@m). The server then re-sends the watchdog command in the background; if the computer, this server or the cable fails, the hotplate switches heating and stirring off (mode 1) or falls back to the given safety values (mode 2) after `timeout_s`. Note: stopping or reconnecting the server also stops the refresh, so the watchdog trips unless you enable it again. Mode 1 cannot be cancelled over the interface."
+        },
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_status",
+          "kind": "read",
+          "description": "Read temperatures, stirring speed and setpoints. On hotplates: plate and external-probe temperature, temperature setpoint and the device's safety-circuit temperature. On overhead stirrers: PT1000 probe temperature, torque and the speed/torque limits set on the device."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "set_speed",
+          "kind": "hazard",
+          "description": "Set the stirring speed setpoint (OUT_SP_4). Does not start the motor; if it is already running, the speed changes immediately. Refused above `max_speed_rpm` (and, on overhead stirrers, above the speed limit set on the device)."
+        },
+        {
+          "name": "set_temperature",
+          "kind": "hazard",
+          "description": "Set the hotplate temperature setpoint (OUT_SP_1). With an external probe connected this is the target temperature of the medium. Does not start heating; if heating is already on, the plate starts moving to the new setpoint immediately. Refused above `max_temperature_c` or above the device's own safety-circuit temperature."
+        },
+        {
+          "name": "start_heating",
+          "kind": "hazard",
+          "description": "Switch the hotplate heater on (START_1). It heats towards the current setpoint, which is checked against `max_temperature_c` first. Make sure the vessel and its contents can take the setpoint temperature and that nothing flammable is near the plate."
+        },
+        {
+          "name": "start_stirring",
+          "kind": "hazard",
+          "description": "Start the stirring motor (START_4) at the current speed setpoint, which is checked against `max_speed_rpm` first. Make sure the stir bar or impeller is in place and the vessel is secured (a decoupled stir bar or an unclamped vessel can splash)."
+        },
+        {
+          "name": "stop_all",
+          "kind": "safety",
+          "description": "Emergency stop: switch the heater off (hotplates) and stop the motor. Every stop command is sent even if one of them fails. Also ends a running `wait_for_temperature`."
+        },
+        {
+          "name": "stop_heating",
+          "kind": "safety",
+          "description": "Switch the hotplate heater off (STOP_1). Stirring continues. The plate stays hot for a long time after switching off."
+        },
+        {
+          "name": "stop_stirring",
+          "kind": "safety",
+          "description": "Stop the stirring motor (STOP_4). Heating (if on) continues."
+        },
+        {
+          "name": "wait_for_temperature",
+          "kind": "read",
+          "description": "Poll a temperature until it is within `tolerance_c` of the target for `stable_for_s` seconds, or until `timeout_s` passes. Does not change anything on the device (start heating first). Returns whether the target was reached plus a short temperature trace. A stop command ends the wait early."
+        }
+      ]
+    },
+    {
+      "name": "JULABO Circulator",
+      "domain": "chemistry",
+      "category": "Temperature control",
+      "vendor": "JULABO",
+      "models": [
+        "CORIO CD",
+        "CORIO CP",
+        "MAGIO MS",
+        "DYNEO DD"
+      ],
+      "interfaces": [
+        "USB (virtual COM)",
+        "RS-232"
+      ],
+      "protocol": "JULABO interface commands (in_/out_/status/version)",
+      "summary": "Read bath/external temperature and heating power, set setpoint, start/stop tempering, decode status and alarms, wait for temperature.",
+      "status": "simulated",
+      "package": "labmcp-julabo",
+      "version": "0.1.0",
+      "description": "MCP server for JULABO heating and refrigerated circulators (CORIO, MAGIO, DYNEO): read temperatures, set setpoint, start/stop, alarms.",
+      "command": "labmcp-julabo",
+      "module": "labmcp_julabo.server",
+      "path": "servers/chemistry/julabo-circulator",
+      "extras": {},
+      "tools": [
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_setpoint",
+          "kind": "read",
+          "description": "Read the current temperature setpoint and whether temperature control is running."
+        },
+        {
+          "name": "get_status",
+          "kind": "read",
+          "description": "Report the circulator's status message (decoded: operating state, rejected command or alarm), whether temperature control is running, the setpoint, the device's own excess-temperature protection setting and warning limits, and the firmware version."
+        },
+        {
+          "name": "read_temperatures",
+          "kind": "read",
+          "description": "Read the bath temperature, the heating/cooling power in % and the safety-sensor temperature, and optionally the external Pt100 sensor."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "set_setpoint",
+          "kind": "hazard",
+          "description": "Set the circulator's temperature setpoint (out_sp_00). If temperature control is running, the circulator starts heating or cooling to it immediately. Refused outside `min_temperature_c`..`max_temperature_c`; the circulator itself also rejects values outside its range or warning limits (reported as an error). Needs remote control enabled."
+        },
+        {
+          "name": "start_circulation",
+          "kind": "hazard",
+          "description": "Start temperature control (out_mode_05 1): the pump runs and the bath heats or cools to the setpoint, which is checked against the safety limits first (it may have been changed on the front panel). Make sure the bath is filled and any external hoses are connected and secured. Needs remote control enabled."
+        },
+        {
+          "name": "stop_circulation",
+          "kind": "safety",
+          "description": "Stop temperature control and the pump (out_mode_05 0), then confirm with in_mode_05. Also ends a running `wait_for_temperature`. The bath stays hot/cold after stopping."
+        },
+        {
+          "name": "wait_for_temperature",
+          "kind": "read",
+          "description": "Poll the bath (or external) temperature until it has been within `tolerance_c` of the target for `stable_for_s` seconds, or `timeout_s` passes. Does not change anything; start circulation first. Stops early (reached = false) if the circulator raises an alarm or a stop command is sent. Returns a short temperature trace."
+        }
+      ]
+    },
+    {
+      "name": "Mettler Toledo Balance",
+      "domain": "chemistry",
+      "category": "Weighing",
+      "vendor": "Mettler Toledo",
+      "models": [
+        "Excellence XPR/XSR",
+        "XP/XS",
+        "XA/XE",
+        "MS/ML",
+        "NewClassic ME/MS",
+        "MT-SICS weighing terminals"
+      ],
+      "interfaces": [
+        "RS-232",
+        "USB (virtual COM)",
+        "Ethernet"
+      ],
+      "protocol": "MT-SICS (levels 0-2)",
+      "summary": "Weigh (stable/immediate), tare, zero, log drift series, internal adjustment, draft shield, display messages.",
+      "status": "simulated",
+      "package": "labmcp-mettler-toledo",
+      "version": "0.1.0",
+      "description": "MCP server for Mettler Toledo laboratory balances (MT-SICS): weigh, tare, zero, log drift, adjust.",
+      "command": "labmcp-mettler-toledo",
+      "module": "labmcp_mettler_toledo.server",
+      "path": "servers/chemistry/mettler-toledo-balance",
+      "extras": {},
+      "tools": [
+        {
+          "name": "clear_tare",
+          "kind": "control",
+          "description": "Clear the tare memory (tare = 0)."
+        },
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_draft_shield",
+          "kind": "read",
+          "description": "Report the position of the motorised draft-shield doors (Excellence/XPR balances only)."
+        },
+        {
+          "name": "get_tare",
+          "kind": "read",
+          "description": "Return the weight currently stored in the tare memory."
+        },
+        {
+          "name": "log_weight_series",
+          "kind": "read",
+          "description": "Record a series of immediate (unfiltered) readings to monitor drift, evaporation, moisture uptake or stabilisation. Returns every reading plus summary statistics."
+        },
+        {
+          "name": "read_temperature",
+          "kind": "read",
+          "description": "Read the balance's internal temperature probe(s) in °C (MT-SICS M28, if supported)."
+        },
+        {
+          "name": "read_weight",
+          "kind": "read",
+          "description": "Read the current net weight from the balance."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "reset_balance",
+          "kind": "safety",
+          "description": "Abort whatever the balance is doing (an adjustment, a repeating weight stream, a pending command) and reset it to its power-on state without zeroing (MT-SICS @). Clears the tare. Motorised draft-shield doors have their own obstruction detection and reverse if blocked."
+        },
+        {
+          "name": "run_internal_adjustment",
+          "kind": "control",
+          "description": "Adjust (calibrate) the balance with its built-in reference weight (MT-SICS C3). The pan must be empty and the balance undisturbed. Takes roughly 1-3 minutes."
+        },
+        {
+          "name": "set_draft_shield",
+          "kind": "hazard",
+          "description": "Open or close the motorised draft-shield doors. Make sure nothing (and no one's fingers) is in the way of the doors."
+        },
+        {
+          "name": "set_tare_preset",
+          "kind": "control",
+          "description": "Preset a known tare weight (e.g. a container weighed earlier)."
+        },
+        {
+          "name": "show_message",
+          "kind": "control",
+          "description": "Show a short message on the balance display (e.g. 'Add sample 3'). Use `show_weight_display` to return to the normal weight display."
+        },
+        {
+          "name": "show_weight_display",
+          "kind": "control",
+          "description": "Switch the balance display back to showing the weight."
+        },
+        {
+          "name": "tare",
+          "kind": "control",
+          "description": "Tare the balance: store the current load (e.g. an empty container) as the tare weight. Returns the stored tare weight."
+        },
+        {
+          "name": "zero",
+          "kind": "control",
+          "description": "Zero the balance with the current load. Also clears the tare memory."
+        }
+      ]
+    },
+    {
+      "name": "Ocean Insight Spectrometer",
+      "domain": "chemistry",
+      "category": "Spectroscopy",
+      "vendor": "Ocean Insight (Ocean Optics)",
+      "models": [
+        "USB2000+",
+        "USB2000",
+        "USB4000",
+        "USB650",
+        "Flame-S",
+        "Flame-NIR",
+        "Flame-X",
+        "HR2000/HR2000+",
+        "HR4000",
+        "Maya2000/Maya2000 Pro/Maya LSL",
+        "QE65000",
+        "QE Pro",
+        "STS",
+        "NIRQuest256/512",
+        "Jaz",
+        "Torus",
+        "Spark",
+        "Apex",
+        "Ventana",
+        "HDX",
+        "ADC1000-USB",
+        "HR2/HR4/HR6",
+        "SR2/SR4/SR6",
+        "ST-VIS"
+      ],
+      "interfaces": [
+        "USB"
+      ],
+      "protocol": "python-seabreeze (SeaBreeze / OOI and OBP protocols)",
+      "summary": "Acquire averaged/smoothed spectra with saturation checks, auto integration time, dark and reference storage, absorbance and transmittance spectra, peak positions with FWHM, detector TEC (QE Pro).",
+      "status": "simulated",
+      "package": "labmcp-ocean-spectrometer",
+      "version": "0.1.0",
+      "description": "MCP server for Ocean Insight / Ocean Optics spectrometers (python-seabreeze): acquire spectra, auto integration time, dark/reference, absorbance and transmittance, peak finding.",
+      "command": "labmcp-ocean-spectrometer",
+      "module": "labmcp_ocean_spectrometer.server",
+      "path": "servers/chemistry/ocean-spectrometer",
+      "extras": {},
+      "tools": [
+        {
+          "name": "acquire_spectrum",
+          "kind": "read",
+          "description": "Acquire an intensity spectrum (raw counts) with optional averaging, boxcar smoothing and corrections. Returns downsampled (wavelength, counts), summary statistics, the most prominent peaks with FWHM, and a saturation check; `save_path` writes the full spectrum."
+        },
+        {
+          "name": "auto_integration_time",
+          "kind": "control",
+          "description": "Adjust the integration time until the brightest raw pixel (optionally within a wavelength window) is within the target band of saturation (default 70-85 %). Stays within the device limits and the `max_integration_time_ms` safety limit. Re-take dark/reference afterwards."
+        },
+        {
+          "name": "detector_cooling_off",
+          "kind": "safety",
+          "description": "Switch the detector thermo-electric cooler off (the detector warms to ambient). Does nothing on spectrometers without a TEC."
+        },
+        {
+          "name": "find_peaks",
+          "kind": "read",
+          "description": "Find peaks (or dips) with position, height, prominence and FWHM in the most recent spectrum (intensity, absorbance or transmittance). Acquires a fresh intensity spectrum if none has been taken yet."
+        },
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_device_info",
+          "kind": "read",
+          "description": "Model, serial, pixel count, wavelength range, integration-time limits, saturation level, supported corrections, TEC presence, and which dark/reference spectra are stored."
+        },
+        {
+          "name": "list_spectrometers",
+          "kind": "read",
+          "description": "List the Ocean spectrometers seabreeze can see (model, serial number, whether open) and which one this server is connected to. Use a serial number as `--address` to pick one."
+        },
+        {
+          "name": "measure_absorbance",
+          "kind": "read",
+          "description": "Measure the absorbance spectrum A = -log10((S - D) / (R - D)) of the sample now in the beam, using the stored dark D and reference R (same settings). Ask the user to insert the sample first. Also returns values at `wavelengths_nm` and the absorbance maxima."
+        },
+        {
+          "name": "measure_transmittance",
+          "kind": "read",
+          "description": "Measure the transmittance spectrum %T = 100 (S - D) / (R - D) of the sample now in the beam, using the stored dark and reference. Ask the user to insert the sample first. Also returns values at `wavelengths_nm` and the deepest transmission dips."
+        },
+        {
+          "name": "read_detector_temperature",
+          "kind": "read",
+          "description": "Read the detector temperature from the thermo-electric cooler (TE-cooled models such as the QE Pro, when seabreeze exposes the thermo_electric feature for them)."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "set_detector_cooling",
+          "kind": "hazard",
+          "description": "Enable the detector thermo-electric cooler at `setpoint_c` (TE-cooled models only). The detector takes minutes to settle; dark current (and noise) drops as it cools. The TEC can only cool to roughly 15-40 °C below ambient (QE Pro manual). Checked against `min_tec_setpoint_c`."
+        },
+        {
+          "name": "set_integration_time",
+          "kind": "control",
+          "description": "Set the detector integration time (ms), within the device limits from `get_device_info`. Stored dark/reference spectra become unusable until re-taken at the new time."
+        },
+        {
+          "name": "store_dark_reference",
+          "kind": "control",
+          "description": "Record and store a DARK spectrum (kept in memory) for absorbance/transmittance. BEFORE calling, ask the user to BLOCK THE LIGHT PATH (close the shutter, switch the lamp off or cap the fiber) and wait for confirmation. Uses the present integration time."
+        },
+        {
+          "name": "store_reference",
+          "kind": "control",
+          "description": "Record and store the REFERENCE (100 % transmission) spectrum in memory. BEFORE calling, ask the user to put the BLANK (solvent-filled or empty cuvette) in the beam with the light on, and wait for confirmation. Use the same settings as the dark."
+        }
+      ]
+    },
+    {
+      "name": "PalmSens Potentiostat",
+      "domain": "chemistry",
+      "category": "Electrochemistry",
+      "vendor": "PalmSens",
+      "models": [
+        "EmStat Pico",
+        "EmStat4 LR/HR (incl. EmStat4S/4M/4X)",
+        "Sensit Wearable / Sensit BT",
+        "Nexus"
+      ],
+      "interfaces": [
+        "USB (virtual COM port)",
+        "UART / RS-232"
+      ],
+      "protocol": "MethodSCRIPT v1.x + PalmSens online communication protocol",
+      "summary": "Cyclic, linear-sweep and differential-pulse voltammetry, chronoamperometry and raw MethodSCRIPT, with peak summaries and CSV export.",
+      "status": "simulated",
+      "package": "labmcp-palmsens",
+      "version": "0.1.0",
+      "description": "MCP server for PalmSens potentiostats running MethodSCRIPT (EmStat Pico, EmStat4, Sensit, Nexus): CV, LSV, DPV, chronoamperometry, raw scripts.",
+      "command": "labmcp-palmsens",
+      "module": "labmcp_palmsens.server",
+      "path": "servers/chemistry/palmsens-potentiostat",
+      "extras": {},
+      "tools": [
+        {
+          "name": "abort_measurement",
+          "kind": "safety",
+          "description": "Abort the running measurement or script immediately (communication command Z) and make sure the cell is switched off. Safe to call when nothing is running."
+        },
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_device_info",
+          "kind": "read",
+          "description": "Identify the potentiostat (model, firmware, serial number) and list its potential window, PGStat modes and current ranges, so measurement parameters can be chosen within them."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "run_chronoamperometry",
+          "kind": "hazard",
+          "description": "Hold the cell at `potential_v` for `run_time_s` and record the current every `interval_s`. Returns the data (time from the instrument timer) plus first/last/mean current and the charge. Applies potential to the cell."
+        },
+        {
+          "name": "run_cyclic_voltammetry",
+          "kind": "hazard",
+          "description": "Run a cyclic voltammogram: begin -> vertex 1 -> vertex 2 -> begin, `n_scans` times, and return potential/current/time data with the anodic and cathodic peaks of every scan. Applies potential to the cell for the whole scan; the cell is switched off at the end."
+        },
+        {
+          "name": "run_differential_pulse_voltammetry",
+          "kind": "hazard",
+          "description": "Run differential pulse voltammetry (current = forward - reverse, per step) from begin to end potential and return the data with the peak current and peak potential. The scan rate must be below step / pulse_time / 2. Applies potential to the cell."
+        },
+        {
+          "name": "run_linear_sweep_voltammetry",
+          "kind": "hazard",
+          "description": "Run a linear sweep voltammogram from `begin_potential_v` to `end_potential_v` and return the data with the largest/smallest current and where they occur. Applies potential to the cell."
+        },
+        {
+          "name": "run_methodscript",
+          "kind": "hazard",
+          "description": "Advanced: run a raw MethodSCRIPT and return its raw output and decoded data packages. Literal potentials of set_e / set_range_minmax da / CV, LSV, DPV and CA loops are checked against `max_potential_v`; values computed at run time are not. Aborted after `timeout_s`; add `on_finished:` + `cell_off` to your script so the cell is switched off after an abort."
+        }
+      ]
+    },
+    {
+      "name": "Sartorius Balance",
+      "domain": "chemistry",
+      "category": "Weighing",
+      "vendor": "Sartorius",
+      "models": [
+        "Cubis MSE",
+        "Cubis II MCA",
+        "Secura",
+        "Quintix",
+        "Practum",
+        "Entris II",
+        "CP/CPA (legacy)"
+      ],
+      "interfaces": [
+        "RS-232",
+        "USB (virtual COM)",
+        "Ethernet (Cubis II)"
+      ],
+      "protocol": "SBI (Sartorius Balance Interface)",
+      "summary": "Weigh (stable/immediate), tare, zero, log drift series, internal adjustment, ambient filter, keypad lock.",
+      "status": "simulated",
+      "package": "labmcp-sartorius",
+      "version": "0.1.0",
+      "description": "MCP server for Sartorius laboratory balances (SBI protocol): weigh, tare, zero, log drift, internal adjustment.",
+      "command": "labmcp-sartorius",
+      "module": "labmcp_sartorius.server",
+      "path": "servers/chemistry/sartorius-balance",
+      "extras": {},
+      "tools": [
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "lock_keypad",
+          "kind": "control",
+          "description": "Block or unblock the balance keys, e.g. so nobody tares by accident during a long logging run."
+        },
+        {
+          "name": "log_weight_series",
+          "kind": "read",
+          "description": "Record a series of immediate (unfiltered) readings to monitor drift, evaporation, moisture uptake or stabilisation. Returns every reading plus summary statistics."
+        },
+        {
+          "name": "read_weight",
+          "kind": "read",
+          "description": "Read the current net weight from the balance (ESC P). With stable=True the server polls until the balance reports a stable value; if it cannot settle (draughts, vibration, evaporation) you get an error; retry, or use stable=false for the current value."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "run_internal_adjustment",
+          "kind": "control",
+          "description": "Adjust (calibrate) the balance with its built-in weight (ESC Z; isoCAL models only). The pan must be empty and the balance undisturbed. SBI sends no completion message, so the server watches for the adjustment status and waits until the balance weighs again; check `observed_adjustment` and the balance display or GLP printout for the result."
+        },
+        {
+          "name": "set_ambient_conditions",
+          "kind": "control",
+          "description": "Adapt the balance's filter to the ambient conditions (ESC K/L/M/N). Use 'unstable' or 'very_unstable' for draughty or vibrating benches (slower but steadier readings)."
+        },
+        {
+          "name": "tare",
+          "kind": "control",
+          "description": "Tare the balance (ESC U, or ESC T on legacy balances): the current load (e.g. an empty container) becomes the tare. Then waits for a stable reading and checks that it is ~0; returns that reading."
+        },
+        {
+          "name": "zero",
+          "kind": "control",
+          "description": "Zero the balance (ESC V). Only works with the pan (nearly) empty, within the balance's zero-setting range; clears the tare. Confirms by reading ~0 afterwards."
+        }
+      ]
+    },
+    {
+      "name": "Alicat Mass Flow & Pressure Controller",
+      "domain": "engineering",
+      "category": "Gas Flow & Pressure Control",
+      "vendor": "Alicat Scientific",
+      "models": [
+        "MC/MCR/MCS/MCE/MCV/MCW mass flow controllers",
+        "M/MS/MW mass flow meters",
+        "PC/PCD pressure controllers",
+        "P pressure gauges",
+        "L/LC liquid flow devices"
+      ],
+      "interfaces": [
+        "RS-232",
+        "RS-485",
+        "USB (virtual COM)",
+        "Ethernet (serial bridge)"
+      ],
+      "protocol": "Alicat ASCII serial (Serial Communications Primer)",
+      "summary": "Read mass/volumetric flow, pressure and temperature, set setpoints, select gases, tare, hold or close valves, log flow series.",
+      "status": "simulated",
+      "package": "labmcp-alicat",
+      "version": "0.1.0",
+      "description": "MCP server for Alicat mass flow and pressure meters/controllers: read flow, set setpoints, select gas, tare, hold/close valves.",
+      "command": "labmcp-alicat",
+      "module": "labmcp_alicat.server",
+      "path": "servers/engineering/alicat-flow-controller",
+      "extras": {},
+      "tools": [
+        {
+          "name": "close_valve",
+          "kind": "safety",
+          "description": "Stop the flow: set the flow setpoint to 0 and hold all valves closed (Alicat HC). Safe to call at any time. On pressure controllers the pressure setpoint is left unchanged and the valves are held closed, trapping the current pressure."
+        },
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_device_info",
+          "kind": "read",
+          "description": "Report model, serial number, firmware, calibration date, whether the device is a controller, the units of every data-frame field, the setpoint full scale and setpoint source."
+        },
+        {
+          "name": "hold_valve",
+          "kind": "control",
+          "description": "Freeze the controller's valve(s) at their current position (HLD): closed-loop control stops, so flow will drift if upstream pressure changes. Use `resume_control` to release, or `close_valve` to shut off completely."
+        },
+        {
+          "name": "list_gases",
+          "kind": "read",
+          "description": "List the gases installed on this mass flow device (number and short name), as used by `set_gas`. Liquid and pressure-only devices have no gas list."
+        },
+        {
+          "name": "log_flow_series",
+          "kind": "read",
+          "description": "Record a time series of data frames (e.g. to check flow stability, settling after a setpoint change, or pressure drift). Returns every point plus mean/stdev/min/max of the mass flow (or the main measured quantity for non-flow devices)."
+        },
+        {
+          "name": "read_flow",
+          "kind": "read",
+          "description": "Read the live data frame: mass flow, volumetric flow, pressure, temperature, setpoint (controllers), active gas and any status codes, each with the device's engineering units."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "resume_control",
+          "kind": "hazard",
+          "description": "Cancel any valve hold and resume closed-loop control to the current setpoint. Flow restarts immediately if the setpoint is not 0 (check it with `read_flow` first)."
+        },
+        {
+          "name": "set_flow_setpoint",
+          "kind": "hazard",
+          "description": "Change the controller setpoint: starts, changes or stops gas flow (or sets the target pressure on a pressure controller). 0 stops flow and closes the valve on a flow controller. Negative values only work on bidirectional controllers. Refused on meters, above the `max_setpoint` limit, and above the device's full scale."
+        },
+        {
+          "name": "set_gas",
+          "kind": "control",
+          "description": "Select the gas calibration the mass flow device uses (Gas Select). This changes how flow is computed, so do it with the setpoint at 0. Only gases installed on the device work (see `list_gases`); corrosive gases need anti-corrosive (S-series) hardware."
+        },
+        {
+          "name": "tare_flow",
+          "kind": "control",
+          "description": "Tare (zero) the flow reading. ONLY run with no flow through the device: upstream shut off or controller setpoint 0, with the line at its normal operating pressure. Refused if the setpoint is not 0 or a significant flow is still being measured."
+        },
+        {
+          "name": "tare_pressure",
+          "kind": "control",
+          "description": "Tare a pressure reading. Requires no flow and the device OPEN TO ATMOSPHERE (gauge), or no flow and an unpressurised process line (absolute, barometer-equipped devices only)."
+        }
+      ]
+    },
+    {
+      "name": "Bench DC Power Supply",
+      "domain": "engineering",
+      "category": "Power Supplies",
+      "vendor": "Rigol, Siglent, Aim-TTi",
+      "models": [
+        "Rigol DP832/DP831/DP822/DP821/DP811/DP813",
+        "Rigol DP711/DP712",
+        "Rigol DP932A/U/E",
+        "Siglent SPD3303X/X-E",
+        "Siglent SPD1168X/SPD1305X",
+        "Aim-TTi CPX400D/DP",
+        "Aim-TTi MX100TP/MX180TP",
+        "Aim-TTi QL355/QL564 (P/TP)",
+        "Aim-TTi PL-P"
+      ],
+      "interfaces": [
+        "USB (USB-TMC / virtual COM)",
+        "LAN (VISA / raw socket)",
+        "RS-232",
+        "GPIB (via VISA)"
+      ],
+      "protocol": "SCPI (Rigol, Siglent) and Aim-TTi remote commands",
+      "summary": "Read setpoints and measured V/I/CV-CC per channel, set voltage and current limits, switch outputs on/off, set OVP/OCP, read errors.",
+      "status": "simulated",
+      "package": "labmcp-bench-psu",
+      "version": "0.1.0",
+      "description": "MCP server for programmable DC bench power supplies (Rigol DP700/DP800/DP900, Siglent SPD3303X/SPD1000X, Aim-TTi CPX/MX/QL/PL-P): set, measure, switch outputs, OVP/OCP.",
+      "command": "labmcp-bench-psu",
+      "module": "labmcp_bench_psu.server",
+      "path": "servers/engineering/bench-power-supply",
+      "extras": {},
+      "tools": [
+        {
+          "name": "all_outputs_off",
+          "kind": "safety",
+          "description": "Switch every output OFF (emergency stop for the whole supply). Each channel is switched individually and read back where the instrument supports it."
+        },
+        {
+          "name": "clear_protection_trip",
+          "kind": "control",
+          "description": "Clear an OVP/OCP trip after fixing its cause. The output stays OFF; use `output_on` to re-energise. On Aim-TTi supplies this clears trips on all outputs."
+        },
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_errors",
+          "kind": "read",
+          "description": "Read (and clear) the instrument's error queue / error registers. Empty list = no errors."
+        },
+        {
+          "name": "get_outputs",
+          "kind": "read",
+          "description": "Report each channel: voltage and current-limit setpoints, measured voltage/current/power, output on/off, CV/CC mode, and OVP/OCP levels and trip state where the model supports them."
+        },
+        {
+          "name": "output_off",
+          "kind": "safety",
+          "description": "Switch a channel's output OFF. Safe to call at any time."
+        },
+        {
+          "name": "output_on",
+          "kind": "hazard",
+          "description": "Switch a channel's output ON, energising the connected load at the present setpoints. The setpoints are read back first and the output is refused if they exceed the safety limits (e.g. after someone changed them on the front panel)."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "set_current_limit",
+          "kind": "control",
+          "description": "Set a channel's current limit (the constant-current setpoint). Refused above `max_current_a` (checked even with the output off) or above the channel's range."
+        },
+        {
+          "name": "set_protection",
+          "kind": "control",
+          "description": "Set over-voltage (OVP) and/or over-current (OCP) protection for a channel. When exceeded, the supply switches the output off. Rigol: levels + on/off; Aim-TTi CPX/QL/PL-P: levels (always armed), MX: levels + on/off; Siglent SPD1000X: levels only; SPD3303X: not available."
+        },
+        {
+          "name": "set_voltage",
+          "kind": "control",
+          "description": "Set a channel's voltage setpoint. Refused above `max_voltage_v` (checked even with the output off) or above the channel's range. If the output is on, the load sees the new voltage at once."
+        }
+      ]
+    },
+    {
+      "name": "LabJack T-series DAQ",
+      "domain": "engineering",
+      "category": "Data acquisition",
+      "vendor": "LabJack",
+      "models": [
+        "T4",
+        "T7",
+        "T7-Pro",
+        "T8"
+      ],
+      "interfaces": [
+        "USB",
+        "Ethernet",
+        "WiFi (T7-Pro)"
+      ],
+      "protocol": "LJM library (Modbus TCP register map)",
+      "summary": "Read analog inputs, stream waveforms, read thermocouples and the device temperature, read/set digital I/O and set DACs, with voltage and stream limits.",
+      "status": "simulated",
+      "package": "labmcp-labjack",
+      "version": "0.1.0",
+      "description": "MCP server for LabJack T4, T7/T7-Pro and T8 DAQ devices (LJM): analog inputs, streaming, thermocouples, DACs and digital I/O with safety limits.",
+      "command": "labmcp-labjack",
+      "module": "labmcp_labjack.server",
+      "path": "servers/engineering/labjack",
+      "extras": {},
+      "tools": [
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_device_info",
+          "kind": "read",
+          "description": "Identify the connected LabJack (model, serial, firmware, connection) and list what it offers: analog inputs, valid input ranges, resolution indices, DAC range, digital lines and stream rate. Call this before configuring channels."
+        },
+        {
+          "name": "read_analog_inputs",
+          "kind": "read",
+          "description": "Read one or more analog inputs once (command-response) and return volts."
+        },
+        {
+          "name": "read_device_temperature",
+          "kind": "read",
+          "description": "Read the LabJack's internal temperature sensor (°C, about ±2 °C) and the estimated ambient air temperature. On the T8 also returns the sensor next to each AIN terminal. Cannot be read while a stream is running."
+        },
+        {
+          "name": "read_digital_inputs",
+          "kind": "read",
+          "description": "Report the logic level and direction (input/output/analog) of digital I/O lines."
+        },
+        {
+          "name": "read_thermocouple",
+          "kind": "read",
+          "description": "Read a thermocouple with the T7/T8 AIN thermocouple extended feature (types B, C, E, J, K, N, R, S, T) and return °C with the measured voltage and cold-junction temperature."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "set_digital_output",
+          "kind": "hazard",
+          "description": "Make a digital line an output and drive it high (3.3 V) or low (0 V)."
+        },
+        {
+          "name": "set_outputs_safe",
+          "kind": "safety",
+          "description": "Put the outputs in a safe state: stop any stream, set DAC0 and DAC1 to 0 V, and release every digital line this server drove (plus the `safe_dio` option lines) to input - or drive them low with dio_mode='low'. Use when finished or if anything looks wrong."
+        },
+        {
+          "name": "stream_analog",
+          "kind": "read",
+          "description": "Acquire a hardware-timed waveform on one or more analog inputs (LJM stream mode) and return per-channel statistics plus a downsampled waveform; optionally save everything to CSV."
+        },
+        {
+          "name": "write_dac",
+          "kind": "hazard",
+          "description": "Set an analog output (DAC0/DAC1) to a DC voltage. The output stays at this value until changed or `set_outputs_safe` is called."
+        }
+      ]
+    },
+    {
+      "name": "NI-DAQmx DAQ Devices",
+      "domain": "engineering",
+      "category": "Data acquisition",
+      "vendor": "National Instruments (NI)",
+      "models": [
+        "USB-6001/6002/6003",
+        "USB-6008/6009",
+        "USB-621x",
+        "USB/PCIe-63xx (M/X series)",
+        "CompactDAQ C Series modules",
+        "NI MAX simulated devices"
+      ],
+      "interfaces": [
+        "USB",
+        "PCI/PCIe",
+        "PXI",
+        "Ethernet (cDAQ)"
+      ],
+      "protocol": "NI-DAQmx driver via the nidaqmx Python API",
+      "summary": "List devices, acquire finite analog voltage and thermocouple data, read/write digital lines and set analog outputs, with voltage, rate and sample limits.",
+      "status": "simulated",
+      "package": "labmcp-ni-daqmx",
+      "version": "0.1.0",
+      "description": "MCP server for National Instruments DAQ devices (NI-DAQmx): analog/thermocouple acquisition, digital I/O and analog outputs with safety limits.",
+      "command": "labmcp-ni-daqmx",
+      "module": "labmcp_ni_daqmx.server",
+      "path": "servers/engineering/ni-daqmx",
+      "extras": {},
+      "tools": [
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_device_info",
+          "kind": "read",
+          "description": "Describe the connected device: analog input/output channels, digital lines, supported voltage ranges, maximum sample rates, and the outputs this server has set. Call this before choosing channels, ranges and rates."
+        },
+        {
+          "name": "list_devices",
+          "kind": "read",
+          "description": "List every NI-DAQmx device the driver can see (product type, serial number, channels, whether it is an NI MAX simulated device) and which one this server is connected to."
+        },
+        {
+          "name": "read_analog",
+          "kind": "read",
+          "description": "Measure voltage on one or more analog inputs: a single on-demand reading, or a finite hardware-timed acquisition of `samples` per channel at `rate_hz`. Returns per-channel statistics and a downsampled waveform; optionally saves all data to CSV."
+        },
+        {
+          "name": "read_digital_lines",
+          "kind": "read",
+          "description": "Read the logic level of digital lines."
+        },
+        {
+          "name": "read_thermocouple",
+          "kind": "read",
+          "description": "Measure temperature (°C) with thermocouples (types B, E, J, K, N, R, S, T) on a thermocouple-capable device, e.g. an NI 9211/9212/9213/9214 module or USB-TC01."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "set_outputs_safe",
+          "kind": "safety",
+          "description": "Put the device's outputs in a safe state: every analog output to 0 V (or the bottom of its range if 0 V is not in it) and, by default, every digital line this server drove - plus the `safe_do_lines` option lines - driven low. Use when finished or if anything looks wrong."
+        },
+        {
+          "name": "write_analog",
+          "kind": "hazard",
+          "description": "Set an analog output to a DC voltage (static, software-timed). The output keeps this value after the call on most NI devices, until changed or `set_outputs_safe` is called."
+        },
+        {
+          "name": "write_digital_lines",
+          "kind": "hazard",
+          "description": "Drive digital output lines high or low. The lines keep their level after the call until changed or `set_outputs_safe` is called."
+        }
+      ]
+    },
+    {
+      "name": "Rigol Oscilloscope",
+      "domain": "engineering",
+      "category": "Oscilloscope",
+      "vendor": "Rigol",
+      "models": [
+        "DS1000Z / MSO1000Z (DS1054Z, DS1104Z...)",
+        "DS1000Z-E (DS1202Z-E)",
+        "MSO5000",
+        "DHO800 / DHO900",
+        "DHO1000 / DHO4000"
+      ],
+      "interfaces": [
+        "USB (USB-TMC)",
+        "LAN (VXI-11 / raw socket)"
+      ],
+      "protocol": "SCPI (Rigol programming guides)",
+      "summary": "Read settings, autoscale, run/stop/single, set channels, timebase and edge trigger, take measurements, capture scaled waveforms (screen or deep memory) and screenshots.",
+      "status": "simulated",
+      "package": "labmcp-rigol-scope",
+      "version": "0.1.0",
+      "description": "MCP server for Rigol digital oscilloscopes (DS1000Z/MSO1000Z, DS1000Z-E, MSO5000, DHO800/900/1000/4000): settings, triggering, measurements, waveform capture and screenshots over SCPI.",
+      "command": "labmcp-rigol-scope",
+      "module": "labmcp_rigol_scope.server",
+      "path": "servers/engineering/rigol-oscilloscope",
+      "extras": {},
+      "tools": [
+        {
+          "name": "autoscale",
+          "kind": "control",
+          "description": "Run the scope's automatic setup (AUTO key): it picks vertical scales, timebase and trigger for the connected signals. This overwrites the user's current setup - only use it when asked. Needs signals of roughly >20 mVpp and >40 Hz."
+        },
+        {
+          "name": "capture_waveform",
+          "kind": "read",
+          "description": "Capture a channel's waveform, scaled to volts and seconds with the scope's waveform preamble, and return statistics plus a downsampled trace; optionally save all points to CSV."
+        },
+        {
+          "name": "force_trigger",
+          "kind": "control",
+          "description": "Force one trigger (FORCE key). Only has an effect in NORMal or SINGle sweep while waiting."
+        },
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_device_info",
+          "kind": "read",
+          "description": "Identify the oscilloscope (model, serial, firmware), the command family used for it, the number of analog channels, and the current sample rate and memory depth."
+        },
+        {
+          "name": "get_settings",
+          "kind": "read",
+          "description": "Read the current vertical settings of every channel (on/off, V/div, offset, coupling, probe ratio, bandwidth limit), the timebase, the trigger (type, sweep, status, edge source/level/slope) and the acquisition sample rate / memory depth."
+        },
+        {
+          "name": "measure",
+          "kind": "read",
+          "description": "Read the scope's automatic measurements for one channel: voltages (Vpp, Vmax, Vmin, Vtop, Vbase, Vamp, Vavg, Vrms, overshoot, preshoot) and timing (period, frequency, rise/fall time, +/- width, +/- duty). Values the scope cannot determine are null."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "run",
+          "kind": "control",
+          "description": "Start continuous acquisition (RUN)."
+        },
+        {
+          "name": "screenshot",
+          "kind": "read",
+          "description": "Save a screenshot of the oscilloscope display (PNG; BMP on the MSO5000) and return its path. For PNG screenshots the image is also returned so the model can look at the screen."
+        },
+        {
+          "name": "set_channel",
+          "kind": "control",
+          "description": "Change a channel's vertical settings; unspecified settings are left alone. The probe ratio is applied first because it changes the valid scale range. Returns the settings the scope actually applied (the scale snaps to 1-2-5 steps). Rejected values are reported from the scope's error queue."
+        },
+        {
+          "name": "set_timebase",
+          "kind": "control",
+          "description": "Set the main timebase scale and/or offset. Returns the applied values."
+        },
+        {
+          "name": "set_trigger",
+          "kind": "control",
+          "description": "Configure an edge trigger (source, level, slope) and the sweep mode. Sets the trigger type to EDGE. The level must lie within the source channel's screen range."
+        },
+        {
+          "name": "single",
+          "kind": "control",
+          "description": "Arm a single acquisition (SINGLE key): the scope triggers once, then stops. With wait_s > 0 it waits until the acquisition is complete (status STOP). If the trigger condition is never met the status stays WAIT - check the trigger level/source or use `force_trigger`."
+        },
+        {
+          "name": "stop",
+          "kind": "control",
+          "description": "Stop acquisition (STOP) and freeze the current waveforms, e.g. before reading deep memory."
+        }
+      ]
+    },
+    {
+      "name": "ASTM LIS Analyzer Receiver",
+      "domain": "health",
+      "category": "Clinical / lab analyzers",
+      "vendor": "Any (ASTM E1381/E1394, CLSI LIS1-A/LIS2-A2)",
+      "models": [
+        "Hematology analyzers",
+        "Clinical chemistry analyzers",
+        "Immunoassay analyzers",
+        "Urinalysis and coagulation analyzers",
+        "e.g. Sysmex, Roche cobas, Abbott, Beckman Coulter, Mindray models with an ASTM host interface"
+      ],
+      "interfaces": [
+        "RS-232",
+        "TCP/IP (client)",
+        "TCP/IP (listener)"
+      ],
+      "protocol": "ASTM E1381 / CLSI LIS1-A low-level protocol + ASTM E1394 / CLSI LIS2-A2 records (receive-only)",
+      "summary": "Receive-only LIS: ACK/NAK frames with checksum validation, reassemble messages, and query results by sample, patient, test or time. Patient name/DOB redacted by default. Research use only.",
+      "status": "simulated",
+      "package": "labmcp-astm-lis",
+      "version": "0.1.0",
+      "description": "MCP server that receives results from clinical/lab analyzers over ASTM E1381/E1394 (CLSI LIS1/LIS2): serial, TCP client or TCP listener.",
+      "command": "labmcp-astm-lis",
+      "module": "labmcp_astm_lis.server",
+      "path": "servers/health/astm-lis-analyzer",
+      "extras": {},
+      "tools": [
+        {
+          "name": "clear_results",
+          "kind": "control",
+          "description": "Delete all received messages and results from this server's memory (e.g. between runs)."
+        },
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_connection_status",
+          "kind": "read",
+          "description": "Report the analyzer link state, the messages and results received, and link-layer error counters."
+        },
+        {
+          "name": "get_result_detail",
+          "kind": "read",
+          "description": "Show every decoded field of one result, with its comments, order and patient context, raw records and message header."
+        },
+        {
+          "name": "get_results",
+          "kind": "read",
+          "description": "Return received results, filtered by sample ID, patient ID, test code, time received or abnormal flag (newest last)."
+        },
+        {
+          "name": "list_received_messages",
+          "kind": "read",
+          "description": "List the most recent ASTM messages received (newest last)."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        }
+      ]
+    },
+    {
+      "name": "Bluetooth LE Health Sensors",
+      "domain": "health",
+      "category": "Physiological sensors",
+      "vendor": "Any (Bluetooth SIG standard profiles)",
+      "models": [
+        "Heart-rate chest straps and armbands (Heart Rate Service)",
+        "Pulse oximeters (Pulse Oximeter Service)",
+        "Blood pressure monitors (Blood Pressure Service)",
+        "Thermometers (Health Thermometer Service)",
+        "Weight scales (Weight Scale Service)"
+      ],
+      "interfaces": [
+        "Bluetooth Low Energy"
+      ],
+      "protocol": "Bluetooth SIG GATT: HRS, PLXS, BLS, HTS, WSS, BAS, DIS (IEEE 11073-20601 SFLOAT/FLOAT)",
+      "summary": "Scan, read device info/battery, record heart rate with RR intervals and HRV, read SpO2, blood pressure, temperature and weight. Research use only, not a medical device.",
+      "status": "simulated",
+      "package": "labmcp-ble-health",
+      "version": "0.1.0",
+      "description": "MCP server for Bluetooth LE health sensors (standard GATT profiles): heart rate + HRV, SpO2, blood pressure, temperature, weight.",
+      "command": "labmcp-ble-health",
+      "module": "labmcp_ble_health.server",
+      "path": "servers/health/ble-health-sensors",
+      "extras": {},
+      "tools": [
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_device_info",
+          "kind": "read",
+          "description": "Read the device's identity (manufacturer, model, serial, firmware), the standard health services it exposes and its features."
+        },
+        {
+          "name": "read_battery",
+          "kind": "read",
+          "description": "Read the device's battery level (Battery Service, 0-100 %)."
+        },
+        {
+          "name": "read_pulse_oximetry",
+          "kind": "read",
+          "description": "Read SpO2 (%) and pulse rate from a pulse oximeter, averaged over a few seconds or as a single spot-check reading."
+        },
+        {
+          "name": "read_temperature",
+          "kind": "read",
+          "description": "Wait for a thermometer to send a temperature measurement and return it in °C."
+        },
+        {
+          "name": "read_weight",
+          "kind": "read",
+          "description": "Wait for a scale to send a weight measurement (kg), with BMI and height if the scale sends them."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "record_heart_rate",
+          "kind": "read",
+          "description": "Record heart rate for `duration_s`: bpm series, RR intervals and time-domain HRV (mean HR, SDNN, RMSSD, pNN50)."
+        },
+        {
+          "name": "scan_devices",
+          "kind": "read",
+          "description": "Scan for nearby Bluetooth LE devices: address, name, signal strength and advertised health services. Works without a configured --address."
+        },
+        {
+          "name": "wait_for_blood_pressure",
+          "kind": "read",
+          "description": "Wait for a blood pressure monitor to send a measurement: systolic, diastolic and mean arterial pressure (mmHg) and pulse rate."
+        }
+      ]
+    },
+    {
+      "name": "BrainFlow Biosensing Boards",
+      "domain": "health",
+      "category": "Biosignal acquisition (EEG/EMG/ECG/PPG)",
+      "vendor": "OpenBCI, Interaxon (Muse), Neurosity, g.tec, BrainBit, Mentalab, EmotiBit and others (via BrainFlow)",
+      "models": [
+        "OpenBCI Cyton / Cyton+Daisy / Ganglion / Galea (USB, BLE, WiFi Shield)",
+        "Muse 2 / Muse S / Muse S Athena / Muse 2016",
+        "Neurosity Crown / Notion 1 / Notion 2",
+        "g.tec Unicorn Hybrid Black",
+        "BrainBit, Callibri, Enophone, Mentalab Explore, EmotiBit, FreeEEG32/128, NeuroPawn Knight, Shimmer3",
+        "Any other board in BrainFlow's BoardIds"
+      ],
+      "interfaces": [
+        "USB (serial dongle)",
+        "Bluetooth LE",
+        "WiFi",
+        "Vendor SDK (via BrainFlow)"
+      ],
+      "protocol": "BrainFlow SDK (BoardShim / DataFilter)",
+      "summary": "List boards, stream, record N seconds (stats + downsampled traces + CSV), EEG band powers, event markers, per-channel signal quality (flat, railed, mains noise). Research use only.",
+      "status": "simulated",
+      "package": "labmcp-brainflow",
+      "version": "0.1.0",
+      "description": "MCP server for EEG/EMG/ECG/PPG biosensing boards via BrainFlow (OpenBCI, Muse, Neurosity, g.tec Unicorn, BrainBit, ...): stream, record, band powers, markers, signal quality.",
+      "command": "labmcp-brainflow",
+      "module": "labmcp_brainflow.server",
+      "path": "servers/health/brainflow-biosensors",
+      "extras": {},
+      "tools": [
+        {
+          "name": "configure_board",
+          "kind": "control",
+          "description": "Send a board-specific configuration command through BrainFlow's config_board (e.g. OpenBCI channel settings 'x1060110X', test signals, or Muse presets 'p50'/'p61' to enable PPG). Only acquisition settings of the amplifier change. Consult the board's SDK documentation first."
+        },
+        {
+          "name": "get_band_powers",
+          "kind": "read",
+          "description": "EEG band powers (delta 1-4, theta 4-8, alpha 8-13, beta 13-30, gamma 30-50 Hz) over the most recent `window_s` seconds: BrainFlow's channel-averaged relative powers plus per-channel absolute (uV^2) and relative powers and the peak frequency. Records a fresh window if not streaming."
+        },
+        {
+          "name": "get_board_info",
+          "kind": "read",
+          "description": "Describe the connected board: channel names by type (EEG/EMG/ECG/EOG share the EXG rows on most boards), sampling rate, available presets (data buffers) and streaming state."
+        },
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_signal_quality",
+          "kind": "read",
+          "description": "Check every EXG channel for common electrode problems: flat line (disconnected), railed (amplifier saturated, OpenBCI Cyton boards), strong 50/60 Hz mains noise (poor contact or missing reference), and implausibly high amplitude (movement, muscle, loose electrode)."
+        },
+        {
+          "name": "insert_marker",
+          "kind": "control",
+          "description": "Write an event marker into the data stream at the current sample (for event-related experiments: stimulus onsets, condition changes). Requires `start_streaming`; markers appear in `record` results and saved files."
+        },
+        {
+          "name": "list_supported_boards",
+          "kind": "read",
+          "description": "List common BrainFlow boards: the `--option board=` alias, BrainFlow board id, and which connection detail `--address` must hold (serial port, Bluetooth MAC, IP address or serial number). Any other BrainFlow BoardIds name or numeric id is accepted too. Does not need a board."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "record",
+          "kind": "read",
+          "description": "Record `duration_s` seconds and return per-channel statistics, event markers and downsampled traces. Uses the live stream if one is running, otherwise starts a temporary one. The full data (every row, full sampling rate) can be written to `save_path`."
+        },
+        {
+          "name": "start_streaming",
+          "kind": "control",
+          "description": "Start continuous acquisition into BrainFlow's ring buffer (the board's radio/LEDs switch on; nothing is applied to the participant). Needed for `insert_marker`; `record` then reads from the live stream. Call `stop_streaming` when finished."
+        },
+        {
+          "name": "stop_streaming",
+          "kind": "control",
+          "description": "Stop acquisition (saves battery). Data already in the buffer is kept until the session is released (`reconnect`) or read."
+        }
+      ]
+    },
+    {
+      "name": "Keithley SourceMeter SMU",
+      "domain": "physics",
+      "category": "Source-measure units",
+      "vendor": "Keithley (Tektronix)",
+      "models": [
+        "2400",
+        "2401",
+        "2410",
+        "2420",
+        "2425",
+        "2430",
+        "2440",
+        "2450",
+        "2460",
+        "2461",
+        "2470",
+        "2601B",
+        "2602B",
+        "2604B",
+        "2611B",
+        "2612B",
+        "2614B",
+        "2634B",
+        "2635B",
+        "2636B"
+      ],
+      "interfaces": [
+        "GPIB",
+        "USB (USBTMC)",
+        "Ethernet (LXI / raw socket)",
+        "RS-232"
+      ],
+      "protocol": "SCPI (2400 series, 2450 family) and TSP (2600B)",
+      "summary": "Configure a voltage or current source with compliance, switch the output on/off, measure V and I, run bounded linear/log/dual IV sweeps with resistance fit and CSV export, 2/4-wire sense.",
+      "status": "simulated",
+      "package": "labmcp-keithley-smu",
+      "version": "0.1.0",
+      "description": "MCP server for Keithley SourceMeter SMUs (2400 series SCPI, 2450 family SCPI, 2600B TSP): source V or I with compliance, measure, bounded IV sweeps that always end with the output off.",
+      "command": "labmcp-keithley-smu",
+      "module": "labmcp_keithley_smu.server",
+      "path": "servers/physics/keithley-smu",
+      "extras": {},
+      "tools": [
+        {
+          "name": "configure_source",
+          "kind": "control",
+          "description": "Set up the source (function, level, compliance, range, measurement speed) while the output is OFF. Measures V and I with auto-ranging. Refused if the output is on; turn it off first or use `set_source_level`. Limits are checked before anything is sent."
+        },
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_device_info",
+          "kind": "read",
+          "description": "Identify the SMU: manufacturer, model, serial, firmware, command dialect (2400 / 2450 / 2600), channel (2600B) and the model's maximum source voltage and current."
+        },
+        {
+          "name": "get_status",
+          "kind": "read",
+          "description": "Report whether the output is on, the source function (voltage/current), programmed level, compliance limit, whether the source is in compliance, terminals and 2/4-wire sense."
+        },
+        {
+          "name": "measure",
+          "kind": "read",
+          "description": "Take one source-measure reading (voltage, current, V/I, power, compliance flag) of the energised DUT. Does not change any setting; refused if the output is off."
+        },
+        {
+          "name": "output_off",
+          "kind": "safety",
+          "description": "Switch the SMU output OFF immediately (and abort any IV sweep in progress). Always available, including in read-only mode."
+        },
+        {
+          "name": "output_on",
+          "kind": "hazard",
+          "description": "Switch the SMU output ON: the configured voltage or current is applied to the DUT. The programmed level and compliance are read back from the instrument and checked against the safety limits first. Confirm with the user that the DUT is connected and safe to energise."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "run_iv_sweep",
+          "kind": "hazard",
+          "description": "Run a stepped IV sweep: configure the source, switch the output ON, step through the levels measuring V and I at each, then ALWAYS switch the output OFF (also on errors or when `output_off` is called). Returns the curve (downsampled), compliance flags, a linear fit and optional full CSV. The output must be off beforehand. Limits are checked first."
+        },
+        {
+          "name": "set_4wire",
+          "kind": "control",
+          "description": "Select 4-wire (remote sense, Kelvin) or 2-wire measurement. 4-wire removes lead resistance for low-resistance DUTs but needs the SENSE leads connected. Refused while the output is on."
+        },
+        {
+          "name": "set_source_level",
+          "kind": "hazard",
+          "description": "Change the level of the configured source. If the output is ON the new voltage/current is applied to the DUT immediately. The level and the present compliance are checked against the safety limits first."
+        }
+      ]
+    },
+    {
+      "name": "Lake Shore Temperature Controller",
+      "domain": "physics",
+      "category": "Cryogenic temperature control",
+      "vendor": "Lake Shore Cryotronics",
+      "models": [
+        "Model 335",
+        "Model 336",
+        "Model 350"
+      ],
+      "interfaces": [
+        "USB (virtual COM)",
+        "Ethernet (TCP 7777, 336/350)",
+        "IEEE-488 (GPIB)"
+      ],
+      "protocol": "Lake Shore ASCII command set (IEEE-488.2 style)",
+      "summary": "Read all sensor inputs with status, heater status, set setpoints/ramps/heater ranges/PID, wait for stable temperature, all heaters off.",
+      "status": "simulated",
+      "package": "labmcp-lakeshore",
+      "version": "0.1.0",
+      "description": "MCP server for Lake Shore Cryotronics 335/336/350 temperature controllers: read sensors, setpoints, ramps, heater ranges, PID, wait for stability, all heaters off.",
+      "command": "labmcp-lakeshore",
+      "module": "labmcp_lakeshore.server",
+      "path": "servers/physics/lakeshore-temperature",
+      "extras": {},
+      "tools": [
+        {
+          "name": "all_heaters_off",
+          "kind": "safety",
+          "description": "Turn every output off (heater range 0 on outputs 1-4), like the front-panel All Off key, and stop any running wait. Reports the read-back range of each output."
+        },
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_heater_status",
+          "kind": "read",
+          "description": "Report each output's control mode and input, heater range, output %, setpoint (and in kelvin), ramp state, PID values and heater errors (open/short). Reading a heater error clears it on the controller."
+        },
+        {
+          "name": "read_temperatures",
+          "kind": "read",
+          "description": "Read every (or the selected) sensor input: kelvin, raw sensor units, sensor type, input name and decoded reading status (invalid, under/overrange). Disabled inputs are listed with null readings."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "set_heater_range",
+          "kind": "hazard",
+          "description": "Set an output's heater range (each step is ~10x more power). Anything above 0 lets the output heat: in closed loop as the PID demands, in open loop at the front-panel manual output. Refused above `max_heater_range`. Start with the lowest range that can reach the setpoint."
+        },
+        {
+          "name": "set_pid",
+          "kind": "control",
+          "description": "Set the P, I and D values of an output's control loop (Lake Shore conventions)."
+        },
+        {
+          "name": "set_ramp",
+          "kind": "control",
+          "description": "Turn setpoint ramping on or off for an output's control loop and set the rate. With ramping on, the next setpoint change moves the setpoint gradually - gentler on samples and wiring."
+        },
+        {
+          "name": "set_setpoint",
+          "kind": "hazard",
+          "description": "Set the control setpoint of an output's loop in kelvin. If setpoint ramping is on, the setpoint moves toward the new value at the ramp rate. Heating only happens if the output is in closed-loop mode and its heater range is not off. Refused above `max_setpoint_k`."
+        },
+        {
+          "name": "wait_for_stable_temperature",
+          "kind": "read",
+          "description": "Wait until the control input of `output` has stayed within `tolerance_k` of the setpoint (and the setpoint is no longer ramping) for `stable_for_s`, or until `timeout_s`. Returns whether it stabilised, the final temperature and a downsampled trace. Changes nothing."
+        }
+      ]
+    },
+    {
+      "name": "Pfeiffer Vacuum Gauge Controller",
+      "domain": "physics",
+      "category": "Vacuum measurement",
+      "vendor": "Pfeiffer Vacuum",
+      "models": [
+        "TPG 361",
+        "TPG 362",
+        "TPG 366 MaxiGauge",
+        "TPG 261",
+        "TPG 262"
+      ],
+      "interfaces": [
+        "USB (virtual COM)",
+        "Ethernet (TCP 8000)",
+        "RS-232 (TPG 26x)"
+      ],
+      "protocol": "Pfeiffer mnemonics protocol (ACK/NAK + ENQ)",
+      "summary": "Read and log pressures with status per channel, identify gauges, change units, switch ionisation gauges on/off with a pressure interlock, read errors.",
+      "status": "simulated",
+      "package": "labmcp-pfeiffer-tpg",
+      "version": "0.1.0",
+      "description": "MCP server for Pfeiffer Vacuum TPG 361/362/366 and TPG 261/262 gauge controllers: read and log pressures, gauge types, units, ionisation-gauge power.",
+      "command": "labmcp-pfeiffer-tpg",
+      "module": "labmcp_pfeiffer_tpg.server",
+      "path": "servers/physics/pfeiffer-vacuum-gauge",
+      "extras": {},
+      "tools": [
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_errors",
+          "kind": "read",
+          "description": "Read (and clear) the controller's ERROR word: controller error, no hardware, inadmissible parameter or syntax error. An empty list means no error."
+        },
+        {
+          "name": "get_gauge_types",
+          "kind": "read",
+          "description": "List the gauge connected to each channel (TID), what kind it is, and whether it is an ionisation gauge that is currently switched on or off (SEN)."
+        },
+        {
+          "name": "log_pressure_series",
+          "kind": "read",
+          "description": "Log pressures at a fixed interval (e.g. a pump-down curve, leak-up/rate-of-rise test or bake-out). Returns per-channel statistics in log-space plus a downsampled series; the full series can be written to CSV. Bounded by `max_log_duration_s`."
+        },
+        {
+          "name": "read_all_pressures",
+          "kind": "read",
+          "description": "Read every channel of the controller at once (PRX), with status per channel."
+        },
+        {
+          "name": "read_pressure",
+          "kind": "read",
+          "description": "Read one gauge channel: status, pressure in the display unit and in mbar."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "set_gauge_power",
+          "kind": "hazard",
+          "description": "Switch an ionisation gauge (IKR, PKR, PBR, IMR) on or off (SEN). Switching a hot or cold cathode gauge on at high pressure can burn out the filament or contaminate the gauge, so switching ON is refused unless a valid reading from this gauge or `reference_channel` is at or below `max_switch_on_pressure_mbar`. Switching off may trip setpoint relays used as interlocks."
+        },
+        {
+          "name": "set_unit",
+          "kind": "control",
+          "description": "Change the pressure unit used on the display and interface (UNI). Readings in mbar are always included regardless of this setting."
+        },
+        {
+          "name": "switch_gauge_off",
+          "kind": "safety",
+          "description": "Switch an ionisation gauge off (e.g. before venting, or if the pressure is rising). Always allowed. Note that setpoint relays assigned to this channel may change state."
+        }
+      ]
+    },
+    {
+      "name": "SRS Lock-in Amplifier",
+      "domain": "physics",
+      "category": "Lock-in amplifiers",
+      "vendor": "Stanford Research Systems",
+      "models": [
+        "SR830",
+        "SR810",
+        "SR860",
+        "SR865A"
+      ],
+      "interfaces": [
+        "GPIB",
+        "RS-232",
+        "USB (USBTMC)",
+        "Ethernet (VXI-11)"
+      ],
+      "protocol": "SRS remote command set (IEEE-488.2 style ASCII)",
+      "summary": "Read X/Y/R/θ snapshots, set reference frequency/harmonic/phase, sine amplitude, sensitivity, time constant, auto phase/gain/range, bounded frequency sweeps.",
+      "status": "simulated",
+      "package": "labmcp-srs-lockin",
+      "version": "0.1.0",
+      "description": "MCP server for Stanford Research Systems lock-in amplifiers (SR810/SR830, SR860/SR865A): read X/Y/R/θ, set reference, sensitivity and time constant, frequency sweeps.",
+      "command": "labmcp-srs-lockin",
+      "module": "labmcp_srs_lockin.server",
+      "path": "servers/physics/srs-lockin",
+      "extras": {},
+      "tools": [
+        {
+          "name": "auto_gain",
+          "kind": "control",
+          "description": "Pick the sensitivity automatically for the present signal (SR830 AGAN / SR86x ASCL). On the SR830 AGAN does nothing when the time constant is longer than 1 s."
+        },
+        {
+          "name": "auto_phase",
+          "kind": "control",
+          "description": "Run Auto Phase (APHS): shift the reference phase so that Y ≈ 0 and X ≈ R. The outputs then need several time constants to settle. Does nothing if the phase is unstable."
+        },
+        {
+          "name": "auto_range",
+          "kind": "control",
+          "description": "Optimise the input stage for the present signal: SR830 Auto Reserve (ARSV) or SR86x Auto Range of the voltage input range (ARNG)."
+        },
+        {
+          "name": "frequency_sweep",
+          "kind": "hazard",
+          "description": "Step the internal reference (and SINE OUT drive) from start_hz to stop_hz, waiting for the output filter to settle at each point, and record X/Y/R/θ vs frequency - e.g. a resonance or transfer-function measurement. The drive amplitude stays at its present value. Needs the internal reference. The estimated duration must be within `max_sweep_duration_s`; `set_amplitude_minimum` stops a running sweep."
+        },
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_settings",
+          "kind": "read",
+          "description": "Report the reference (source, frequency, harmonic, phase), sine output, sensitivity, time constant/slope (with the 99 % settling time), and input configuration."
+        },
+        {
+          "name": "read_outputs",
+          "kind": "read",
+          "description": "Read X, Y, R and θ as one coherent snapshot (SNAP?), with the reference frequency, sensitivity, fraction of full scale and any overloads latched since the last reading."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "set_amplitude",
+          "kind": "hazard",
+          "description": "Set the SINE OUT amplitude (V rms), which drives the sample or excitation circuit. Refused above the `max_amplitude_v` safety limit. Tell the user the new drive level first."
+        },
+        {
+          "name": "set_amplitude_minimum",
+          "kind": "safety",
+          "description": "Turn the sine output down to the instrument minimum (the lock-in's closest thing to 'output off') and stop any running frequency sweep. SR810/SR830: 4 mV rms (it cannot go to zero - disconnect the cable if the sample must see no drive). SR86x: 1 nV rms and DC level 0 V."
+        },
+        {
+          "name": "set_input",
+          "kind": "control",
+          "description": "Configure the signal input: A / A-B / current, AC or DC coupling, shield float/ground and (SR86x) the voltage input range. Use DC coupling below ~160 mHz. Omitted parameters are left unchanged."
+        },
+        {
+          "name": "set_reference",
+          "kind": "control",
+          "description": "Set the reference: source (internal/external), internal frequency, detection harmonic and phase shift. Omitted parameters are left unchanged. Changing the frequency also changes the frequency of the SINE OUT drive (at the current amplitude)."
+        },
+        {
+          "name": "set_sensitivity",
+          "kind": "control",
+          "description": "Set the sensitivity (full-scale range). The smallest available range that is at least `full_scale` is chosen, so a signal of that size does not overload. On SR810/SR830 the dynamic reserve can be set at the same time."
+        },
+        {
+          "name": "set_time_constant",
+          "kind": "control",
+          "description": "Set the output filter time constant (nearest available value), and optionally the filter slope and synchronous filter. The SR830 may raise a too-short time constant to its minimum for the current slope/reserve; the returned settings show the value actually used."
+        }
+      ]
+    },
+    {
+      "name": "Thorlabs Optical Power Meter",
+      "domain": "physics",
+      "category": "Optical power meters",
+      "vendor": "Thorlabs",
+      "models": [
+        "PM100D",
+        "PM100A",
+        "PM100USB",
+        "PM400",
+        "PM101 (unverified)",
+        "PM5020 (unverified)"
+      ],
+      "interfaces": [
+        "USB (USBTMC / VISA)"
+      ],
+      "protocol": "SCPI (Thorlabs PM100 / PM400 command set)",
+      "summary": "Read optical power (W and dBm), log power stability series, set wavelength correction, averaging and range, dark-zero the sensor, read sensor head temperature.",
+      "status": "simulated",
+      "package": "labmcp-thorlabs-pm",
+      "version": "0.1.0",
+      "description": "MCP server for Thorlabs optical power meters (PM100D/PM100A/PM100USB/PM400/PM101/PM5020, SCPI over USBTMC/VISA): read power, log stability, set wavelength, averaging, range, zero.",
+      "command": "labmcp-thorlabs-pm",
+      "module": "labmcp_thorlabs_pm.server",
+      "path": "servers/physics/thorlabs-power-meter",
+      "extras": {},
+      "tools": [
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_device_info",
+          "kind": "read",
+          "description": "Identify the meter console and the attached sensor head (model, serial, type, wavelength range, power ranges), and report the present wavelength, averaging, range and zero value."
+        },
+        {
+          "name": "log_power_series",
+          "kind": "read",
+          "description": "Log a series of power readings to characterise laser stability, warm-up or drift. Returns mean, stdev, min/max, RMS and peak-to-peak stability (%) and drift (%/min), plus the readings (downsampled to `max_points`; use `save_path` to keep all of them)."
+        },
+        {
+          "name": "read_power",
+          "kind": "read",
+          "description": "Read the optical power once (in W, plus dBm and a formatted string). The reading uses the configured correction wavelength and averaging; set the wavelength first."
+        },
+        {
+          "name": "read_sensor_temperature",
+          "kind": "read",
+          "description": "Read the sensor head temperature in °C (thermal sensors and other heads with a built-in temperature sensor only)."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "set_averaging",
+          "kind": "control",
+          "description": "Set how many samples the meter averages for each reading. More averaging lowers noise but slows each reading (PM100 series: ~3 ms per sample; PM400/PM101/PM5020: 1 ms)."
+        },
+        {
+          "name": "set_range",
+          "kind": "control",
+          "description": "Select auto-ranging, or a fixed power range that fits `range_w` (the meter picks the most sensitive range that can hold that power). A fixed range reports over-range if exceeded."
+        },
+        {
+          "name": "set_wavelength",
+          "kind": "control",
+          "description": "Set the correction wavelength (nm) the meter uses to convert sensor signal to power. Must be within the sensor's calibrated range (see `get_device_info`); sent as a whole number of nm."
+        },
+        {
+          "name": "zero_sensor",
+          "kind": "control",
+          "description": "Dark-zero the sensor (removes dark current / thermal offset). BEFORE calling, ask the user to block the beam and cover the sensor aperture completely, and wait for them to confirm: zeroing with light on the sensor corrupts all later readings. Takes a few seconds."
+        }
+      ]
+    },
+    {
+      "name": "EPICS Channel Access",
+      "domain": "protocols",
+      "category": "Control systems",
+      "vendor": "EPICS collaboration (any EPICS IOC)",
+      "models": [
+        "Any EPICS IOC serving Channel Access (EPICS Base 3.14-7.x, areaDetector, motor, asyn, PyDevice, caproto IOCs)",
+        "CA gateways"
+      ],
+      "interfaces": [
+        "Ethernet (CA over UDP/TCP 5064/5065)"
+      ],
+      "protocol": "EPICS Channel Access v4.13 (caproto)",
+      "summary": "Read PVs with units, precision, alarms, timestamps and limits; monitor PVs for a bounded time; guarded writes (allow-list regex, access rights, DRVH/DRVL control limits, put-callback completion); configurable safe-state action.",
+      "status": "simulated",
+      "package": "labmcp-epics",
+      "version": "0.1.0",
+      "description": "MCP server for EPICS Channel Access (accelerators, synchrotrons, neutron sources, telescopes, physics labs): read, monitor and (guarded) write process variables via caproto.",
+      "command": "labmcp-epics",
+      "module": "labmcp_epics.server",
+      "path": "servers/protocols/epics",
+      "extras": {},
+      "tools": [
+        {
+          "name": "apply_safe_state",
+          "kind": "safety",
+          "description": "Emergency action: write the scientist-configured safe-state PVs (--option safe_state, e.g. motor STOP fields, shutter close, HV off), all of them even if one fails. Available in read-only mode. It does not replace the facility's own interlocks and stop buttons."
+        },
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_pv",
+          "kind": "read",
+          "description": "Read one PV with its metadata: value, units, precision, alarm severity/status, IOC timestamp and age, display/alarm/warning/control limits and enum state names. Waveforms come back downsampled with min/max/mean statistics."
+        },
+        {
+          "name": "get_pvs",
+          "kind": "read",
+          "description": "Read many PVs at once (e.g. all motors or vacuum gauges of a beamline). PVs that cannot be reached are listed in `errors` instead of failing the whole call."
+        },
+        {
+          "name": "monitor_pv",
+          "kind": "read",
+          "description": "Subscribe to a PV and collect every value change for `duration_s` seconds (or until `max_updates`), then return statistics (min/max/mean/std, drift rate) and the updates."
+        },
+        {
+          "name": "put_pv",
+          "kind": "hazard",
+          "description": "Write a PV. This can move motors, open shutters, change magnet or high-voltage setpoints and heat or cool samples: tell the user exactly what will change first. The write is refused unless the PV matches the put allow-list, the IOC grants write access, and the value has the right type and lies within the PV's control limits (DRVL/DRVH). Returns the read-back value."
+        },
+        {
+          "name": "put_pvs",
+          "kind": "hazard",
+          "description": "Write several PVs in order (e.g. set both slit blades). Every write is validated first (allow- list, access rights, type, control limits); if any is invalid nothing is written. Writing stops at the first failure and the rest are reported as not written."
+        },
+        {
+          "name": "pv_info",
+          "kind": "read",
+          "description": "Connection details of a PV: serving IOC host:port, native type, element count, and whether this client has read/write access (EPICS access security) and passes the put allow-list."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        }
+      ]
+    },
+    {
+      "name": "Modbus TCP/RTU Device",
+      "domain": "protocols",
+      "category": "Industrial I/O & Process Control",
+      "vendor": "Any (Modbus)",
+      "models": [
+        "PID temperature controllers (e.g. Watlow, Eurotherm, Omega, Autonics)",
+        "Recirculating chillers and thermostats",
+        "PLCs and remote I/O",
+        "Process sensors and transmitters",
+        "Variable-frequency drives",
+        "Data loggers and power meters",
+        "Any other Modbus TCP / RTU / ASCII device"
+      ],
+      "interfaces": [
+        "Ethernet (Modbus TCP)",
+        "RS-485 / RS-232 (Modbus RTU, ASCII)",
+        "Serial-to-Ethernet gateways"
+      ],
+      "protocol": "Modbus Application Protocol V1.1b3 (TCP, RTU, ASCII)",
+      "summary": "Read and write named, typed, scaled points from a YAML/JSON register map with per-point min/max, raw register/coil access, and a map-defined safe state.",
+      "status": "simulated",
+      "package": "labmcp-modbus",
+      "version": "0.1.0",
+      "description": "MCP server for Modbus TCP and Modbus RTU devices (temperature controllers, chillers, PLCs, sensors, VFDs) with typed, scaled register maps, per-point limits and a safe state.",
+      "command": "labmcp-modbus",
+      "module": "labmcp_modbus.server",
+      "path": "servers/protocols/modbus",
+      "extras": {},
+      "tools": [
+        {
+          "name": "apply_safe_state",
+          "kind": "safety",
+          "description": "Put the device into the safe state defined in the register map (e.g. heater output off, controller to standby), writing each step in order and reading it back. Every step is attempted even if an earlier one fails. Call it immediately if anything looks wrong."
+        },
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "list_points",
+          "kind": "read",
+          "description": "Describe the loaded register map: device, every named point (table, 0-based address, type, scaling, unit, writable, min/max, enum) and the safe-state steps. Works without a connection."
+        },
+        {
+          "name": "read_coils",
+          "kind": "read",
+          "description": "Read coils (FC01): single-bit outputs such as run/stop or relay states."
+        },
+        {
+          "name": "read_discrete_inputs",
+          "kind": "read",
+          "description": "Read discrete inputs (FC02): single-bit, read-only status such as alarms or limit switches."
+        },
+        {
+          "name": "read_points",
+          "kind": "read",
+          "description": "Read named points from the register map, decoded and scaled into engineering units (e.g. process_temperature = 25.1 °C). A point that cannot be read gets an `error` instead of failing the whole call."
+        },
+        {
+          "name": "read_registers",
+          "kind": "read",
+          "description": "Read raw holding or input registers (unsigned 16-bit), optionally decoded as int16, 32-bit or 64-bit values. For exploring a device; prefer read_points when a register map describes it."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "write_coil",
+          "kind": "hazard",
+          "description": "Switch one raw coil (FC05). Coils often start or stop equipment (heaters, pumps, motors); mapped coils are refused here (use write_point)."
+        },
+        {
+          "name": "write_point",
+          "kind": "hazard",
+          "description": "Write a named point from the register map (setpoint, mode, output enable...). The value is checked against the point's writable flag, min/max or enum BEFORE sending, converted to raw registers, written, then read back. Changing setpoints and outputs acts on real equipment."
+        },
+        {
+          "name": "write_register",
+          "kind": "hazard",
+          "description": "Write one raw holding register (FC06). No scaling or limits are applied, so only use it for addresses the register map does not describe (mapped addresses are refused: use write_point). Returns a read-back if the register is readable."
+        },
+        {
+          "name": "write_registers",
+          "kind": "hazard",
+          "description": "Write consecutive raw holding registers (FC16), e.g. both halves of a 32-bit value. No scaling or limits are applied; mapped addresses are refused (use write_point)."
+        }
+      ]
+    },
+    {
+      "name": "Generic SCPI Instrument",
+      "domain": "protocols",
+      "category": "Test & Measurement",
+      "vendor": "Any (SCPI / IEEE 488.2)",
+      "models": [
+        "Digital multimeters",
+        "Oscilloscopes",
+        "Source-measure units",
+        "DC power supplies and electronic loads",
+        "Function / arbitrary waveform generators",
+        "Spectrum and network analyzers",
+        "Frequency counters",
+        "Any other SCPI or IEEE 488.2 instrument"
+      ],
+      "interfaces": [
+        "GPIB (VISA)",
+        "USBTMC (VISA)",
+        "LAN VXI-11 / HiSLIP (VISA)",
+        "LAN raw socket (e.g. port 5025)",
+        "RS-232 / USB-serial"
+      ],
+      "protocol": "SCPI-99 / IEEE 488.2",
+      "summary": "Identify, query, write and batch raw SCPI with a query-only read path, configurable command allow/deny lists, error-queue checks, binary block transfer and a user-defined safe state.",
+      "status": "simulated",
+      "package": "labmcp-scpi",
+      "version": "0.1.0",
+      "description": "Generic MCP server for any IEEE 488.2 / SCPI instrument (DMMs, scopes, SMUs, PSUs, generators, analyzers) over VISA, TCP socket or serial, with command allow/deny lists.",
+      "command": "labmcp-scpi",
+      "module": "labmcp_scpi.server",
+      "path": "servers/protocols/scpi-instrument",
+      "extras": {},
+      "tools": [
+        {
+          "name": "apply_safe_state",
+          "kind": "safety",
+          "description": "Put the instrument into the lab's configured safe state (the `--option safe_state` program message, e.g. 'OUTP OFF'), then read the error queue. Only listed when a safe state is configured. Call it immediately if anything looks wrong."
+        },
+        {
+          "name": "device_clear",
+          "kind": "safety",
+          "description": "Recover a stuck or confused instrument: VISA device clear (or discard unread input on socket/serial links), report the error queue, optionally ABORt, then *CLS. This does NOT make an arbitrary instrument safe (outputs stay as they are): use `apply_safe_state` if the lab configured one, or the instrument's own controls."
+        },
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_errors",
+          "kind": "read",
+          "description": "Read and clear the instrument's error/event queue (SYSTem:ERRor? until 0,\"No error\"). Entries are returned oldest first; each can only be read once. An empty list means no errors."
+        },
+        {
+          "name": "identify",
+          "kind": "read",
+          "description": "Ask the instrument who it is (*IDN?): manufacturer, model, serial number, firmware."
+        },
+        {
+          "name": "list_visa_resources",
+          "kind": "read",
+          "description": "List GPIB / USBTMC / LAN (VXI-11, HiSLIP) instruments visible to VISA on this computer. Works without --address. Raw-socket instruments (tcp://host:5025) are not discoverable."
+        },
+        {
+          "name": "query_binary_block",
+          "kind": "read",
+          "description": "Read an IEEE 488.2 definite-length binary block (waveforms, trace data, screenshots, FORMat REAL/INTeger readings). The query must pass the same read-only checks as `scpi_query`. Returns length, SHA-256 and (optionally) decoded values with summary statistics, downsampled to max_points; use save_path for the full data. Blocks larger than the `max_block_bytes` limit are discarded."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "reset_instrument",
+          "kind": "hazard",
+          "description": "Reset the instrument to its default settings (*RST, then *CLS), wait for completion and check errors. SCPI requires outputs OFF after *RST, but every other setting (levels, ranges, triggers, limits) returns to its default and some instruments differ: check the manual before resetting anything connected to a device under test."
+        },
+        {
+          "name": "scpi_batch",
+          "kind": "hazard",
+          "description": "Run a short sequence of SCPI commands and queries in order, checking the error queue after every step. Every step is checked against the command policy BEFORE the first one is sent, so a refused step means nothing was sent. Returns per-step replies and errors."
+        },
+        {
+          "name": "scpi_primer",
+          "kind": "read",
+          "description": "Concise SCPI syntax guide (long/short forms, queries, compound commands, common commands, error queue, binary blocks) plus this server's active command policy. Works without a connection."
+        },
+        {
+          "name": "scpi_query",
+          "kind": "read",
+          "description": "Send ONE read-only SCPI query and return the instrument's text reply."
+        },
+        {
+          "name": "scpi_write",
+          "kind": "hazard",
+          "description": "Send any SCPI program message (settings, compound 'A;B' messages, queries with side effects) and then read the error queue. If the message contains a query, its reply is returned. This can change the instrument's state, including switching outputs on; say what the command does before calling it. Commands in the lab's denylist, or outside its allowlist, are refused before anything is sent."
+        },
+        {
+          "name": "wait_operation_complete",
+          "kind": "read",
+          "description": "Wait until the instrument has finished all pending operations (*OPC? returns 1), e.g. after starting a sweep, an acquisition or a settling source."
+        }
+      ]
+    },
+    {
+      "name": "SiLA 2 Bridge",
+      "domain": "protocols",
+      "category": "Lab automation standard",
+      "vendor": "SiLA consortium standard (any SiLA 2 server)",
+      "models": [
+        "Any SiLA 2 server: devices and middleware with SiLA 2 interfaces (liquid handlers, incubators, readers, robots, schedulers)",
+        "sila_python, sila_java, sila_csharp, sila_cpp and vendor SiLA 2 servers"
+      ],
+      "interfaces": [
+        "Ethernet (gRPC over HTTP/2, TLS)",
+        "mDNS discovery"
+      ],
+      "protocol": "SiLA 2 v1.x (gRPC mapping, Feature Definition Language)",
+      "summary": "Discover SiLA servers, read features/commands/properties with typed schemas from the FDL, read and subscribe to properties, run commands with client-side FDL validation and an allow-list, track observable commands, cancel via CancelController.",
+      "status": "simulated",
+      "package": "labmcp-sila2",
+      "version": "0.1.0",
+      "description": "MCP bridge to any SiLA 2 server (lab-automation standard): discover servers, read features from their FDL, read/subscribe properties, run validated commands, track and cancel observable commands.",
+      "command": "labmcp-sila2",
+      "module": "labmcp_sila2.server",
+      "path": "servers/protocols/sila2",
+      "extras": {},
+      "tools": [
+        {
+          "name": "call_command",
+          "kind": "hazard",
+          "description": "Run a SiLA command. This may physically act on the device (move, dispense, heat, shake, open doors): tell the user what will happen first. Parameters are validated against the Feature Definition before anything is sent, and the command must be in the allow-list if one is set. Unobservable commands return their responses; observable ones return an `execution_id`."
+        },
+        {
+          "name": "cancel_command",
+          "kind": "safety",
+          "description": "Cancel a running observable command, or all commands, through SiLA's CancelController feature. Always available (even read-only). If the server has no CancelController, this explains that and points to the device's own stop command."
+        },
+        {
+          "name": "discover_servers",
+          "kind": "read",
+          "description": "Find SiLA 2 servers on the local network with SiLA Server Discovery (mDNS `_sila._tcp`). Lists name, UUID, address and port of each without connecting. Does not need a configured server."
+        },
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_command_result",
+          "kind": "read",
+          "description": "Responses of a finished observable command, or the SiLA execution error it finished with. Fails with a clear message if the command is still running."
+        },
+        {
+          "name": "get_command_status",
+          "kind": "read",
+          "description": "Status of an observable command started with `call_command`: waiting / running / finishedSuccessfully / finishedWithError, progress, estimated remaining time and the latest intermediate response."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_property",
+          "kind": "read",
+          "description": "Read the current value of a SiLA property (for observable properties: the first value of a subscription)."
+        },
+        {
+          "name": "get_server_info",
+          "kind": "read",
+          "description": "Identify the connected SiLA server (name, type, UUID, version, vendor, description), list its features, and say whether commands can be cancelled and which commands this bridge may call."
+        },
+        {
+          "name": "list_executions",
+          "kind": "read",
+          "description": "All observable command executions started in this session, newest last, with their status."
+        },
+        {
+          "name": "list_features",
+          "kind": "read",
+          "description": "Describe the server's features from their Feature Definitions: every command (observable or not, parameters, responses, intermediate responses, defined errors, and whether the allow-list permits calling it) and every property, with types rendered as JSON-schema-like dicts including units and constraints."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "subscribe_property",
+          "kind": "read",
+          "description": "Collect a property's values for `duration_s` seconds (SiLA subscription for observable properties, polling otherwise) and summarise them (e.g. watch a temperature settle)."
+        }
+      ]
+    }
+  ]
+}

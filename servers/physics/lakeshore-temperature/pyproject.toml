@@ -1,0 +1,34 @@
+[project]
+name = "labmcp-lakeshore"
+version = "0.1.0"
+description = "MCP server for Lake Shore Cryotronics 335/336/350 temperature controllers: read sensors, setpoints, ramps, heater ranges, PID, wait for stability, all heaters off."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "K-Dense and LabMCP contributors" }]
+keywords = ["mcp", "lab-instrument", "lake-shore", "cryogenic", "temperature-controller", "cryostat", "physics"]
+dependencies = ["labmcp[visa]>=0.1,<0.2"]
+
+[project.scripts]
+labmcp-lakeshore = "labmcp_lakeshore.server:main"
+
+[project.urls]
+Homepage = "https://github.com/K-Dense-AI/lab-instrument-mcps/tree/main/servers/physics/lakeshore-temperature"
+
+[tool.labmcp]
+name = "Lake Shore Temperature Controller"
+domain = "physics"
+category = "Cryogenic temperature control"
+vendor = "Lake Shore Cryotronics"
+models = ["Model 335", "Model 336", "Model 350"]
+interfaces = ["USB (virtual COM)", "Ethernet (TCP 7777, 336/350)", "IEEE-488 (GPIB)"]
+protocol = "Lake Shore ASCII command set (IEEE-488.2 style)"
+summary = "Read all sensor inputs with status, heater status, set setpoints/ramps/heater ranges/PID, wait for stable temperature, all heaters off."
+status = "simulated"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/labmcp_lakeshore"]

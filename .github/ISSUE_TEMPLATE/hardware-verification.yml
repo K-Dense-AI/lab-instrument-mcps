@@ -1,0 +1,45 @@
+name: ✅ Hardware verification report
+description: Tell us a server works (or doesn't) on your real instrument. This is how servers graduate from "simulated" to "hardware-verified".
+labels: ["hardware-verification"]
+body:
+  - type: input
+    id: server
+    attributes:
+      label: Server package and version
+      placeholder: "labmcp-mettler-toledo 0.1.0 (from `uvx labmcp-mettler-toledo --version`)"
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Instrument model and firmware
+      placeholder: "XS205DU, firmware 3.10"
+    validations:
+      required: true
+  - type: input
+    id: interface
+    attributes:
+      label: Connection
+      placeholder: "USB-RS232 adapter (FTDI), 9600 8N1, macOS 15"
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options: ["All tools I tried worked", "Some tools failed", "Could not connect"]
+    validations:
+      required: true
+  - type: textarea
+    id: tools
+    attributes:
+      label: Tools tested and outcome
+      placeholder: |
+        read_weight ✅
+        tare ✅
+        set_draft_shield ❌ (balance replied "WS L")
+  - type: textarea
+    id: log
+    attributes:
+      label: Output of `--check` and any `get_command_log` excerpts
+      render: json

@@ -1,0 +1,15 @@
+cff-version: 1.2.0
+message: "If you use LabMCP in your research, please cite it as below."
+title: "LabMCP: Open-source Model Context Protocol servers for laboratory instruments"
+type: software
+authors:
+  - name: "K-Dense"
+    website: "https://www.k-dense.ai"
+repository-code: "https://github.com/K-Dense-AI/lab-instrument-mcps"
+license: Apache-2.0
+keywords:
+  - model context protocol
+  - laboratory automation
+  - lab instruments
+  - AI agents
+  - self-driving labs

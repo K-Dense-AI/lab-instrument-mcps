@@ -1,0 +1,34 @@
+[project]
+name = "labmcp-palmsens"
+version = "0.1.0"
+description = "MCP server for PalmSens potentiostats running MethodSCRIPT (EmStat Pico, EmStat4, Sensit, Nexus): CV, LSV, DPV, chronoamperometry, raw scripts."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "K-Dense and LabMCP contributors" }]
+keywords = ["mcp", "lab-instrument", "potentiostat", "electrochemistry", "palmsens", "emstat", "methodscript", "cyclic-voltammetry"]
+dependencies = ["labmcp>=0.1,<0.2"]
+
+[project.scripts]
+labmcp-palmsens = "labmcp_palmsens.server:main"
+
+[project.urls]
+Homepage = "https://github.com/K-Dense-AI/lab-instrument-mcps/tree/main/servers/chemistry/palmsens-potentiostat"
+
+[tool.labmcp]
+name = "PalmSens Potentiostat"
+domain = "chemistry"
+category = "Electrochemistry"
+vendor = "PalmSens"
+models = ["EmStat Pico", "EmStat4 LR/HR (incl. EmStat4S/4M/4X)", "Sensit Wearable / Sensit BT", "Nexus"]
+interfaces = ["USB (virtual COM port)", "UART / RS-232"]
+protocol = "MethodSCRIPT v1.x + PalmSens online communication protocol"
+summary = "Cyclic, linear-sweep and differential-pulse voltammetry, chronoamperometry and raw MethodSCRIPT, with peak summaries and CSV export."
+status = "simulated"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/labmcp_palmsens"]

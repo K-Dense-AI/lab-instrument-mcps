@@ -1,0 +1,40 @@
+[project]
+name = "labmcp-ble-health"
+version = "0.1.0"
+description = "MCP server for Bluetooth LE health sensors (standard GATT profiles): heart rate + HRV, SpO2, blood pressure, temperature, weight."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "K-Dense and LabMCP contributors" }]
+keywords = ["mcp", "lab-instrument", "bluetooth", "ble", "gatt", "heart-rate", "hrv", "pulse-oximeter", "blood-pressure", "research"]
+dependencies = ["labmcp>=0.1,<0.2", "bleak>=1.0,<4"]
+
+[project.scripts]
+labmcp-ble-health = "labmcp_ble_health.server:main"
+
+[project.urls]
+Homepage = "https://github.com/K-Dense-AI/lab-instrument-mcps/tree/main/servers/health/ble-health-sensors"
+
+[tool.labmcp]
+name = "Bluetooth LE Health Sensors"
+domain = "health"
+category = "Physiological sensors"
+vendor = "Any (Bluetooth SIG standard profiles)"
+models = [
+    "Heart-rate chest straps and armbands (Heart Rate Service)",
+    "Pulse oximeters (Pulse Oximeter Service)",
+    "Blood pressure monitors (Blood Pressure Service)",
+    "Thermometers (Health Thermometer Service)",
+    "Weight scales (Weight Scale Service)",
+]
+interfaces = ["Bluetooth Low Energy"]
+protocol = "Bluetooth SIG GATT: HRS, PLXS, BLS, HTS, WSS, BAS, DIS (IEEE 11073-20601 SFLOAT/FLOAT)"
+summary = "Scan, read device info/battery, record heart rate with RR intervals and HRV, read SpO2, blood pressure, temperature and weight. Research use only, not a medical device."
+status = "simulated"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/labmcp_ble_health"]

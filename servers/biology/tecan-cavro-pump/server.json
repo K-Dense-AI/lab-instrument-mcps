@@ -1,0 +1,46 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.K-Dense-AI/labmcp-cavro",
+  "title": "Tecan Cavro Syringe Pump",
+  "description": "MCP server for Tecan Cavro syringe pumps (XLP 6000, XMP 6000, XCalibur) over the DT protocol: initia",
+  "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/K-Dense-AI/lab-instrument-mcps",
+    "source": "github",
+    "subfolder": "servers/biology/tecan-cavro-pump"
+  },
+  "websiteUrl": "https://github.com/K-Dense-AI/lab-instrument-mcps/tree/main/servers/biology/tecan-cavro-pump",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "labmcp-cavro",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "LABMCP_ADDRESS",
+          "description": "Instrument address, e.g. serial:///dev/ttyUSB0 or tcp://192.168.1.50:5025",
+          "isRequired": false
+        },
+        {
+          "name": "LABMCP_SIMULATE",
+          "description": "Set to 1 to use the built-in simulator (no hardware)",
+          "isRequired": false
+        },
+        {
+          "name": "LABMCP_READ_ONLY",
+          "description": "Set to 1 to disable all state-changing tools",
+          "isRequired": false
+        },
+        {
+          "name": "LABMCP_LIMITS",
+          "description": "Safety limit overrides, e.g. max_temperature_c=80",
+          "isRequired": false
+        }
+      ]
+    }
+  ]
+}

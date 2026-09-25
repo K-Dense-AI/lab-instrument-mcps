@@ -1,0 +1,41 @@
+[project]
+name = "labmcp-epics"
+version = "0.1.0"
+description = "MCP server for EPICS Channel Access (accelerators, synchrotrons, neutron sources, telescopes, physics labs): read, monitor and (guarded) write process variables via caproto."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "K-Dense and LabMCP contributors" }]
+keywords = ["mcp", "lab-instrument", "epics", "channel-access", "caproto", "synchrotron", "accelerator", "beamline", "control-system"]
+dependencies = [
+    "labmcp>=0.1,<0.2",
+    "caproto>=1.1,<2",
+    "numpy>=1.24",
+]
+
+[project.scripts]
+labmcp-epics = "labmcp_epics.server:main"
+
+[project.urls]
+Homepage = "https://github.com/K-Dense-AI/lab-instrument-mcps/tree/main/servers/protocols/epics"
+
+[tool.labmcp]
+name = "EPICS Channel Access"
+domain = "protocols"
+category = "Control systems"
+vendor = "EPICS collaboration (any EPICS IOC)"
+models = [
+    "Any EPICS IOC serving Channel Access (EPICS Base 3.14-7.x, areaDetector, motor, asyn, PyDevice, caproto IOCs)",
+    "CA gateways",
+]
+interfaces = ["Ethernet (CA over UDP/TCP 5064/5065)"]
+protocol = "EPICS Channel Access v4.13 (caproto)"
+summary = "Read PVs with units, precision, alarms, timestamps and limits; monitor PVs for a bounded time; guarded writes (allow-list regex, access rights, DRVH/DRVL control limits, put-callback completion); configurable safe-state action."
+status = "simulated"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/labmcp_epics"]

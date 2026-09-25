@@ -1,0 +1,34 @@
+[project]
+name = "labmcp-mettler-toledo"
+version = "0.1.0"
+description = "MCP server for Mettler Toledo laboratory balances (MT-SICS): weigh, tare, zero, log drift, adjust."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "K-Dense and LabMCP contributors" }]
+keywords = ["mcp", "lab-instrument", "balance", "mettler-toledo", "mt-sics", "weighing"]
+dependencies = ["labmcp>=0.1,<0.2"]
+
+[project.scripts]
+labmcp-mettler-toledo = "labmcp_mettler_toledo.server:main"
+
+[project.urls]
+Homepage = "https://github.com/K-Dense-AI/lab-instrument-mcps/tree/main/servers/chemistry/mettler-toledo-balance"
+
+[tool.labmcp]
+name = "Mettler Toledo Balance"
+domain = "chemistry"
+category = "Weighing"
+vendor = "Mettler Toledo"
+models = ["Excellence XPR/XSR", "XP/XS", "XA/XE", "MS/ML", "NewClassic ME/MS", "MT-SICS weighing terminals"]
+interfaces = ["RS-232", "USB (virtual COM)", "Ethernet"]
+protocol = "MT-SICS (levels 0-2)"
+summary = "Weigh (stable/immediate), tare, zero, log drift series, internal adjustment, draft shield, display messages."
+status = "simulated"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/labmcp_mettler_toledo"]

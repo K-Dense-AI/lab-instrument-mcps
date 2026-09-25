@@ -1,0 +1,41 @@
+[project]
+name = "labmcp-sila2"
+version = "0.1.0"
+description = "MCP bridge to any SiLA 2 server (lab-automation standard): discover servers, read features from their FDL, read/subscribe properties, run validated commands, track and cancel observable commands."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "K-Dense and LabMCP contributors" }]
+keywords = ["mcp", "lab-instrument", "sila", "sila2", "lab-automation", "grpc", "liquid-handling", "robotics"]
+dependencies = [
+    "labmcp>=0.1,<0.2",
+    "sila2>=0.12,<0.15",
+    "zeroconf>=0.38",
+]
+
+[project.scripts]
+labmcp-sila2 = "labmcp_sila2.server:main"
+
+[project.urls]
+Homepage = "https://github.com/K-Dense-AI/lab-instrument-mcps/tree/main/servers/protocols/sila2"
+
+[tool.labmcp]
+name = "SiLA 2 Bridge"
+domain = "protocols"
+category = "Lab automation standard"
+vendor = "SiLA consortium standard (any SiLA 2 server)"
+models = [
+    "Any SiLA 2 server: devices and middleware with SiLA 2 interfaces (liquid handlers, incubators, readers, robots, schedulers)",
+    "sila_python, sila_java, sila_csharp, sila_cpp and vendor SiLA 2 servers",
+]
+interfaces = ["Ethernet (gRPC over HTTP/2, TLS)", "mDNS discovery"]
+protocol = "SiLA 2 v1.x (gRPC mapping, Feature Definition Language)"
+summary = "Discover SiLA servers, read features/commands/properties with typed schemas from the FDL, read and subscribe to properties, run commands with client-side FDL validation and an allow-list, track observable commands, cancel via CancelController."
+status = "simulated"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/labmcp_sila2"]

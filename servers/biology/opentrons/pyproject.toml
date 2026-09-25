@@ -1,0 +1,34 @@
+[project]
+name = "labmcp-opentrons"
+version = "0.1.0"
+description = "MCP server for Opentrons OT-2 and Flex liquid-handling robots (HTTP API): upload and analyze protocols, start, pause and stop runs, monitor progress, modules and pipettes."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "K-Dense and LabMCP contributors" }]
+keywords = ["mcp", "lab-instrument", "opentrons", "ot-2", "flex", "liquid-handling", "lab-automation", "pipetting"]
+dependencies = ["labmcp>=0.1,<0.2", "httpx>=0.27"]
+
+[project.scripts]
+labmcp-opentrons = "labmcp_opentrons.server:main"
+
+[project.urls]
+Homepage = "https://github.com/K-Dense-AI/lab-instrument-mcps/tree/main/servers/biology/opentrons"
+
+[tool.labmcp]
+name = "Opentrons OT-2 / Flex"
+domain = "biology"
+category = "Liquid handling"
+vendor = "Opentrons"
+models = ["Flex", "OT-2"]
+interfaces = ["Ethernet", "Wi-Fi", "USB (network over USB)"]
+protocol = "Opentrons robot-server HTTP API (port 31950)"
+summary = "Upload and analyze protocols, review deck layout, start/pause/stop/resume runs, track progress, home, lights, read pipettes and modules, switch modules off."
+status = "simulated"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/labmcp_opentrons"]

@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "balance": { "command": "uvx", "args": ["labmcp-mettler-toledo", "--simulate"] },
+    "stirrer": { "command": "uvx", "args": ["labmcp-ika", "--simulate", "--limit", "max_temperature_c=80"] },
+    "ph-probe": { "command": "uvx", "args": ["labmcp-atlas-ezo", "--simulate"] },
+    "syringe-pump": { "command": "uvx", "args": ["labmcp-new-era", "--simulate"] },
+    "potentiostat": { "command": "uvx", "args": ["labmcp-palmsens", "--simulate"] },
+    "spectrometer": { "command": "uvx", "args": ["labmcp-ocean-spectrometer", "--simulate"] }
+  }
+}

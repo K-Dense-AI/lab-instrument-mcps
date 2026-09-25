@@ -1,0 +1,46 @@
+name: 🔬 Request an instrument
+description: Ask for an MCP server for an instrument (or instrument family) that has no official MCP server.
+labels: ["instrument-request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks! Requests with a **link to the communication manual or SDK** get built first.
+        Please check the [catalog](https://github.com/K-Dense-AI/lab-instrument-mcps#-server-catalog) and [official servers list](https://github.com/K-Dense-AI/lab-instrument-mcps/blob/main/docs/official-servers.md) first.
+  - type: input
+    id: instrument
+    attributes:
+      label: Instrument / family
+      placeholder: "e.g. Hamilton Microlab 600 syringe pumps"
+    validations:
+      required: true
+  - type: dropdown
+    id: domain
+    attributes:
+      label: Domain
+      options: [biology, chemistry, physics, health, engineering, protocol (many instruments)]
+    validations:
+      required: true
+  - type: input
+    id: interface
+    attributes:
+      label: Interface & protocol
+      placeholder: "e.g. RS-232, documented ASCII command set; or Python SDK 'foo'"
+  - type: input
+    id: manual
+    attributes:
+      label: Link to programming manual / SDK
+  - type: textarea
+    id: workflows
+    attributes:
+      label: What would you ask an AI agent to do with it?
+      placeholder: "e.g. 'Prime the lines, then dispense 50 µL into each of 8 vials and log the volumes.'"
+    validations:
+      required: true
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Can you help?
+      options:
+        - label: I have this instrument and can test a simulated server on real hardware
+        - label: I'd like to write the server myself (see docs/writing-a-server.md)
