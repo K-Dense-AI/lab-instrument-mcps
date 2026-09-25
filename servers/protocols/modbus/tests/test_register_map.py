@@ -113,12 +113,12 @@ def test_invalid_documents_and_safe_state():
 
 def test_load_json_and_yaml(tmp_path):
     doc = {"device": {"unit_id": 7}, "points": [{"name": "pv", "table": "input", "address": 3, "type": "int16"}]}
-    (tmp_path / "m.json").write_text(json.dumps(doc))
+    (tmp_path / "m.json").write_text(json.dumps(doc), encoding="utf-8")
     m = load_register_map(tmp_path / "m.json")
     assert m.unit_id == 7 and m.point("pv").address == 3
-    (tmp_path / "m.yaml").write_text("points:\n  pv: {table: input, address: 3, type: int16, unit: degC}\n")
+    (tmp_path / "m.yaml").write_text("points:\n  pv: {table: input, address: 3, type: int16, unit: degC}\n", encoding="utf-8")
     assert load_register_map(tmp_path / "m.yaml").point("pv").unit == "degC"
-    (tmp_path / "bad.yaml").write_text("points: [\n")
+    (tmp_path / "bad.yaml").write_text("points: [\n", encoding="utf-8")
     with pytest.raises(RegisterMapError, match="invalid YAML"):
         load_register_map(tmp_path / "bad.yaml")
     with pytest.raises(RegisterMapError, match="Cannot read"):

@@ -129,7 +129,8 @@ def test_identify_and_extra_points(tmp_path):
     path.write_text(
         "points:\n"
         "  flow: {table: holding, address: 200, type: float32, unit: L/min, writable: true, min: 0, max: 10}\n"
-        "  pump: {table: coil, address: 7, writable: true}\n"
+        "  pump: {table: coil, address: 7, writable: true}\n",
+        encoding="utf-8",
     )
     dev, _, _ = make_device(register_map=load_register_map(path))
     assert dev.write_point("flow", 2.5)[0].value == 2.5  # the simulator stores unknown mapped points
@@ -271,7 +272,7 @@ async def test_tools_via_mcp():
 
 async def test_raw_writes_to_unmapped_addresses(tmp_path):
     path = tmp_path / "partial.yaml"
-    path.write_text("points:\n  pv: {table: input, address: 0, type: int16, scale: 0.1, unit: °C}\n")
+    path.write_text("points:\n  pv: {table: input, address: 0, type: int16, scale: 0.1, unit: °C}\n", encoding="utf-8")
     async with simulated_client(server, options={"register_map": str(path)}) as client:
         r = (await client.call_tool("write_register", {"address": 10, "value": 1500})).structured_content
         assert r["read_back"] == [1500]
@@ -302,7 +303,7 @@ async def test_raw_writes_option_hides_raw_tools():
 
 async def test_invalid_map_reports_error(tmp_path):
     path = tmp_path / "bad.yaml"
-    path.write_text("points:\n  sp: {table: holding, address: 0, type: int16, writable: true}\n")
+    path.write_text("points:\n  sp: {table: holding, address: 0, type: int16, writable: true}\n", encoding="utf-8")
     async with simulated_client(server, options={"register_map": str(path)}) as client:
         info = (await client.call_tool("list_points", {})).structured_content
         assert info["loaded"] is False and "min and max" in info["error"]

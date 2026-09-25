@@ -33,14 +33,18 @@ jobs:
           - os: windows-latest
             python: "3.12"
     runs-on: ${{ matrix.os }}
+    env:
+      # Pin every uv command to the matrix Python; otherwise `uv run` follows
+      # .python-version (3.12) and rebuilds the venv without workspace packages.
+      UV_PYTHON: ${{ matrix.python }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - run: uv sync --all-packages --python ${{ matrix.python }}
+      - run: uv sync --all-packages
       - run: uv run pytest
       - name: Every server starts in simulation mode
         shell: bash
         run: |
-          for cmd in $(uv run python -c "import json;print(' '.join(s['command'] for s in json.load(open('catalog.json'))['servers']))"); do
+          for cmd in $(uv run python -c "import json;print(' '.join(s['command'] for s in json.load(open('catalog.json', encoding='utf-8'))['servers']))" | tr -d '\r'); do
             echo "::group::$cmd"; uv run "$cmd" --simulate --check > /dev/null || exit 1; echo "::endgroup::"
           done
