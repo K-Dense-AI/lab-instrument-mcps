@@ -1,0 +1,34 @@
+[project]
+name = "labmcp-srs-rga"
+version = "0.1.0"
+description = "MCP server for SRS RGA100/200/300 residual gas analyzers: spectra, partial pressures, leak checks, filament/CDEM with pressure interlocks."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "K-Dense and LabMCP contributors" }]
+keywords = ["mcp", "lab-instrument", "rga", "residual-gas-analyzer", "mass-spectrometry", "vacuum", "srs", "leak-detection"]
+dependencies = ["labmcp>=0.1,<0.2"]
+
+[project.scripts]
+labmcp-srs-rga = "labmcp_srs_rga.server:main"
+
+[project.urls]
+Homepage = "https://github.com/K-Dense-AI/lab-instrument-mcps/tree/main/servers/physics/srs-rga"
+
+[tool.labmcp]
+name = "SRS Residual Gas Analyzer"
+domain = "physics"
+category = "Mass spectrometry"
+vendor = "Stanford Research Systems"
+models = ["RGA100", "RGA200", "RGA300"]
+interfaces = ["RS-232", "TCP"]
+protocol = "SRS RGA command set (ASCII commands, binary ion currents)"
+summary = "Analog and histogram spectra, partial pressures at chosen m/z, total pressure, helium leak checks, gas identification; filament, CDEM and degas with pressure interlocks."
+status = "simulated"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/labmcp_srs_rga"]

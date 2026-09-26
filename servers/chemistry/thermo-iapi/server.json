@@ -1,0 +1,46 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.K-Dense-AI/labmcp-thermo-iapi",
+  "title": "Thermo Orbitrap (Instrument API)",
+  "description": "MCP server adapter for Thermo Fisher Orbitrap mass spectrometers via the licensed Instrument API (IA",
+  "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/K-Dense-AI/lab-instrument-mcps",
+    "source": "github",
+    "subfolder": "servers/chemistry/thermo-iapi"
+  },
+  "websiteUrl": "https://github.com/K-Dense-AI/lab-instrument-mcps/tree/main/servers/chemistry/thermo-iapi",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "labmcp-thermo-iapi",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "LABMCP_ADDRESS",
+          "description": "Instrument address, e.g. serial:///dev/ttyUSB0 or tcp://192.168.1.50:5025",
+          "isRequired": false
+        },
+        {
+          "name": "LABMCP_SIMULATE",
+          "description": "Set to 1 to use the built-in simulator (no hardware)",
+          "isRequired": false
+        },
+        {
+          "name": "LABMCP_READ_ONLY",
+          "description": "Set to 1 to disable all state-changing tools",
+          "isRequired": false
+        },
+        {
+          "name": "LABMCP_LIMITS",
+          "description": "Safety limit overrides, e.g. max_temperature_c=80",
+          "isRequired": false
+        }
+      ]
+    }
+  ]
+}

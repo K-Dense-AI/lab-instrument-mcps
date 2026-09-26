@@ -1,0 +1,6 @@
+Bracket Type=4
+Sample Type,File Name,Sample ID,Path,Instrument Method,Process Method,Calibration File,Position,Inj Vol,Level,Sample Wt,Sample Vol,ISTD Amt,Dil Factor,L1 Study,L2 Client,L3 Laboratory,L4 Company,L5 Phone,Comment,Sample Name
+Blank,20260926_blank_01,B1,D:\Data\2026,C:\Xcalibur\methods\DIA_60min,,,R:A1,5,,0,0,0,1,,,,,,,Blank
+Std Bracket,20260926_cal_01,,D:\Data\2026,C:\Xcalibur\methods\DIA_60min,C:\Xcalibur\methods\quan.pmd,,R:A2,5,1,0,0,0,1,,,,,,,Cal 1
+Unknown,20260926_s01,,D:\Data\2026,C:\Xcalibur\methods\DIA_60min,,,R:B1,2.5,,0,0,0,1,,,,,,"said ""hi"", twice",Plasma 01
+QC,20260926_qc_01,,D:\Data\2026,C:\Xcalibur\methods\DIA_60min,,,R:H12,5,,0,0,0,2,,,,,,,QC

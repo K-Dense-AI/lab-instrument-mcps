@@ -1,0 +1,5 @@
+﻿Sample Name,Barcode,Rack Code,Sample Position,Method,Data File,Sample Type,Level Name,Inj Vol (µL),Comment
+Blank,,,P1-A1,D:\MassHunter\methods\Panel.m,Run001.d,Blank,,5,
+Cal L1,,,P1-A2,D:\MassHunter\methods\Panel.m,Run002.d,Calibration,L1,5,1 ng/mL
+Plasma 01,,,P1-B1,D:\MassHunter\methods\Panel.m,Run003.d,Sample,,-1,
+"QC, mid",QC123,,P2-A1,D:\MassHunter\methods\Panel.m,Run004.d,QC,,2.5,

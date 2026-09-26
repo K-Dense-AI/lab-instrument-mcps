@@ -1,0 +1,39 @@
+[project]
+name = "labmcp-thermo-iapi"
+version = "0.1.0"
+description = "MCP server adapter for Thermo Fisher Orbitrap mass spectrometers via the licensed Instrument API (IAPI): status, live scans, custom and repeating scans, acquisitions."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "K-Dense and LabMCP contributors" }]
+keywords = ["mcp", "lab-instrument", "mass-spectrometry", "orbitrap", "thermo-fisher", "iapi", "proteomics"]
+dependencies = ["labmcp>=0.1,<0.2"]
+
+[project.optional-dependencies]
+# The IAPI is a Windows .NET API; the IAPI assemblies themselves are licensed by Thermo Fisher
+# and are NOT a dependency: users supply them with --option assembly_dir=...
+windows = ["pythonnet>=3.0.3; sys_platform == 'win32'"]
+
+[project.scripts]
+labmcp-thermo-iapi = "labmcp_thermo_iapi.server:main"
+
+[project.urls]
+Homepage = "https://github.com/K-Dense-AI/lab-instrument-mcps/tree/main/servers/chemistry/thermo-iapi"
+
+[tool.labmcp]
+name = "Thermo Orbitrap (Instrument API)"
+domain = "chemistry"
+category = "Mass spectrometry"
+vendor = "Thermo Fisher Scientific"
+models = ["Orbitrap Fusion", "Orbitrap Fusion Lumos", "Orbitrap Eclipse", "Orbitrap Ascend", "Orbitrap Exploris 240", "Orbitrap Exploris 480", "Q Exactive family"]
+interfaces = [".NET API (Windows)"]
+protocol = "Thermo Fisher Instrument API (IAPI)"
+summary = "Adapter for the licensed Thermo IAPI (bring your own assemblies): instrument status, live scan buffer with MS-order filters, validated and rate-limited custom and repeating scans, acquisitions to raw files, stop/cancel."
+status = "simulated"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/labmcp_thermo_iapi"]

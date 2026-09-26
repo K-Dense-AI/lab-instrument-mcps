@@ -1,0 +1,5 @@
+Sample Name,Sample ID,Sample Type,MS Method,LC Method,Rack Type,Rack Position,Plate Type,Plate Position,Vial Position,Injection Volume,Data File,Processing Method,Comment
+Blank,B1,Blank,MRM_panel.msm,Gradient.lcm,,,,,1,5,Batch_2026-09-26,,
+Cal 1,,Standard,MRM_panel.msm,Gradient.lcm,,,,,2,5,Batch_2026-09-26,Panel.qmethod,"1 ng/mL, in water"
+Plasma 01,P-01,Unknown,MRM_panel.msm,Gradient.lcm,,,,,3,2.5,Batch_2026-09-26,,
+QC mid,,QualityControl,MRM_panel.msm,Gradient.lcm,,,,,4,,Batch_2026-09-26,,

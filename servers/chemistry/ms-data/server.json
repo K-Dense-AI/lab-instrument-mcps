@@ -1,0 +1,46 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.K-Dense-AI/labmcp-ms-data",
+  "title": "Mass Spectrometry Data (mzML, Bruker TDF, vendor conversion)",
+  "description": "MCP server for mass-spectrometry data files (mzML, mzMLb, Bruker timsTOF TDF; vendor files via mscon",
+  "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/K-Dense-AI/lab-instrument-mcps",
+    "source": "github",
+    "subfolder": "servers/chemistry/ms-data"
+  },
+  "websiteUrl": "https://github.com/K-Dense-AI/lab-instrument-mcps/tree/main/servers/chemistry/ms-data",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "labmcp-ms-data",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "LABMCP_ADDRESS",
+          "description": "Instrument address, e.g. serial:///dev/ttyUSB0 or tcp://192.168.1.50:5025",
+          "isRequired": false
+        },
+        {
+          "name": "LABMCP_SIMULATE",
+          "description": "Set to 1 to use the built-in simulator (no hardware)",
+          "isRequired": false
+        },
+        {
+          "name": "LABMCP_READ_ONLY",
+          "description": "Set to 1 to disable all state-changing tools",
+          "isRequired": false
+        },
+        {
+          "name": "LABMCP_LIMITS",
+          "description": "Safety limit overrides, e.g. max_temperature_c=80",
+          "isRequired": false
+        }
+      ]
+    }
+  ]
+}

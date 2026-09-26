@@ -27,5 +27,7 @@ These aren't instrument drivers, but they pair well with LabMCP servers:
 
 ## Watch list
 
+- **Mass spectrometers** (checked 2026-09-26). None of Thermo Fisher, Bruker, Waters, Agilent, SCIEX or Shimadzu ships an official MCP server. Their acquisition APIs are Windows-only and licence-gated, so LabMCP covers open data formats (`labmcp-ms-data`), documented worklist imports (`labmcp-ms-worklist`) and a bring-your-own-licence Thermo IAPI adapter (`labmcp-thermo-iapi`). Danaher (SCIEX) supports the Model Hardware Standard; if SCIEX ships an official agent interface, it will be listed here.
+
 - **Anthropic Model Hardware Standard** (research preview, Aug 2026). Tecan, QIAGEN, MBF Bioscience and others are listed as partners. If they ship official agent interfaces for their instruments, we'll list them here and won't duplicate them.
 - **NI LabVIEW 2026 Q3** adds an assistant that *consumes* MCP servers. It doesn't provide one for NI-DAQmx hardware, so `labmcp-ni-daqmx` fills that gap.
