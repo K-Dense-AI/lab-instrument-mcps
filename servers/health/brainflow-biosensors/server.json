@@ -3,7 +3,7 @@
   "name": "io.github.K-Dense-AI/labmcp-brainflow",
   "title": "BrainFlow Biosensing Boards",
   "description": "MCP server for EEG/EMG/ECG/PPG boards via BrainFlow (OpenBCI, Muse, Neurosity, Unicorn, BrainBit).",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "repository": {
     "url": "https://github.com/K-Dense-AI/lab-instrument-mcps",
     "source": "github",
@@ -15,7 +15,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "labmcp-brainflow",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "transport": {
         "type": "stdio"
       },

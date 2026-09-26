@@ -1,6 +1,6 @@
 [project]
 name = "labmcp-ms-data"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP server for mass-spectrometry data files (mzML, mzMLb, Bruker timsTOF TDF; vendor files via msconvert/ThermoRawFileParser): run info, TIC/BPC, XICs, spectra, MS2 search, QC."
 readme = "README.md"
 license = "Apache-2.0"

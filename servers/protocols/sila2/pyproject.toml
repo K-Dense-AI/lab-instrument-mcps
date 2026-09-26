@@ -1,6 +1,6 @@
 [project]
 name = "labmcp-sila2"
-version = "0.1.1"
+version = "0.1.2"
 description = "MCP bridge to any SiLA 2 server (lab-automation standard): discover servers, read features from their FDL, read/subscribe properties, run validated commands, track and cancel observable commands."
 readme = "README.md"
 license = "Apache-2.0"

@@ -1,6 +1,6 @@
 [project]
 name = "labmcp-thermo-iapi"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP server adapter for Thermo Fisher Orbitrap mass spectrometers via the licensed Instrument API (IAPI): status, live scans, custom and repeating scans, acquisitions."
 readme = "README.md"
 license = "Apache-2.0"

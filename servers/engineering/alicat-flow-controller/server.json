@@ -3,7 +3,7 @@
   "name": "io.github.K-Dense-AI/labmcp-alicat",
   "title": "Alicat Mass Flow & Pressure Controller",
   "description": "MCP server for Alicat mass flow and pressure meters/controllers.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "repository": {
     "url": "https://github.com/K-Dense-AI/lab-instrument-mcps",
     "source": "github",
@@ -15,7 +15,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "labmcp-alicat",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "transport": {
         "type": "stdio"
       },

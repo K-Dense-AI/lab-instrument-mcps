@@ -3,7 +3,7 @@
   "name": "io.github.K-Dense-AI/labmcp-ble-health",
   "title": "Bluetooth LE Health Sensors",
   "description": "MCP server for Bluetooth LE health sensors (standard GATT profiles).",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "repository": {
     "url": "https://github.com/K-Dense-AI/lab-instrument-mcps",
     "source": "github",
@@ -15,7 +15,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "labmcp-ble-health",
-      "version": "0.1.2",
+      "version": "0.1.3",
       "transport": {
         "type": "stdio"
       },

@@ -3,7 +3,7 @@
   "name": "io.github.K-Dense-AI/labmcp-bench-psu",
   "title": "Bench DC Power Supply",
   "description": "MCP server for programmable DC bench power supplies from Rigol, Siglent and Aim-TTi.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "repository": {
     "url": "https://github.com/K-Dense-AI/lab-instrument-mcps",
     "source": "github",
@@ -15,7 +15,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "labmcp-bench-psu",
-      "version": "0.1.2",
+      "version": "0.1.3",
       "transport": {
         "type": "stdio"
       },

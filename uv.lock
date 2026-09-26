@@ -1864,7 +1864,7 @@ provides-extras = ["visa"]
 
 [[package]]
 name = "labmcp-alicat"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "servers/engineering/alicat-flow-controller" }
 dependencies = [
     { name = "labmcp" },
@@ -1875,7 +1875,7 @@ requires-dist = [{ name = "labmcp", editable = "packages/labmcp" }]
 
 [[package]]
 name = "labmcp-astm-lis"
-version = "0.1.2"
+version = "0.1.3"
 source = { editable = "servers/health/astm-lis-analyzer" }
 dependencies = [
     { name = "labmcp" },
@@ -1886,7 +1886,7 @@ requires-dist = [{ name = "labmcp", editable = "packages/labmcp" }]
 
 [[package]]
 name = "labmcp-atlas-ezo"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "servers/biology/atlas-ezo-sensors" }
 dependencies = [
     { name = "labmcp" },
@@ -1897,7 +1897,7 @@ requires-dist = [{ name = "labmcp", editable = "packages/labmcp" }]
 
 [[package]]
 name = "labmcp-bench-psu"
-version = "0.1.2"
+version = "0.1.3"
 source = { editable = "servers/engineering/bench-power-supply" }
 dependencies = [
     { name = "labmcp", extra = ["visa"] },
@@ -1908,7 +1908,7 @@ requires-dist = [{ name = "labmcp", extras = ["visa"], editable = "packages/labm
 
 [[package]]
 name = "labmcp-ble-health"
-version = "0.1.2"
+version = "0.1.3"
 source = { editable = "servers/health/ble-health-sensors" }
 dependencies = [
     { name = "bleak" },
@@ -1923,7 +1923,7 @@ requires-dist = [
 
 [[package]]
 name = "labmcp-brainflow"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "servers/health/brainflow-biosensors" }
 dependencies = [
     { name = "brainflow" },
@@ -1942,7 +1942,7 @@ requires-dist = [
 
 [[package]]
 name = "labmcp-cavro"
-version = "0.1.2"
+version = "0.1.3"
 source = { editable = "servers/biology/tecan-cavro-pump" }
 dependencies = [
     { name = "labmcp" },
@@ -1953,7 +1953,7 @@ requires-dist = [{ name = "labmcp", editable = "packages/labmcp" }]
 
 [[package]]
 name = "labmcp-epics"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "servers/protocols/epics" }
 dependencies = [
     { name = "caproto" },
@@ -1972,7 +1972,7 @@ requires-dist = [
 
 [[package]]
 name = "labmcp-ika"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "servers/chemistry/ika-stirrer" }
 dependencies = [
     { name = "labmcp" },
@@ -1983,7 +1983,7 @@ requires-dist = [{ name = "labmcp", editable = "packages/labmcp" }]
 
 [[package]]
 name = "labmcp-julabo"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "servers/chemistry/julabo-circulator" }
 dependencies = [
     { name = "labmcp" },
@@ -1994,7 +1994,7 @@ requires-dist = [{ name = "labmcp", editable = "packages/labmcp" }]
 
 [[package]]
 name = "labmcp-keithley-smu"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "servers/physics/keithley-smu" }
 dependencies = [
     { name = "labmcp", extra = ["visa"] },
@@ -2005,7 +2005,7 @@ requires-dist = [{ name = "labmcp", extras = ["visa"], editable = "packages/labm
 
 [[package]]
 name = "labmcp-labjack"
-version = "0.1.2"
+version = "0.1.3"
 source = { editable = "servers/engineering/labjack" }
 dependencies = [
     { name = "labjack-ljm" },
@@ -2020,7 +2020,7 @@ requires-dist = [
 
 [[package]]
 name = "labmcp-lakeshore"
-version = "0.1.2"
+version = "0.1.3"
 source = { editable = "servers/physics/lakeshore-temperature" }
 dependencies = [
     { name = "labmcp", extra = ["visa"] },
@@ -2031,7 +2031,7 @@ requires-dist = [{ name = "labmcp", extras = ["visa"], editable = "packages/labm
 
 [[package]]
 name = "labmcp-mettler-toledo"
-version = "0.1.2"
+version = "0.1.3"
 source = { editable = "servers/chemistry/mettler-toledo-balance" }
 dependencies = [
     { name = "labmcp" },
@@ -2042,7 +2042,7 @@ requires-dist = [{ name = "labmcp", editable = "packages/labmcp" }]
 
 [[package]]
 name = "labmcp-micro-manager"
-version = "0.1.2"
+version = "0.1.3"
 source = { editable = "servers/biology/micro-manager" }
 dependencies = [
     { name = "labmcp" },
@@ -2065,7 +2065,7 @@ requires-dist = [
 
 [[package]]
 name = "labmcp-modbus"
-version = "0.1.2"
+version = "0.1.3"
 source = { editable = "servers/protocols/modbus" }
 dependencies = [
     { name = "labmcp" },
@@ -2082,7 +2082,7 @@ requires-dist = [
 
 [[package]]
 name = "labmcp-ms-data"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "servers/chemistry/ms-data" }
 dependencies = [
     { name = "labmcp" },
@@ -2130,7 +2130,7 @@ dev = [
 
 [[package]]
 name = "labmcp-ms-worklist"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "servers/chemistry/ms-worklist" }
 dependencies = [
     { name = "labmcp" },
@@ -2141,7 +2141,7 @@ requires-dist = [{ name = "labmcp", editable = "packages/labmcp" }]
 
 [[package]]
 name = "labmcp-new-era"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "servers/biology/new-era-syringe-pump" }
 dependencies = [
     { name = "labmcp" },
@@ -2152,7 +2152,7 @@ requires-dist = [{ name = "labmcp", editable = "packages/labmcp" }]
 
 [[package]]
 name = "labmcp-ni-daqmx"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "servers/engineering/ni-daqmx" }
 dependencies = [
     { name = "labmcp" },
@@ -2167,7 +2167,7 @@ requires-dist = [
 
 [[package]]
 name = "labmcp-ocean-spectrometer"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "servers/chemistry/ocean-spectrometer" }
 dependencies = [
     { name = "labmcp" },
@@ -2186,7 +2186,7 @@ requires-dist = [
 
 [[package]]
 name = "labmcp-opentrons"
-version = "0.1.2"
+version = "0.1.3"
 source = { editable = "servers/biology/opentrons" }
 dependencies = [
     { name = "httpx" },
@@ -2201,7 +2201,7 @@ requires-dist = [
 
 [[package]]
 name = "labmcp-palmsens"
-version = "0.1.2"
+version = "0.1.3"
 source = { editable = "servers/chemistry/palmsens-potentiostat" }
 dependencies = [
     { name = "labmcp" },
@@ -2212,7 +2212,7 @@ requires-dist = [{ name = "labmcp", editable = "packages/labmcp" }]
 
 [[package]]
 name = "labmcp-pfeiffer-tpg"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "servers/physics/pfeiffer-vacuum-gauge" }
 dependencies = [
     { name = "labmcp" },
@@ -2223,7 +2223,7 @@ requires-dist = [{ name = "labmcp", editable = "packages/labmcp" }]
 
 [[package]]
 name = "labmcp-rigol-scope"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "servers/engineering/rigol-oscilloscope" }
 dependencies = [
     { name = "labmcp", extra = ["visa"] },
@@ -2238,7 +2238,7 @@ requires-dist = [
 
 [[package]]
 name = "labmcp-sartorius"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "servers/chemistry/sartorius-balance" }
 dependencies = [
     { name = "labmcp" },
@@ -2249,7 +2249,7 @@ requires-dist = [{ name = "labmcp", editable = "packages/labmcp" }]
 
 [[package]]
 name = "labmcp-scpi"
-version = "0.1.2"
+version = "0.1.3"
 source = { editable = "servers/protocols/scpi-instrument" }
 dependencies = [
     { name = "labmcp", extra = ["visa"] },
@@ -2260,7 +2260,7 @@ requires-dist = [{ name = "labmcp", extras = ["visa"], editable = "packages/labm
 
 [[package]]
 name = "labmcp-sila2"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "servers/protocols/sila2" }
 dependencies = [
     { name = "labmcp" },
@@ -2277,7 +2277,7 @@ requires-dist = [
 
 [[package]]
 name = "labmcp-srs-lockin"
-version = "0.1.2"
+version = "0.1.3"
 source = { editable = "servers/physics/srs-lockin" }
 dependencies = [
     { name = "labmcp", extra = ["visa"] },
@@ -2288,7 +2288,7 @@ requires-dist = [{ name = "labmcp", extras = ["visa"], editable = "packages/labm
 
 [[package]]
 name = "labmcp-srs-rga"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "servers/physics/srs-rga" }
 dependencies = [
     { name = "labmcp" },
@@ -2299,7 +2299,7 @@ requires-dist = [{ name = "labmcp", editable = "packages/labmcp" }]
 
 [[package]]
 name = "labmcp-thermo-iapi"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "servers/chemistry/thermo-iapi" }
 dependencies = [
     { name = "labmcp" },
@@ -2319,7 +2319,7 @@ provides-extras = ["windows"]
 
 [[package]]
 name = "labmcp-thorlabs-pm"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "servers/physics/thorlabs-power-meter" }
 dependencies = [
     { name = "labmcp", extra = ["visa"] },

@@ -1,6 +1,6 @@
 [project]
 name = "labmcp-ble-health"
-version = "0.1.2"
+version = "0.1.3"
 description = "MCP server for Bluetooth LE health sensors (standard GATT profiles): heart rate + HRV, SpO2, blood pressure, temperature, weight."
 readme = "README.md"
 license = "Apache-2.0"

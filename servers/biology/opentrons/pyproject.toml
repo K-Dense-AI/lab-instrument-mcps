@@ -1,6 +1,6 @@
 [project]
 name = "labmcp-opentrons"
-version = "0.1.2"
+version = "0.1.3"
 description = "MCP server for Opentrons OT-2 and Flex liquid-handling robots (HTTP API): upload and analyze protocols, start, pause and stop runs, monitor progress, modules and pipettes."
 readme = "README.md"
 license = "Apache-2.0"

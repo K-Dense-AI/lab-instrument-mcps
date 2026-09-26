@@ -3,7 +3,7 @@
   "name": "io.github.K-Dense-AI/labmcp-atlas-ezo",
   "title": "Atlas Scientific EZO Sensors",
   "description": "MCP server for Atlas Scientific EZO sensor circuits (pH, ORP, DO, EC, RTD, HUM, CO2, PRS) over UART.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "repository": {
     "url": "https://github.com/K-Dense-AI/lab-instrument-mcps",
     "source": "github",
@@ -15,7 +15,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "labmcp-atlas-ezo",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "transport": {
         "type": "stdio"
       },

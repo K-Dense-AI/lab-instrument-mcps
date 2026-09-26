@@ -3,7 +3,7 @@
   "name": "io.github.K-Dense-AI/labmcp-thorlabs-pm",
   "title": "Thorlabs Optical Power Meter",
   "description": "MCP server for Thorlabs optical power meters (PM100 family, PM400, PM101, PM5020) over SCPI.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "repository": {
     "url": "https://github.com/K-Dense-AI/lab-instrument-mcps",
     "source": "github",
@@ -15,7 +15,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "labmcp-thorlabs-pm",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "transport": {
         "type": "stdio"
       },

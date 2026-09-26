@@ -1,6 +1,6 @@
 [project]
 name = "labmcp-ms-worklist"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP server that builds, validates and exports LC-MS worklist import files for MassLynx, SCIEX OS, MassHunter and Xcalibur."
 readme = "README.md"
 license = "Apache-2.0"

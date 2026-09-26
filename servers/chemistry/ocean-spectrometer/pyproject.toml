@@ -1,6 +1,6 @@
 [project]
 name = "labmcp-ocean-spectrometer"
-version = "0.1.1"
+version = "0.1.2"
 description = "MCP server for Ocean Insight / Ocean Optics spectrometers (python-seabreeze): acquire spectra, auto integration time, dark/reference, absorbance and transmittance, peak finding."
 readme = "README.md"
 license = "Apache-2.0"

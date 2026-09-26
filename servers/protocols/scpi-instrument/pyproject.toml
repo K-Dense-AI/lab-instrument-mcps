@@ -1,6 +1,6 @@
 [project]
 name = "labmcp-scpi"
-version = "0.1.2"
+version = "0.1.3"
 description = "Generic MCP server for any IEEE 488.2 / SCPI instrument (DMMs, scopes, SMUs, PSUs, generators, analyzers) over VISA, TCP socket or serial, with command allow/deny lists."
 readme = "README.md"
 license = "Apache-2.0"

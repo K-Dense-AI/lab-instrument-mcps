@@ -1,6 +1,6 @@
 [project]
 name = "labmcp-thorlabs-pm"
-version = "0.1.1"
+version = "0.1.2"
 description = "MCP server for Thorlabs optical power meters (PM100D/PM100A/PM100USB/PM400/PM101/PM5020, SCPI over USBTMC/VISA): read power, log stability, set wavelength, averaging, range, zero."
 readme = "README.md"
 license = "Apache-2.0"

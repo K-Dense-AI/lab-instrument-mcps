@@ -1,6 +1,6 @@
 [project]
 name = "labmcp-mettler-toledo"
-version = "0.1.2"
+version = "0.1.3"
 description = "MCP server for Mettler Toledo laboratory balances (MT-SICS): weigh, tare, zero, log drift, adjust."
 readme = "README.md"
 license = "Apache-2.0"

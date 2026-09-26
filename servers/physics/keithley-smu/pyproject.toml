@@ -1,6 +1,6 @@
 [project]
 name = "labmcp-keithley-smu"
-version = "0.1.1"
+version = "0.1.2"
 description = "MCP server for Keithley SourceMeter SMUs (2400 series SCPI, 2450 family SCPI, 2600B TSP): source V or I with compliance, measure, bounded IV sweeps that always end with the output off."
 readme = "README.md"
 license = "Apache-2.0"

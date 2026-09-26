@@ -3,7 +3,7 @@
   "name": "io.github.K-Dense-AI/labmcp-ocean-spectrometer",
   "title": "Ocean Insight Spectrometer",
   "description": "MCP server for Ocean Insight / Ocean Optics spectrometers (python-seabreeze).",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "repository": {
     "url": "https://github.com/K-Dense-AI/lab-instrument-mcps",
     "source": "github",
@@ -15,7 +15,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "labmcp-ocean-spectrometer",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "transport": {
         "type": "stdio"
       },

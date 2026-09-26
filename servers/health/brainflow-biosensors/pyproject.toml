@@ -1,6 +1,6 @@
 [project]
 name = "labmcp-brainflow"
-version = "0.1.1"
+version = "0.1.2"
 description = "MCP server for EEG/EMG/ECG/PPG biosensing boards via BrainFlow (OpenBCI, Muse, Neurosity, g.tec Unicorn, BrainBit, ...): stream, record, band powers, markers, signal quality."
 readme = "README.md"
 license = "Apache-2.0"

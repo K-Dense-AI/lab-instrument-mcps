@@ -1,6 +1,6 @@
 [project]
 name = "labmcp-alicat"
-version = "0.1.1"
+version = "0.1.2"
 description = "MCP server for Alicat mass flow and pressure meters/controllers: read flow, set setpoints, select gas, tare, hold/close valves."
 readme = "README.md"
 license = "Apache-2.0"

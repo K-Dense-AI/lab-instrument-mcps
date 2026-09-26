@@ -1,6 +1,6 @@
 [project]
 name = "labmcp-new-era"
-version = "0.1.1"
+version = "0.1.2"
 description = "MCP server for New Era Pump Systems syringe pumps (NE-1000 family, RS-232): set syringe, infuse/withdraw volumes, monitor, stop."
 readme = "README.md"
 license = "Apache-2.0"

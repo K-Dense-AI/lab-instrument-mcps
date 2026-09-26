@@ -3,7 +3,7 @@
   "name": "io.github.K-Dense-AI/labmcp-astm-lis",
   "title": "ASTM LIS Analyzer Receiver",
   "description": "MCP server that receives results from clinical/lab analyzers over ASTM E1381/E1394 (CLSI LIS1/LIS2).",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "repository": {
     "url": "https://github.com/K-Dense-AI/lab-instrument-mcps",
     "source": "github",
@@ -15,7 +15,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "labmcp-astm-lis",
-      "version": "0.1.2",
+      "version": "0.1.3",
       "transport": {
         "type": "stdio"
       },

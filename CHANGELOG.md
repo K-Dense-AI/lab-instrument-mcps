@@ -2,6 +2,10 @@
 
 Notable changes to LabMCP. Each package is versioned on its own and released with a tag such as `labmcp-v0.1.0` or `labmcp-ika-v0.1.0`. Safety-relevant fixes are marked **[safety]**.
 
+## Registry metadata releases - 2026-09-26
+
+A patch release of every server (`labmcp` itself is unchanged at 0.1.2). The only change is metadata: each server's MCP Registry description is now a complete phrase of at most 100 characters, where before it was cut off mid-word. `build_catalog.py` accepts an optional `[tool.labmcp] registry_description` for descriptions that don't shorten cleanly. The README now lists mass spectrometers, and questions go through a new Question issue template.
+
 ## [0.1.2] - 2026-09-26
 
 `labmcp` 0.1.2 and patch releases of 27 servers (every server except IKA; the four mass-spectrometry servers are still unreleased at 0.1.0). A software review of the whole codebase, looking for logic, concurrency, error-handling and safety bugs rather than protocol details. It adds about 280 regression tests. Servers that use the new `prepare_save_path` require `labmcp>=0.1.2`.

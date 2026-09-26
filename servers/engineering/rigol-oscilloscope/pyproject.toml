@@ -1,6 +1,6 @@
 [project]
 name = "labmcp-rigol-scope"
-version = "0.1.1"
+version = "0.1.2"
 description = "MCP server for Rigol digital oscilloscopes (DS1000Z/MSO1000Z, DS1000Z-E, MSO5000, DHO800/900/1000/4000): settings, triggering, measurements, waveform capture and screenshots over SCPI."
 readme = "README.md"
 license = "Apache-2.0"

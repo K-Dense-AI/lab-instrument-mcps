@@ -1,6 +1,6 @@
 [project]
 name = "labmcp-srs-rga"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP server for SRS RGA100/200/300 residual gas analyzers: spectra, partial pressures, leak checks, filament/CDEM with pressure interlocks."
 readme = "README.md"
 license = "Apache-2.0"

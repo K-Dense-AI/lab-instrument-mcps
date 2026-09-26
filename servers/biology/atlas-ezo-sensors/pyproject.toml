@@ -1,6 +1,6 @@
 [project]
 name = "labmcp-atlas-ezo"
-version = "0.1.1"
+version = "0.1.2"
 description = "MCP server for Atlas Scientific EZO sensor circuits (pH, ORP, DO, EC, RTD, HUM, CO2, PRS) over UART: read, calibrate, compensate, log."
 readme = "README.md"
 license = "Apache-2.0"
