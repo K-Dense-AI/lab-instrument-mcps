@@ -1,8 +1,5 @@
 blank_issues_enabled: false
 contact_links:
-  - name: 💬 Questions & ideas
-    url: https://github.com/K-Dense-AI/lab-instrument-mcps/discussions
-    about: Ask how to connect an instrument, share workflows, or discuss ideas.
   - name: 🔒 Report a security or safety issue
     url: https://github.com/K-Dense-AI/lab-instrument-mcps/security/advisories/new
     about: Please report limit bypasses and other safety issues privately.

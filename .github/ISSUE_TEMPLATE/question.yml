@@ -1,0 +1,25 @@
+name: 💬 Question or idea
+description: Ask how to connect an instrument, share a workflow, or suggest an idea.
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please [search existing issues](https://github.com/K-Dense-AI/lab-instrument-mcps/issues?q=is%3Aissue) first. For a safety problem or a way around a limit, report it privately through [security advisories](https://github.com/K-Dense-AI/lab-instrument-mcps/security/advisories/new) instead.
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question or idea
+      placeholder: "e.g. How do I connect my balance over a USB-to-serial adapter on Windows?"
+    validations:
+      required: true
+  - type: input
+    id: server
+    attributes:
+      label: Connector and version (if relevant)
+      placeholder: "e.g. labmcp-mettler-toledo 0.1.2"
+  - type: input
+    id: client
+    attributes:
+      label: AI app (if relevant)
+      placeholder: "e.g. Claude Desktop on macOS"
