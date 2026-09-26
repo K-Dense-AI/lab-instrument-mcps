@@ -127,6 +127,24 @@ def test_tti_range_error_and_ocp_trip():
     assert "TRIPRST" in psu.clear_trips(1)
 
 
+def test_tti_mx_protection_on_off():
+    # MX100T/TP Iss. 6, 14.2.1: "OVP<N> ON|OFF" / "OCP<N> ON|OFF"; a disabled trip reads "VP<N> OFF".
+    psu, sim = make_psu("tti", "MX100TP")
+    assert psu.protection_switchable
+    psu.set_ovp(1, None, False)
+    p = psu.protection(1)
+    assert p.ovp_enabled is False and p.ovp_v is None
+    psu.set_ovp(1, 30.0, True)
+    psu.set_ocp(1, 2.0, True)
+    p = psu.protection(1)
+    assert p.ovp_enabled is True and p.ovp_v == pytest.approx(30.0)
+    assert p.ocp_enabled is True and p.ocp_a == pytest.approx(2.0)
+    # CPX/QL/PL-P protection cannot be switched off remotely.
+    cpx, _ = make_psu("tti", "CPX400DP")
+    with pytest.raises(InstrumentProtocolError, match="cannot be switched off"):
+        cpx.set_ovp(1, None, False)
+
+
 def test_tti_all_off_uses_opall():
     psu, sim = make_psu("tti", "MX100TP")
     for ch in (1, 2, 3):

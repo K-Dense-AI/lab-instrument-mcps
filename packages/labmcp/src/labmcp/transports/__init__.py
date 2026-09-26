@@ -61,10 +61,13 @@ def parse_address(address: str) -> Address:
     if not address:
         raise ValueError("Empty instrument address")
 
-    if _VISA_RE.match(address):
-        return Address("visa", address)
-    if _SERIAL_RE.match(address):
-        return Address("serial", address)
+    if "://" not in address:  # shorthand forms may carry a query too: /dev/ttyUSB0?baudrate=9600
+        bare, _, query = address.partition("?")
+        params = dict(parse_qsl(query, keep_blank_values=True))
+        if _VISA_RE.match(bare):
+            return Address("visa", bare, params=params)
+        if _SERIAL_RE.match(bare):
+            return Address("serial", bare, params=params)
 
     scheme, _, rest = address.partition("://")
     scheme = scheme.lower()

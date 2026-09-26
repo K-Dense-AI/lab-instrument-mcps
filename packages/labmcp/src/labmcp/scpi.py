@@ -79,19 +79,37 @@ class SCPIDriver:
             head = self.t.read_bytes(2, timeout)
             if head[:1] != b"#":
                 raise InstrumentProtocolError(f"Expected binary block from {command!r}, got {head!r}")
+            if not head[1:2].isdigit():
+                raise InstrumentProtocolError(f"Malformed binary block header from {command!r}: {head!r}")
             ndigits = int(head[1:2])
             if ndigits == 0:  # indefinite-length block
                 return self.t.read_until(self.t.read_termination.encode(), timeout)
             length = int(self.t.read_bytes(ndigits, timeout))
             data = self.t.read_bytes(length, timeout)
-            try:  # consume the trailing terminator if present
-                self.t.read_bytes(len(self.t.read_termination), 0.05)
-            except Exception:
-                pass
+            consume_block_terminator(self.t, timeout)
             return data
 
     def close(self) -> None:
         self.t.close()
+
+
+def consume_block_terminator(transport: Transport, timeout: float | None = None) -> None:
+    """Read the response terminator that follows a definite-length block.
+
+    IEEE 488.2 (8.7.9 / 8.5) ends every response message, including one carrying a
+    ``#<n><len><data>`` block, with the terminator (NL^END). If it is left unread,
+    the next query returns an empty line and every later reply is off by one. It
+    can arrive a little after the payload on a busy LAN or a slow serial link, so
+    wait up to a second for it (less if the caller's timeout is shorter).
+    """
+    term = transport.read_termination
+    if not term:
+        return
+    wait = min(1.0, transport.timeout if timeout is None else timeout)
+    try:
+        transport.read_bytes(len(term), wait)
+    except Exception:  # a non-compliant instrument that sends no terminator
+        pass
 
 
 class SCPISimulator(LineSimulator):
@@ -212,9 +230,10 @@ def _compile_nodes(text: str) -> str:
         elif token == "<n>":
             out += r"\d*"
         elif token:
+            # SCPI-99 Vol. 1, 6.2.1: only the short form or the complete long form is accepted
+            # (VOLT or VOLTAGE, never VOLTA), so the optional tail is all-or-nothing.
             short = "".join(c for c in token if c.isupper() or c.isdigit() or c == "*")
             tail = token[len(short) :]
-            opt = "".join(f"(?:{re.escape(c)}" for c in tail) + ")?" * len(tail)
-            out += re.escape(short) + opt
+            out += re.escape(short) + (f"(?:{re.escape(tail)})?" if tail else "")
     return out
 

@@ -26,7 +26,8 @@ Model      Inputs  Outputs  RANGE (heater outputs 1/2)             PID/RAMP     
 =========  ======  =======  =====================================  =============  ============
 
 Outputs 3 and 4 (336/350) and output 2 of the 335 in voltage mode are unpowered analog outputs:
-``RANGE`` 0 = off, 1 = on, and their level is read with ``AOUT?`` instead of ``HTR?``.
+``RANGE`` 0 = off, 1 = on. Outputs 3/4 are read with ``AOUT?``; the 335's output 2 is read with
+``HTR?`` in both modes (percent of full-scale voltage in voltage mode, 335 manual ``HTR?``).
 The 3062 scanner option (inputs D1-D5) is not supported.
 """
 
@@ -279,6 +280,10 @@ class LakeShoreController:
         """(mode, control input letter or None, power-up enable) from ``OUTMODE?``."""
         mode, inp, powerup = self.query_ints(f"OUTMODE? {self._check_output(out)}")[:3]
         letters = {1: "A", 2: "B", 3: "C", 4: "D"}
+        if mode == 6:
+            # 336 Mirroring: the second field is the output being mirrored (1-4), not an input
+            # (336 manual, OUTMODE command), so this output has no control input of its own.
+            return OUTPUT_MODES[6], None, bool(powerup)
         return OUTPUT_MODES.get(mode, f"mode {mode}"), letters.get(inp), bool(powerup)
 
     def is_analog(self, out: int) -> bool:

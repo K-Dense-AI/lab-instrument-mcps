@@ -11,6 +11,7 @@ tighten or relax them at launch with ``--limit name=value`` or the
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from labmcp.errors import SafetyLimitError
@@ -45,7 +46,10 @@ class SafetyLimits:
             if name not in self._defs:
                 known = ", ".join(sorted(self._defs)) or "(none)"
                 raise ValueError(f"Unknown safety limit {name!r}. Known limits: {known}")
-            self._values[name] = float(value)
+            value = float(value)
+            if math.isnan(value):  # NaN compares False with everything and would disable the limit
+                raise ValueError(f"Safety limit {name!r} must be a number, got NaN")
+            self._values[name] = value
 
     def __getitem__(self, name: str) -> float:
         return self._values[name]
@@ -54,6 +58,11 @@ class SafetyLimits:
         """Raise :class:`SafetyLimitError` if ``value`` violates limit ``name``; else return it."""
         lim = self._defs[name]
         bound = self._values[name]
+        if math.isnan(value):  # NaN > bound and NaN < bound are both False: never let it through
+            raise SafetyLimitError(
+                f"Refused: {what or lim.description or name} is not a number (NaN) (safety limit `{name}`). "
+                "Nothing was sent to the instrument."
+            )
         bad = value > bound if lim.kind == "max" else value < bound
         if bad:
             rel = "exceeds the maximum" if lim.kind == "max" else "is below the minimum"

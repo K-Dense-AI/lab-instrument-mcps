@@ -271,11 +271,14 @@ class SRSLockIn:
             cmd = "SNAP? 1,2,3,4,9"
             x, y, r, th, f = _floats(cmd, self.query(cmd), 5)
             return Snapshot(x, y, r, th, f)
-        with self.t.lock:  # SR86x SNAP? takes at most 3 parameters
-            x, y = _floats("SNAP? 0,1", self.query("SNAP? 0,1"), 2)
-            r, th = _floats("SNAP? 2,3", self.query("SNAP? 2,3"), 2)
+        # SR86x SNAP? takes at most 3 parameters (SR860 manual, SNAP?). Take X, Y and θ in ONE
+        # snapshot and derive R = sqrt(X² + Y²), so all four values come from the same instant
+        # (two separate SNAP? calls could be several time constants apart).
+        with self.t.lock:
+            cmd = "SNAP? 0,1,3"
+            x, y, th = _floats(cmd, self.query(cmd), 3)
             f = self.query_float("FREQ?")
-        return Snapshot(x, y, r, th, f)
+        return Snapshot(x, y, math.hypot(x, y), th, f)
 
     def aux_inputs_v(self) -> list[float]:
         channels = range(1, 5) if self.family == SR8X0 else range(4)

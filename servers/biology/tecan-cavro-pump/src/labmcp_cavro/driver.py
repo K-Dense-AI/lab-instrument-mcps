@@ -51,6 +51,8 @@ ERROR_CODES: dict[int, str] = {
     "connections, then initialize again)",
     2: "invalid command",
     3: "invalid operand (parameter out of range, e.g. a move beyond the end of the syringe)",
+    # Not listed for the XLP 6000, but documented for the XCalibur (manual 733085-B, 3.6.3) and XL 3000.
+    4: "invalid command sequence (command structure or communication protocol is incorrect)",
     6: "EEPROM failure (contact Tecan service)",
     7: "device not initialized: run `initialize` first",
     8: "internal failure (contact Tecan service)",

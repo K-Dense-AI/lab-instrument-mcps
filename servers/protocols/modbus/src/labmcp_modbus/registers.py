@@ -163,7 +163,7 @@ class Point:
         code, _ = DATA_TYPES[self.type]
         try:
             data = struct.pack(">" + code, number)
-        except struct.error as exc:
+        except (struct.error, OverflowError) as exc:  # float32 overflow raises OverflowError
             raise ValueError(f"{number!r} does not fit in a {self.type} register for {self.name!r}") from exc
         return bytes_to_registers(data, self.word_order, self.byte_order)
 

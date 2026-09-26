@@ -1,6 +1,7 @@
 import json
 import socket
 import threading
+import time
 
 import pytest
 from labmcp import (
@@ -367,3 +368,73 @@ def test_audit_log_truncates_bulk_data():
 )
 def test_scpi_nested_optional_nodes(key, pattern, expected):
     assert SCPISimulator.matches(key, pattern) is expected
+
+
+# --------------------------------------------------------------- regressions (protocol review)
+
+
+@pytest.mark.parametrize(
+    "key, expected",
+    [("VOLT", True), ("VOLTAGE", True), ("voltage", True), ("VOLTA", False), ("VOLTAG", False), ("VOL", False)],
+)
+def test_scpi_matches_only_short_or_long_form(key, expected):
+    # SCPI-99 Vol. 1, 6.2.1: a truncated long form (VOLTA) is an undefined header on real instruments.
+    assert SCPISimulator.matches(key, "VOLTage") is expected
+
+
+def test_limit_check_refuses_nan():
+    limits = SafetyLimits([Limit("max_temperature_c", 100, "°C"), Limit("min_t", -20, "°C", kind="min")])
+    with pytest.raises(SafetyLimitError, match="NaN"):
+        limits.check("max_temperature_c", float("nan"))
+    with pytest.raises(SafetyLimitError, match="NaN"):
+        limits.check("min_t", float("nan"))
+    with pytest.raises(ValueError, match="NaN"):
+        limits.override({"max_temperature_c": float("nan")})
+    with pytest.raises(ValueError, match="NaN"):
+        limits.override(parse_limit_args(["max_temperature_c=nan"]))
+    assert limits["max_temperature_c"] == 100
+
+
+@pytest.mark.parametrize(
+    "address, kind, target, params",
+    [
+        ("/dev/ttyUSB0?baudrate=19200&parity=E", "serial", "/dev/ttyUSB0", {"baudrate": "19200", "parity": "E"}),
+        ("COM3?baudrate=9600", "serial", "COM3", {"baudrate": "9600"}),
+        ("GPIB0::22::INSTR?backend=@ivi", "visa", "GPIB0::22::INSTR", {"backend": "@ivi"}),
+    ],
+)
+def test_parse_address_shorthand_with_query(address, kind, target, params):
+    addr = parse_address(address)
+    assert (addr.kind, addr.target, addr.params) == (kind, target, params)
+
+
+class BlockSim(SCPISimulator):
+    def command(self, key, arg):
+        if key == "CURV?":
+            return "#15ABCDE"
+        raise self.undefined()
+
+
+def test_query_block_consumes_late_terminator():
+    """The NL after a block may arrive later than 50 ms; it must not be left for the next query."""
+    t = SimulatedTransport(BlockSim(), timeout=2.0)
+    d = SCPIDriver(t)
+    with t.lock:
+        t.write_bytes(b"CURV?\n")
+        t.flush_input()  # drop the simulator's immediate reply; replay it with a delayed terminator
+        t.push(b"#15ABCDE")
+        threading.Timer(0.2, t.push, args=(b"\n",)).start()
+        t.write = lambda command: None  # the request was already "sent"
+        assert d.query_block("CURV?") == b"ABCDE"
+        del t.write
+    time.sleep(0.3)  # the late terminator has arrived by now
+    assert d.query("*IDN?") == SCPISimulator.idn
+
+
+def test_query_block_rejects_malformed_header():
+    class BadSim(SCPISimulator):
+        def command(self, key, arg):
+            return "#XYZ"
+
+    with pytest.raises(Exception, match="Malformed binary block header"):
+        SCPIDriver(SimulatedTransport(BadSim())).query_block("CURV?")

@@ -95,3 +95,16 @@ def test_limit_error_type():
     server.configure(simulate=True, limits={"max_series_duration_s": 1})
     with pytest.raises(SafetyLimitError):
         server.check("max_series_duration_s", 5)
+
+
+def test_preset_tare_sends_plain_decimal_without_precision_loss():
+    # Regression: the value was formatted with ":g", which sent "52.1873" for 52.18734 and
+    # "1e-05" for 0.00001 (exponent notation is not a valid MT-SICS number).
+    bal, sim = make_driver()
+    sent: list[str] = []
+    orig = sim.handle
+    sim.handle = lambda cmd: (sent.append(cmd), orig(cmd))[1]
+    assert bal.preset_tare(52.18734, "g").value == pytest.approx(52.1873, abs=1e-4)
+    assert bal.preset_tare(0.00001, "g").value == pytest.approx(0.0, abs=1e-4)
+    assert bal.preset_tare(100, "g").value == pytest.approx(100.0)
+    assert sent == ["TA 52.18734 g", "TA 0.00001 g", "TA 100 g"]

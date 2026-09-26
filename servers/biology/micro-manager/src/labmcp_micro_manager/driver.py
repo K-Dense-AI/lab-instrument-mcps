@@ -411,6 +411,21 @@ def save_tiff(
     """Write an ImageJ-compatible (multi-page) TIFF. ``axes`` like 'YX', 'ZCYX', 'TCYX'."""
     import tifffile
 
+    arr = np.asarray(data)
+    if arr.ndim == len(axes) + 1 and arr.shape[-1] in (3, 4):
+        # Colour cameras: CMMCorePlus.getImage() returns (Y, X, 3) RGB for RGB32 pixel types.
+        arr = arr[..., :3]
+        if arr.dtype == np.uint8:
+            axes += "S"  # ImageJ RGB (8-bit samples only)
+        else:
+            # ImageJ has no >8-bit RGB type: keep the colour planes as channels instead.
+            arr = np.moveaxis(arr, -1, -3)  # (..., 3, Y, X)
+            if "C" in axes:
+                c = axes.index("C")
+                arr = np.moveaxis(arr, -3, c + 1)
+                arr = arr.reshape(arr.shape[:c] + (arr.shape[c] * 3,) + arr.shape[c + 2 :])
+            else:
+                axes = axes[:-2] + "C" + axes[-2:]
     metadata: dict[str, Any] = {"axes": axes, "unit": "um"}
     if z_step_um:
         metadata["spacing"] = float(z_step_um)
@@ -418,7 +433,6 @@ def save_tiff(
         metadata["finterval"] = float(interval_s)
     if description:
         metadata["Info"] = "\n".join(f"{k} = {v}" for k, v in description.items())
-    arr = np.asarray(data)
     if arr.dtype not in (np.uint8, np.uint16, np.float32):
         arr = arr.astype(np.float32)
     kwargs: dict[str, Any] = {}

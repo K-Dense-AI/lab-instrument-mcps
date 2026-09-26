@@ -139,6 +139,9 @@ class ScriptOutput(BaseModel):
     total_packages: int
     texts: list[str] = Field(description="send_string output")
     error: str | None
+    cell_off_after_error: bool | None = Field(
+        None, description="After a runtime error (on_finished: is skipped): True if the cell was switched off"
+    )
     aborted: bool
     timed_out: bool
     timestamp: str
@@ -282,9 +285,14 @@ def _run(
     points, status = _points(result, dt)
     warnings = []
     if result.error:
+        cell = (
+            " The cell was switched off afterwards."
+            if result.cell_off_sent
+            else " WARNING: switching the cell off afterwards failed; call `abort_measurement`."
+        )
         if not points:
-            raise InstrumentProtocolError(f"The measurement failed: {result.error}.")
-        warnings.append(f"The measurement stopped with {result.error}.")
+            raise InstrumentProtocolError(f"The measurement failed: {result.error}.{cell}")
+        warnings.append(f"The measurement stopped with {result.error}.{cell}")
     if result.timed_out:
         warnings.append("The measurement took too long and was aborted.")
     elif result.aborted:
@@ -601,9 +609,10 @@ def run_methodscript(
     ] = 200,
 ) -> ScriptOutput:
     """Advanced: run a raw MethodSCRIPT and return its raw output and decoded data packages. Literal
-    potentials of set_e / set_range_minmax da / CV, LSV, DPV and CA loops are checked against
-    `max_potential_v`; values computed at run time are not. Aborted after `timeout_s`; add
-    `on_finished:` + `cell_off` to your script so the cell is switched off after an abort."""
+    potentials of set_e / set_range_minmax da and the CV, LSV, DPV, SWV, NPV, ACV, CA, PAD, EIS and
+    fast CV/CA techniques are checked against `max_potential_v`; values computed at run time are
+    not. Aborted after `timeout_s`; add `on_finished:` + `cell_off` to your script so the cell is
+    switched off after an abort. After a runtime error the server switches the cell off itself."""
     lines = [ln for ln in script.splitlines() if ln.strip()]
     if lines and lines[0].strip() == "e":
         lines = lines[1:]
@@ -626,6 +635,7 @@ def run_methodscript(
         total_packages=len(packages),
         texts=result.texts,
         error=result.error,
+        cell_off_after_error=result.cell_off_sent,
         aborted=result.aborted,
         timed_out=result.timed_out,
         timestamp=_now(),

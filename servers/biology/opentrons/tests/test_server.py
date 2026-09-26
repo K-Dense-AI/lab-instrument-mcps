@@ -515,3 +515,36 @@ def test_error_body_formats():
     assert json.dumps(body)  # plain JSON
     with pytest.raises(RobotHTTPError, match="RouteNotFound"):
         robot.call("GET", "/nope")
+
+
+async def test_deactivate_modules_sends_every_command_even_after_a_timeout():
+    # Regression: a timeout (InstrumentTimeout) on one deactivate command used to escape the
+    # loop, so the Heater-Shaker heater and all later modules were left on.
+    from labmcp import InstrumentTimeout
+
+    async with simulated_client(server) as client:
+        sim = fast_sim()
+        for m in sim.attached_modules:
+            if "target" in m:
+                m["target"] = 60.0
+        drv = server.driver
+        real = drv.stateless_command
+
+        def flaky(ctype, params, timeout_s=60.0):
+            if ctype == "heaterShaker/deactivateShaker":
+                raise InstrumentTimeout("Robot command heaterShaker/deactivateShaker did not finish")
+            return real(ctype, params, timeout_s=timeout_s)
+
+        drv.stateless_command = flaky
+        try:
+            off = (await client.call_tool("deactivate_modules", {})).structured_content["result"]
+        finally:
+            del drv.stateless_command
+        by_type = {m["module_type"]: m for m in off}
+        assert by_type["Heater-Shaker"]["ok"] is False
+        assert "deactivateShaker" in by_type["Heater-Shaker"]["error"]
+        assert by_type["Temperature Module"]["ok"] is True
+        assert by_type["Thermocycler"]["ok"] is True
+        sent = [c["commandType"] for c in sim.stateless]
+        assert "heaterShaker/deactivateHeater" in sent
+        assert all(m.get("target") is None for m in sim.attached_modules if "target" in m)

@@ -328,3 +328,60 @@ def test_limit_error_type():
     server.configure(simulate=True, limits={"max_wait_s": 10})
     with pytest.raises(SafetyLimitError):
         server.check("max_wait_s", 11)
+
+
+# ------------------------------------------------------------------ regression tests (spec review)
+
+
+def test_enc_sfloat_rejects_special_value_mantissas():
+    # SFLOAT mantissa 0x802 (-2046) is the -INF special value, not a number.
+    with pytest.raises(ValueError):
+        enc_sfloat(-2046)
+    assert decode_sfloat(struct.unpack("<H", enc_sfloat(-2045))[0]).value == -2045.0
+
+
+def test_temperature_waits_for_final_even_when_accepting_intermediate():
+    # Intermediate values arrive 1 s apart, longer than settle_s: the first intermediate must not
+    # end the wait before the final Temperature Measurement arrives.
+    backend = SimulatedBLEBackend(SIM_KIT)
+    backend.temperature_step_s = 0.6
+    sensor = BLEHealthSensor(backend, SIM_KIT, settle_s=0.3)
+    readings, site = sensor.temperature(10.0, accept_intermediate=True)
+    finals = [m for is_final, m in readings if is_final]
+    assert len(finals) == 1
+    assert finals[0].value.value == 36.8
+    assert site == "tympanum_ear_drum"
+
+
+def test_temperature_falls_back_to_intermediate_on_timeout():
+    backend = SimulatedBLEBackend(SIM_KIT)
+    backend.temperature_step_s = 0.2
+    backend.temperature_final = False
+    sensor = BLEHealthSensor(backend, SIM_KIT, settle_s=0.3)
+    readings, _ = sensor.temperature(1.5, accept_intermediate=True)
+    assert readings and not any(is_final for is_final, _ in readings)
+    assert readings[-1][1].value.value == 36.7
+    # Without accept_intermediate the same situation is a timeout.
+    backend2 = SimulatedBLEBackend(SIM_KIT)
+    backend2.temperature_final = False
+    with pytest.raises(InstrumentTimeout):
+        BLEHealthSensor(backend2, SIM_KIT, settle_s=0.3).temperature(1.5)
+
+
+def test_bleak_adapter_kwargs_match_installed_bleak(monkeypatch):
+    import bleak.args.bluez as bluez_args
+    from labmcp_ble_health.driver import BleakBackend
+
+    backend = BleakBackend.__new__(BleakBackend)
+    backend._adapter, backend._pair = "hci1", False
+    expected = (
+        {"bluez": {"adapter": "hci1"}}
+        if "adapter" in bluez_args.BlueZScannerArgs.__annotations__
+        else {"adapter": "hci1"}
+    )
+    assert backend._scanner_kwargs() == expected
+    # bleak 1.0.x: BlueZScannerArgs has no 'adapter' key -> use the adapter keyword.
+    monkeypatch.setattr(bluez_args.BlueZScannerArgs, "__annotations__", {"filters": object})
+    assert backend._scanner_kwargs() == {"adapter": "hci1"}
+    backend._adapter = None
+    assert backend._client_kwargs() == {"pair": False}

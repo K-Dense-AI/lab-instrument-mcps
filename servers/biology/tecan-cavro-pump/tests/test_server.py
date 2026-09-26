@@ -55,6 +55,13 @@ def test_invalid_operand_is_reported_by_q():
     assert exc.value.code == 3
 
 
+def test_xcalibur_error_4_is_decoded():
+    # XCalibur manual 733085-B, 3.6.3: error 4 = "Invalid Command Sequence" (answered immediately).
+    err = CavroError(4, "in reply to 'X'")
+    assert err.code == 4 and "invalid command sequence" in str(err)
+    assert "unknown error" not in str(err)
+
+
 def test_initialize_aspirate_dispense_positions():
     pump, sim = make_pump()
     pump.initialize()

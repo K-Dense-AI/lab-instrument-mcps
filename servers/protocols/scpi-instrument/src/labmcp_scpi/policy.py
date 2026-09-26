@@ -133,6 +133,27 @@ def normalized_form(unit: str) -> str:
     return f"{norm} {_clean_params(params)}".strip()
 
 
+def expand_headers(units: list[str]) -> list[str]:
+    """Message units with the header path the instrument will actually apply.
+
+    SCPI-99 Vol. 1, 6.2.4 (and IEEE 488.2, A.1.1): after a ``;``, a header without a
+    leading colon is resolved relative to the path of the previous command, so in
+    ``OUTP:POL NORM;STAT ON`` the second unit means ``OUTP:STAT ON``. A leading
+    colon returns to the root; common commands (``*...``) leave the path unchanged.
+    """
+    path: list[str] = []
+    out: list[str] = []
+    for unit in units:
+        header, params = _header_and_params(unit)
+        if not header or header.startswith("*"):
+            out.append(unit)
+            continue
+        full = header.lstrip(":") if header.startswith(":") else ":".join([*path, header])
+        path = full.split(":")[:-1]
+        out.append(f"{full} {params}".strip())
+    return out
+
+
 def is_query_unit(unit: str) -> bool:
     header, _ = _header_and_params(unit)
     return header.endswith("?")
@@ -206,7 +227,9 @@ class CommandPolicy:
     def _check_denylist(self, text: str, units: list[str]) -> None:
         if self.write_denylist is None:
             return
-        for unit in [*units, text]:
+        # Also check each unit under its implied header path (see expand_headers), or
+        # a denylisted command could be reached as the relative tail of a compound message.
+        for unit in [*units, *expand_headers(units), text]:
             if self._matches(self.write_denylist, unit):
                 raise CommandRefused(
                     f"Refused: {unit!r} matches the command denylist "
@@ -278,6 +301,7 @@ class CommandPolicy:
             "query_denylist": self.query_denylist.pattern if self.query_denylist else None,
             "builtin_query_denylist": list(self.builtin_query_denylist.values()),
             "matching": "case-insensitive re.search on each message unit, as sent and in SCPI short form "
-            "(e.g. ':OUTPut:STATe ON' is also checked as 'OUTP:STAT ON'); the allowlist must match a "
-            "whole unit",
+            "(e.g. ':OUTPut:STATe ON' is also checked as 'OUTP:STAT ON'); denylist checks also resolve "
+            "relative headers in compound messages ('OUTP:POL NORM;STAT ON' -> 'OUTP:STAT ON'); the "
+            "allowlist must match a whole unit",
         }

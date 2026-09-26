@@ -386,8 +386,9 @@ def redact_patient_record(record: str, d: Delimiters) -> str:
     return d.field.join(fields)
 
 
-# Codes documented in the Beckman C03112-AF result record description. Other codes are
-# passed through undecoded: their meaning is analyzer-specific (see its host manual).
+# Result abnormal flags defined by CLSI LIS2-A2 (ASTM E1394) section 9.7: L H LL HH < > N A U D B W
+# (the first seven are also documented in the Beckman C03112-AF result record description).
+# Other codes are passed through undecoded: their meaning is analyzer-specific.
 ABNORMAL_FLAG_MEANINGS = {
     "N": "normal",
     "L": "below the low normal (reference) limit",
@@ -396,6 +397,11 @@ ABNORMAL_FLAG_MEANINGS = {
     "HH": "above the high panic (critical) limit",
     "<": "below the measuring range / low off-scale",
     ">": "above the measuring range / high off-scale",
+    "A": "abnormal",
+    "U": "significant change up",
+    "D": "significant change down",
+    "B": "better (direction not relevant or not defined)",
+    "W": "worse (direction not relevant or not defined)",
 }
 RESULT_STATUS_MEANINGS = {"F": "final result", "X": "result cannot be generated (order not honoured or fatally flagged)"}
 

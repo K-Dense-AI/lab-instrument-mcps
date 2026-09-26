@@ -117,7 +117,7 @@
       "summary": "Snap images (stats + preview + TIFF), z-stacks and time-lapses, move XY/Z within step and soft limits, channel/objective presets, exposure, shutter, autofocus.",
       "status": "simulated",
       "package": "labmcp-micro-manager",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "MCP server for microscopes controlled by Micro-Manager (pymmcore-plus): snap images, z-stacks and time-lapses, move stages safely, switch channels and objectives, autofocus.",
       "command": "labmcp-micro-manager",
       "module": "labmcp_micro_manager.server",
@@ -326,7 +326,7 @@
       "summary": "Upload and analyze protocols, review deck layout, start/pause/stop/resume runs, track progress, home, lights, read pipettes and modules, switch modules off.",
       "status": "simulated",
       "package": "labmcp-opentrons",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "MCP server for Opentrons OT-2 and Flex liquid-handling robots (HTTP API): upload and analyze protocols, start, pause and stop runs, monitor progress, modules and pipettes.",
       "command": "labmcp-opentrons",
       "module": "labmcp_opentrons.server",
@@ -444,7 +444,7 @@
       "summary": "Initialize, aspirate and dispense microlitre volumes at set flow rates, switch valve ports, read plunger/valve status, terminate moves.",
       "status": "simulated",
       "package": "labmcp-cavro",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "MCP server for Tecan Cavro syringe pumps (XLP 6000, XMP 6000, XCalibur) over the DT protocol: initialize, aspirate/dispense µL, switch valve ports, terminate.",
       "command": "labmcp-cavro",
       "module": "labmcp_cavro.server",
@@ -696,7 +696,7 @@
       "summary": "Weigh (stable/immediate), tare, zero, log drift series, internal adjustment, draft shield, display messages.",
       "status": "simulated",
       "package": "labmcp-mettler-toledo",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "MCP server for Mettler Toledo laboratory balances (MT-SICS): weigh, tare, zero, log drift, adjust.",
       "command": "labmcp-mettler-toledo",
       "module": "labmcp_mettler_toledo.server",
@@ -787,6 +787,179 @@
           "name": "zero",
           "kind": "control",
           "description": "Zero the balance with the current load. Also clears the tare memory."
+        }
+      ]
+    },
+    {
+      "name": "Mass Spectrometry Data (mzML, Bruker TDF, vendor conversion)",
+      "domain": "chemistry",
+      "category": "Mass spectrometry",
+      "vendor": "Vendor-neutral",
+      "models": [
+        "Any LC-MS run in mzML/mzMLb",
+        "Bruker timsTOF (TDF .d)",
+        "Thermo .raw, Waters .raw, Agilent .d, SCIEX .wiff/.wiff2, Shimadzu .lcd, Bruker BAF (via conversion)"
+      ],
+      "interfaces": [
+        "File"
+      ],
+      "protocol": "mzML / mzMLb (pyteomics) / Bruker TDF (SQLite + timsrust) / msconvert & ThermoRawFileParser",
+      "summary": "Read and analyse LC-MS data from any vendor via open formats: find runs, run metadata, TIC/BPC, XICs with apex and area, spectra, MS2 search by precursor, quick QC, and conversion of vendor files with the user's own msconvert or ThermoRawFileParser.",
+      "status": "simulated",
+      "package": "labmcp-ms-data",
+      "version": "0.1.0",
+      "description": "MCP server for mass-spectrometry data files (mzML, mzMLb, Bruker timsTOF TDF; vendor files via msconvert/ThermoRawFileParser): run info, TIC/BPC, XICs, spectra, MS2 search, QC.",
+      "command": "labmcp-ms-data",
+      "module": "labmcp_ms_data.server",
+      "path": "servers/chemistry/ms-data",
+      "extras": {},
+      "tools": [
+        {
+          "name": "convert_to_mzml",
+          "kind": "control",
+          "description": "Convert a vendor file (Thermo .raw, Waters .raw, Agilent .d, SCIEX .wiff, Shimadzu .lcd, Bruker .d) to mzML with the converter the user installed (ThermoRawFileParser, ProteoWizard msconvert, or msconvert in Docker; chosen with --option converter=...). Writes a new file in the data folder. Can take minutes; fails with install instructions if no converter is set up."
+        },
+        {
+          "name": "extract_ion_chromatogram",
+          "kind": "read",
+          "description": "Extracted ion chromatogram (XIC/EIC) for one or more m/z values: the summed intensity within ± tolerance (ppm or Da) in every MS1 spectrum (or another `ms_level`). For each target returns the apex RT and intensity, the apex peak's boundaries, area (intensity x min, no baseline subtraction) and FWHM, plus a downsampled trace. Reads every spectrum in the RT window, so restrict `rt_start_min`/`rt_end_min` on long runs."
+        },
+        {
+          "name": "find_ms2_scans",
+          "kind": "read",
+          "description": "Find the MS2 (MSn) spectra whose precursor m/z is within ± tolerance of `precursor_mz`, optionally within an RT window and for one charge state. Returns index, scan number, RT, precursor m/z, error in ppm, charge and intensity; open any hit with get_spectrum."
+        },
+        {
+          "name": "get_bpc",
+          "kind": "read",
+          "description": "Base peak chromatogram (intensity of the most intense peak per spectrum, with its m/z) vs retention time, downsampled to `max_points`. Cleaner than the TIC for spotting eluting compounds; the base-peak m/z tells you which ion dominates each part of the run."
+        },
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_run_info",
+          "kind": "read",
+          "description": "Describe one run: instrument vendor/model/serial (when the file records them), acquisition date, software, number of spectra per MS level, retention-time and m/z ranges, polarity, centroid/profile, and whether ion-mobility data is present. The first call on a large file indexes it (can take a while); later calls are instant."
+        },
+        {
+          "name": "get_spectrum",
+          "kind": "read",
+          "description": "Read one spectrum, chosen by `index`, `scan_number`, `native_id` or nearest `rt_min` (give exactly one). Returns MS level, RT, polarity, centroid/profile, precursor m/z and charge for MS2, a summary (peak count, TIC, base peak, m/z range) and the `top_n` most intense peaks; `save_path` writes the full peak list to CSV. For profile spectra the top peaks are local maxima of the profile."
+        },
+        {
+          "name": "get_tic",
+          "kind": "read",
+          "description": "Total ion chromatogram (sum of all intensities per spectrum vs retention time) for one MS level, downsampled to `max_points` (keeping the maximum in each bin so peaks survive). Returns the apex, median and area; `save_path` writes every point to CSV."
+        },
+        {
+          "name": "list_runs",
+          "kind": "read",
+          "description": "Find mass-spectrometry runs in the data folder and detect each one's vendor and format (mzML/mzML.gz/mzMLb, Bruker .d TDF or BAF, Agilent .d, Thermo .raw, Waters .raw folder, SCIEX .wiff/.wiff2, Shimadzu .lcd, mzXML). `readable_directly=false` means the run must be converted with convert_to_mzml before it can be analysed."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "summarise_run",
+          "kind": "read",
+          "description": "Quick QC of a run: MS1/MS2 counts, TIC stability (CV, spray dropouts), where the signal elutes, cycle time, MS2 scans per cycle, median injection times and how often MS2 hit the maximum injection time, and precursor charge states. Returns plain-language warnings."
+        }
+      ]
+    },
+    {
+      "name": "LC-MS Worklist Builder",
+      "domain": "chemistry",
+      "category": "Mass spectrometry",
+      "vendor": "Multi-vendor",
+      "models": [
+        "Waters MassLynx 4.x",
+        "SCIEX OS",
+        "Agilent MassHunter Acquisition",
+        "Thermo Xcalibur"
+      ],
+      "interfaces": [
+        "File"
+      ],
+      "protocol": "Sample-list import files: MassLynx worksheet CSV, SCIEX OS batch CSV/TXT, MassHunter worklist CSV, Xcalibur sequence CSV",
+      "summary": "Build, randomise, validate, convert and export LC-MS sample queues as vendor import files (never starts a run).",
+      "status": "simulated",
+      "package": "labmcp-ms-worklist",
+      "version": "0.1.0",
+      "description": "MCP server that builds, validates and exports LC-MS worklist import files for MassLynx, SCIEX OS, MassHunter and Xcalibur.",
+      "command": "labmcp-ms-worklist",
+      "module": "labmcp_ms_worklist.server",
+      "path": "servers/chemistry/ms-worklist",
+      "extras": {},
+      "tools": [
+        {
+          "name": "add_samples",
+          "kind": "control",
+          "description": "Append samples to a draft worklist (the worklist's defaults and automatic positions apply; any blank/QC/randomisation plan is re-applied to the longer list with the same seed)."
+        },
+        {
+          "name": "create_worklist",
+          "kind": "control",
+          "description": "Create an in-memory draft worklist from a sample list plus defaults (methods, injection volume, tray positions, data-file naming pattern). Nothing is written to disk until export_worklist. Injection volumes above the max_injection_volume_ul limit are refused."
+        },
+        {
+          "name": "export_worklist",
+          "kind": "control",
+          "description": "Validate the draft and write the vendor import file into the output folder. Returns the path, a preview of the first lines, warnings and import instructions. Refuses if validation finds errors or the file exists (unless overwrite=true). This does not start an acquisition: a person imports the file into the acquisition software."
+        },
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_worklist",
+          "kind": "read",
+          "description": "Show a draft worklist in run order, with its defaults, blank/QC plan, randomisation seed and the history of operations applied to it."
+        },
+        {
+          "name": "import_worklist",
+          "kind": "read",
+          "description": "Parse an existing MassLynx, SCIEX OS, MassHunter or Xcalibur import file from the output folder into a draft, so it can be validated, edited or exported in another vendor's format. Columns without a neutral equivalent are kept verbatim. Only reads; nothing is written."
+        },
+        {
+          "name": "insert_qc_blanks",
+          "kind": "control",
+          "description": "Insert blanks and QC injections and optionally randomise the run order (with a recorded seed). Replaces any previous plan, so calling it again does not duplicate blanks. The plan is re-applied whenever samples are added; data-file names follow the new run order."
+        },
+        {
+          "name": "list_formats",
+          "kind": "read",
+          "description": "List the supported import formats (Waters MassLynx, SCIEX OS, Agilent MassHunter, Thermo Xcalibur): columns, required fields, sample-type names, file extensions, how to import, what is verified against vendor documents and what is assumed, and the source URLs. Also lists the position patterns and the formats that were researched but not implemented."
+        },
+        {
+          "name": "list_worklists",
+          "kind": "read",
+          "description": "List the draft worklists in memory and the files in the output folder."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "validate_worklist",
+          "kind": "read",
+          "description": "Check a draft against the target format: required fields, duplicate data-file names, characters Windows does not allow in file names, tray/vial position format and plate bounds, injection volume (> 0 and <= the max_injection_volume_ul limit), and method file extensions. Errors block export; warnings don't."
         }
       ]
     },
@@ -936,7 +1109,7 @@
       "summary": "Cyclic, linear-sweep and differential-pulse voltammetry, chronoamperometry and raw MethodSCRIPT, with peak summaries and CSV export.",
       "status": "simulated",
       "package": "labmcp-palmsens",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "MCP server for PalmSens potentiostats running MethodSCRIPT (EmStat Pico, EmStat4, Sensit, Nexus): CV, LSV, DPV, chronoamperometry, raw scripts.",
       "command": "labmcp-palmsens",
       "module": "labmcp_palmsens.server",
@@ -991,7 +1164,7 @@
         {
           "name": "run_methodscript",
           "kind": "hazard",
-          "description": "Advanced: run a raw MethodSCRIPT and return its raw output and decoded data packages. Literal potentials of set_e / set_range_minmax da / CV, LSV, DPV and CA loops are checked against `max_potential_v`; values computed at run time are not. Aborted after `timeout_s`; add `on_finished:` + `cell_off` to your script so the cell is switched off after an abort."
+          "description": "Advanced: run a raw MethodSCRIPT and return its raw output and decoded data packages. Literal potentials of set_e / set_range_minmax da and the CV, LSV, DPV, SWV, NPV, ACV, CA, PAD, EIS and fast CV/CA techniques are checked against `max_potential_v`; values computed at run time are not. Aborted after `timeout_s`; add `on_finished:` + `cell_off` to your script so the cell is switched off after an abort. After a runtime error the server switches the cell off itself."
         }
       ]
     },
@@ -1074,6 +1247,111 @@
           "name": "zero",
           "kind": "control",
           "description": "Zero the balance (ESC V). Only works with the pan (nearly) empty, within the balance's zero-setting range; clears the tare. Confirms by reading ~0 afterwards."
+        }
+      ]
+    },
+    {
+      "name": "Thermo Orbitrap (Instrument API)",
+      "domain": "chemistry",
+      "category": "Mass spectrometry",
+      "vendor": "Thermo Fisher Scientific",
+      "models": [
+        "Orbitrap Fusion",
+        "Orbitrap Fusion Lumos",
+        "Orbitrap Eclipse",
+        "Orbitrap Ascend",
+        "Orbitrap Exploris 240",
+        "Orbitrap Exploris 480",
+        "Q Exactive family"
+      ],
+      "interfaces": [
+        ".NET API (Windows)"
+      ],
+      "protocol": "Thermo Fisher Instrument API (IAPI)",
+      "summary": "Adapter for the licensed Thermo IAPI (bring your own assemblies): instrument status, live scan buffer with MS-order filters, validated and rate-limited custom and repeating scans, acquisitions to raw files, stop/cancel.",
+      "status": "simulated",
+      "package": "labmcp-thermo-iapi",
+      "version": "0.1.0",
+      "description": "MCP server adapter for Thermo Fisher Orbitrap mass spectrometers via the licensed Instrument API (IAPI): status, live scans, custom and repeating scans, acquisitions.",
+      "command": "labmcp-thermo-iapi",
+      "module": "labmcp_thermo_iapi.server",
+      "path": "servers/chemistry/thermo-iapi",
+      "extras": {},
+      "tools": [
+        {
+          "name": "cancel_custom_scans",
+          "kind": "safety",
+          "description": "Cancel any pending custom scan and its processing delay (IAPI CancelCustomScan)."
+        },
+        {
+          "name": "cancel_repeating_scan",
+          "kind": "safety",
+          "description": "Cancel the repeating scan set with set_repeating_scan (IAPI CancelRepetition)."
+        },
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_instrument_status",
+          "kind": "read",
+          "description": "Report the instrument model, IAPI service/instrument connection, system mode and state (On/Standby/Off; Running/ReadyToDownload/...), whether an acquisition can be paused or resumed, the IAPI licence where the API exposes it, requested readbacks, the latest scan status log (vacuum, source) and how many scans have arrived."
+        },
+        {
+          "name": "get_possible_scan_parameters",
+          "kind": "read",
+          "description": "List the scan parameters this instrument accepts for custom and repeating scans (IScans.PossibleParameters): name, allowed range or choices, default and help. The set depends on the model, licence and Tune version."
+        },
+        {
+          "name": "get_recent_scans",
+          "kind": "read",
+          "description": "Return the most recent scans received from the instrument (oldest first), optionally only one MS order or one custom scan's access id: scan number, MS order, precursor m/z, AGC target, injection time and the most intense centroids. Scans only arrive in On mode."
+        },
+        {
+          "name": "pause_acquisition",
+          "kind": "safety",
+          "description": "Pause the running acquisition (IAPI Pause). Fails if the instrument reports it cannot pause."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "resume_acquisition",
+          "kind": "hazard",
+          "description": "Resume a paused acquisition (IAPI Resume). Sample consumption continues."
+        },
+        {
+          "name": "set_repeating_scan",
+          "kind": "hazard",
+          "description": "Define or replace the scan the instrument repeats when no method or custom scan is running (IAPI CreateRepeatingScan/SetRepetitionScan). Values are validated like submit_custom_scan. Cancel with cancel_repeating_scan."
+        },
+        {
+          "name": "start_acquisition",
+          "kind": "hazard",
+          "description": "Start an acquisition with the instrument's current settings (IAPI StartAcquisition), recording to a raw file. This consumes sample. The instrument must be On; an acquisition must not already be running. Stop it with stop_acquisition."
+        },
+        {
+          "name": "stop_acquisition",
+          "kind": "safety",
+          "description": "Stop the running acquisition (IAPI CancelAcquisition), by default also cancelling custom and repeating scans, and optionally switch the instrument to Standby (switch back to On in Tune)."
+        },
+        {
+          "name": "submit_custom_scan",
+          "kind": "hazard",
+          "description": "Place one custom scan to run next (IAPI CreateCustomScan/SetCustomScan); unset values fall back to the instrument's defaults. Every value is checked against PossibleParameters and the safety limits, and calls are rate-limited, before anything is sent. Fetch the result with wait_for_scan(access_id=running_number)."
+        },
+        {
+          "name": "wait_for_scan",
+          "kind": "read",
+          "description": "Wait for the next scan that arrives after this call (optionally of one MS order, or the result of a custom scan by its access id) and return it. Returns found=false after timeout_s if nothing matching arrived (e.g. the instrument is in Standby)."
         }
       ]
     },
@@ -1204,7 +1482,7 @@
       "summary": "Read setpoints and measured V/I/CV-CC per channel, set voltage and current limits, switch outputs on/off, set OVP/OCP, read errors.",
       "status": "simulated",
       "package": "labmcp-bench-psu",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "MCP server for programmable DC bench power supplies (Rigol DP700/DP800/DP900, Siglent SPD3303X/SPD1000X, Aim-TTi CPX/MX/QL/PL-P): set, measure, switch outputs, OVP/OCP.",
       "command": "labmcp-bench-psu",
       "module": "labmcp_bench_psu.server",
@@ -1293,7 +1571,7 @@
       "summary": "Read analog inputs, stream waveforms, read thermocouples and the device temperature, read/set digital I/O and set DACs, with voltage and stream limits.",
       "status": "simulated",
       "package": "labmcp-labjack",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "MCP server for LabJack T4, T7/T7-Pro and T8 DAQ devices (LJM): analog inputs, streaming, thermocouples, DACs and digital I/O with safety limits.",
       "command": "labmcp-labjack",
       "module": "labmcp_labjack.server",
@@ -1579,7 +1857,7 @@
       "summary": "Receive-only LIS: ACK/NAK frames with checksum validation, reassemble messages, and query results by sample, patient, test or time. Patient name/DOB redacted by default. Research use only.",
       "status": "simulated",
       "package": "labmcp-astm-lis",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "MCP server that receives results from clinical/lab analyzers over ASTM E1381/E1394 (CLSI LIS1/LIS2): serial, TCP client or TCP listener.",
       "command": "labmcp-astm-lis",
       "module": "labmcp_astm_lis.server",
@@ -1647,7 +1925,7 @@
       "summary": "Scan, read device info/battery, record heart rate with RR intervals and HRV, read SpO2, blood pressure, temperature and weight. Research use only, not a medical device.",
       "status": "simulated",
       "package": "labmcp-ble-health",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "MCP server for Bluetooth LE health sensors (standard GATT profiles): heart rate + HRV, SpO2, blood pressure, temperature, weight.",
       "command": "labmcp-ble-health",
       "module": "labmcp_ble_health.server",
@@ -1928,7 +2206,7 @@
       "summary": "Read all sensor inputs with status, heater status, set setpoints/ramps/heater ranges/PID, wait for stable temperature, all heaters off.",
       "status": "simulated",
       "package": "labmcp-lakeshore",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "MCP server for Lake Shore Cryotronics 335/336/350 temperature controllers: read sensors, setpoints, ramps, heater ranges, PID, wait for stability, all heaters off.",
       "command": "labmcp-lakeshore",
       "module": "labmcp_lakeshore.server",
@@ -2098,7 +2376,7 @@
       "summary": "Read X/Y/R/θ snapshots, set reference frequency/harmonic/phase, sine amplitude, sensitivity, time constant, auto phase/gain/range, bounded frequency sweeps.",
       "status": "simulated",
       "package": "labmcp-srs-lockin",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "MCP server for Stanford Research Systems lock-in amplifiers (SR810/SR830, SR860/SR865A): read X/Y/R/θ, set reference, sensitivity and time constant, frequency sweeps.",
       "command": "labmcp-srs-lockin",
       "module": "labmcp_srs_lockin.server",
@@ -2179,6 +2457,123 @@
           "name": "set_time_constant",
           "kind": "control",
           "description": "Set the output filter time constant (nearest available value), and optionally the filter slope and synchronous filter. The SR830 may raise a too-short time constant to its minimum for the current slope/reserve; the returned settings show the value actually used."
+        }
+      ]
+    },
+    {
+      "name": "SRS Residual Gas Analyzer",
+      "domain": "physics",
+      "category": "Mass spectrometry",
+      "vendor": "Stanford Research Systems",
+      "models": [
+        "RGA100",
+        "RGA200",
+        "RGA300"
+      ],
+      "interfaces": [
+        "RS-232",
+        "TCP"
+      ],
+      "protocol": "SRS RGA command set (ASCII commands, binary ion currents)",
+      "summary": "Analog and histogram spectra, partial pressures at chosen m/z, total pressure, helium leak checks, gas identification; filament, CDEM and degas with pressure interlocks.",
+      "status": "simulated",
+      "package": "labmcp-srs-rga",
+      "version": "0.1.0",
+      "description": "MCP server for SRS RGA100/200/300 residual gas analyzers: spectra, partial pressures, leak checks, filament/CDEM with pressure interlocks.",
+      "command": "labmcp-srs-rga",
+      "module": "labmcp_srs_rga.server",
+      "path": "servers/physics/srs-rga",
+      "extras": {},
+      "tools": [
+        {
+          "name": "all_off",
+          "kind": "safety",
+          "description": "Put the RGA in a safe state: abort any degas, CDEM off (HV0), filament off (FL0) and quadrupole RF/DC off (MR0). Use when finished, before venting, or if anything looks wrong."
+        },
+        {
+          "name": "analog_scan",
+          "kind": "read",
+          "description": "Record an analog mass spectrum (SC1): the quadrupole steps through the mass range and the full peak shapes are returned (downsampled) with a peak list, the total pressure measured at the end of the scan, and optionally the full data as CSV. Use it to check peak positions and to survey unknown gases. Duration depends on the noise floor (e.g. 126 ms/amu at NF4)."
+        },
+        {
+          "name": "calibrate",
+          "kind": "hazard",
+          "description": "Calibrate the detector: `zero` (CA) re-zeroes the ion detector at the present noise floor and detector and corrects the RF scan table for temperature drift (seconds); `electrometer` (CL) recalibrates the electrometer's full I-V response (longer, clears all zero offsets). The quadrupole RF is switched off at the end."
+        },
+        {
+          "name": "cdem_off",
+          "kind": "safety",
+          "description": "Switch the electron multiplier off (HV0) and return to Faraday-cup detection. Always allowed."
+        },
+        {
+          "name": "degas",
+          "kind": "hazard",
+          "description": "Start an ionizer degas (DG): 20 mA of 400 eV electrons clean the ion source by electron stimulated desorption. The CDEM is switched off and left off. Degassing shortens filament life; prefer a bakeout. Refused above `max_filament_pressure_torr` and beyond `max_degas_minutes`. Returns immediately; the RGA is busy until it finishes (any command would abort it), and `filament_off` / `all_off` stop it."
+        },
+        {
+          "name": "filament_off",
+          "kind": "safety",
+          "description": "Switch the filament off (FL0), stopping a degas first if one is running. Always allowed."
+        },
+        {
+          "name": "get_command_log",
+          "kind": "read",
+          "description": "Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done."
+        },
+        {
+          "name": "get_connection_info",
+          "kind": "read",
+          "description": "Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first."
+        },
+        {
+          "name": "get_status",
+          "kind": "read",
+          "description": "Report the RGA state: filament emission, CDEM on/off and voltage, ionizer settings, scan settings, stored sensitivity factors, and the decoded error bytes (e.g. FL6 when the overpressure protection shut the filament down). Reading the error bytes clears the communication (EC?) and CDEM (EM?) error bytes, as on the instrument."
+        },
+        {
+          "name": "histogram_scan",
+          "kind": "read",
+          "description": "Record a bar-graph spectrum (HS1): one peak-locked value per integer m/z plus the total pressure. Faster than an analog scan and the usual way to follow a residual gas composition."
+        },
+        {
+          "name": "identify_residual_gases",
+          "kind": "read",
+          "description": "Run a histogram scan and assign the major peaks to likely gases with a simple lookup of standard 70 eV fragment patterns: H2 (2), He (4), CH4 (16/15), H2O (18/17), N2 or CO (28, split with 14 and 12), O2 (32), Ar (40), CO2 (44), plus diagnoses such as an air leak or hydrocarbon contamination. A screening aid, not a quantitative analysis."
+        },
+        {
+          "name": "leak_check",
+          "kind": "read",
+          "description": "Helium leak check: monitor m/z 4 while someone sprays helium on suspect joints, and report the baseline, every response above `threshold_factor` x baseline (start/end time, peak) and the time series. Keep the first few seconds free of helium so the baseline is clean. The response time of a real leak is a few seconds. Bounded by `max_leak_check_duration_s`."
+        },
+        {
+          "name": "measure_masses",
+          "kind": "read",
+          "description": "Measure partial pressures at a list of m/z values (peak-locked single-mass measurements, MR). Fast and precise for monitoring known gases; the precision and time per mass are set by the noise floor (`set_scan_parameters`). Pressures are N2-equivalent."
+        },
+        {
+          "name": "read_total_pressure",
+          "kind": "read",
+          "description": "Measure the total pressure with the RGA acting as an ionisation gauge (TP?, Faraday cup). Needs the filament on and the CDEM off. The value is N2-equivalent and can differ from a Bayard-Alpert gauge by a factor of a few, depending on the gas composition."
+        },
+        {
+          "name": "reconnect",
+          "kind": "safety",
+          "description": "Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged)."
+        },
+        {
+          "name": "set_cdem",
+          "kind": "hazard",
+          "description": "Switch the electron multiplier (CDEM) on at a given high voltage for ~100-10000x more signal. High pressure shortens CDEM life and can destroy it, so this is refused unless the pressure is below `max_cdem_pressure_torr` (RGA total pressure measured now with the Faraday cup, a recent one, or `external_pressure_torr`), and the voltage is capped by `max_cdem_voltage_v`. Total-pressure readings are disabled while the CDEM is on."
+        },
+        {
+          "name": "set_filament",
+          "kind": "hazard",
+          "description": "Switch the filament on (or change its emission current). The filament burns out or is damaged above 1e-4 Torr, so this is refused unless the pressure is below `max_filament_pressure_torr`: pass `external_pressure_torr` from a separate gauge, or, if the filament is already on, the RGA's own total pressure is measured. The RGA's protection will also shut the filament down on overpressure (reported as FL6)."
+        },
+        {
+          "name": "set_scan_parameters",
+          "kind": "control",
+          "description": "Change measurement settings: noise floor (speed vs detection limit), electron energy, ion energy, focus plate voltage and analog-scan resolution. Sensitivity factors stored in the head are only valid at the default ionizer settings (70 eV, 12 eV, 90 V). After changing the noise floor the detector zero is re-adjusted automatically at the start of the next scan."
         }
       ]
     },
@@ -2364,7 +2759,7 @@
       "summary": "Read and write named, typed, scaled points from a YAML/JSON register map with per-point min/max, raw register/coil access, and a map-defined safe state.",
       "status": "simulated",
       "package": "labmcp-modbus",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "MCP server for Modbus TCP and Modbus RTU devices (temperature controllers, chillers, PLCs, sensors, VFDs) with typed, scaled register maps, per-point limits and a safe state.",
       "command": "labmcp-modbus",
       "module": "labmcp_modbus.server",
@@ -2464,7 +2859,7 @@
       "summary": "Identify, query, write and batch raw SCPI with a query-only read path, configurable command allow/deny lists, error-queue checks, binary block transfer and a user-defined safe state.",
       "status": "simulated",
       "package": "labmcp-scpi",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "Generic MCP server for any IEEE 488.2 / SCPI instrument (DMMs, scopes, SMUs, PSUs, generators, analyzers) over VISA, TCP socket or serial, with command allow/deny lists.",
       "command": "labmcp-scpi",
       "module": "labmcp_scpi.server",

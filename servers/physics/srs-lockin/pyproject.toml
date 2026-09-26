@@ -1,6 +1,6 @@
 [project]
 name = "labmcp-srs-lockin"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP server for Stanford Research Systems lock-in amplifiers (SR810/SR830, SR860/SR865A): read X/Y/R/θ, set reference, sensitivity and time constant, frequency sweeps."
 readme = "README.md"
 license = "Apache-2.0"

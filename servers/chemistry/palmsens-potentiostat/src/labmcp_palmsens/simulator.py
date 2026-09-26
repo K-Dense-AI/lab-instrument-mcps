@@ -208,6 +208,9 @@ class MethodScriptSimulator(LineSimulator):
         self.receiving: list[str] | None = None
         self.queue: list[tuple[float, str, str]] = []  # (due time, line, section)
         self.running = False
+        #: Cell (potentiostat output) state after the last script. A runtime error stops the
+        #: script without running ``on_finished:`` (manual 10.1), so the cell can stay on.
+        self.cell_powered = False
         self._clock = time.monotonic
 
     # ------------------------------------------------------------ transport hooks
@@ -360,8 +363,10 @@ class MethodScriptSimulator(LineSimulator):
                     fail(0x000F, number)
             elif cmd == "cell_on":
                 cell_on, cell_on_t = True, t
+                self.cell_powered = True
             elif cmd == "cell_off":
                 cell_on = False
+                self.cell_powered = False
             elif cmd == "wait":
                 t += max(0.0, val(args[0], number))
             elif cmd == "timer_start":

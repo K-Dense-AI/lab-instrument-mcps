@@ -675,17 +675,26 @@ class BleakBackend:
         except Exception as exc:
             raise _translate_bleak_error(exc, what, self.address) from exc
 
+    def _adapter_kwargs(self, args_class: str) -> dict[str, Any]:
+        """Select the Linux adapter. Newer bleak takes it in the ``bluez`` args dict
+        (``BlueZScannerArgs`` / ``BlueZClientArgs`` gained ``adapter``, which deprecated the
+        ``adapter`` keyword); bleak 1.0.x only understands ``adapter=`` and silently ignores an
+        unknown key in the ``bluez`` dict, so check which form this bleak version supports."""
+        if not self._adapter:
+            return {}
+        try:
+            import bleak.args.bluez as bluez_args
+
+            supported = "adapter" in getattr(bluez_args, args_class).__annotations__
+        except (ImportError, AttributeError):
+            supported = False
+        return {"bluez": {"adapter": self._adapter}} if supported else {"adapter": self._adapter}
+
     def _scanner_kwargs(self) -> dict[str, Any]:
-        return {"bluez": {"adapter": self._adapter}} if self._adapter else {}
+        return self._adapter_kwargs("BlueZScannerArgs")
 
     def _client_kwargs(self) -> dict[str, Any]:
-        import inspect
-
-        kwargs: dict[str, Any] = {"pair": self._pair}
-        if self._adapter:
-            params = inspect.signature(self._bleak.BleakClient.__init__).parameters
-            kwargs.update({"bluez": {"adapter": self._adapter}} if "bluez" in params else {"adapter": self._adapter})
-        return kwargs
+        return {"pair": self._pair, **self._adapter_kwargs("BlueZClientArgs")}
 
     # -- interface --------------------------------------------------------------
 
@@ -914,11 +923,13 @@ class BLEHealthSensor:
         done: Callable[[list[Packet]], bool] | None = None,
         reconnect: bool = True,
         required: tuple[int, str, int] | None = None,
+        partial_ok: bool = False,
     ) -> tuple[list[Packet], bool]:
         """Subscribe to ``chars`` (those the device has) and collect packets.
 
         Without ``done`` it records for ``seconds``. With ``done`` it stops ``settle_s`` after
-        ``done(packets)`` first returns true, or raises ``InstrumentTimeout`` after ``seconds``.
+        ``done(packets)`` first returns true, or raises ``InstrumentTimeout`` after ``seconds``
+        (with ``partial_ok``, packets that did not satisfy ``done`` are returned instead).
         With ``reconnect`` it keeps (re)connecting until the deadline, which is how monitors
         that only advertise after a measurement are caught. Returns (packets, disconnected).
         """
@@ -976,6 +987,8 @@ class BLEHealthSensor:
             if subscribed:
                 self._event(f"unsubscribed; {len(packets)} packets received")
         if done is not None and not satisfied:
+            if partial_ok and packets:
+                return packets, disconnected
             if last_error is not None and not packets:
                 raise InstrumentConnectionError(
                     f"No measurement received within {seconds:g} s; last connection error: {last_error}"
@@ -1052,13 +1065,19 @@ class BLEHealthSensor:
     ) -> tuple[list[tuple[bool, TemperatureMeasurement]], str | None]:
         """Wait for Temperature Measurement indications (0x2A1C), optionally also accepting
         Intermediate Temperature notifications (0x2A1E). Returns ([(is_final, measurement)],
-        sensor_type)."""
+        sensor_type).
+
+        The wait always ends on a final Temperature Measurement (HTS: indicated once the
+        measurement is complete); Intermediate Temperature values, which a thermometer notifies
+        repeatedly while the probe settles, are only returned if no final value arrives before
+        the timeout."""
         chars = [CHR_TEMPERATURE_MEASUREMENT] + ([CHR_INTERMEDIATE_TEMPERATURE] if accept_intermediate else [])
         packets, _ = self.listen(
             chars,
             seconds=timeout_s,
-            done=lambda ps: bool(ps),
+            done=lambda ps: any(p.char == CHR_TEMPERATURE_MEASUREMENT for p in ps),
             required=(CHR_TEMPERATURE_MEASUREMENT, "Temperature Measurement", SVC_HEALTH_THERMOMETER),
+            partial_ok=accept_intermediate,
         )
         out = [
             (

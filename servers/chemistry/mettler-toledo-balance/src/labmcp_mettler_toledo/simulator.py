@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import re
 
 from labmcp import LineSimulator
 
@@ -80,7 +81,8 @@ class MTSICSSimulator(LineSimulator):
             case "TA":
                 if arg:
                     value, _, unit = arg.partition(" ")
-                    if unit.strip() != "g":
+                    # MT-SICS numbers are plain decimals ("TA 100.00 g"); no exponent notation.
+                    if unit.strip() != "g" or not re.fullmatch(r"[-+]?\d+(?:\.\d*)?", value):
                         return "TA L"
                     self.tare_g = round(float(value), 4)
                 return "TA A " + self._fmt(self.tare_g)

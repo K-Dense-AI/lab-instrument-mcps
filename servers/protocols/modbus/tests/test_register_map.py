@@ -131,3 +131,11 @@ def test_example_map():
     assert m.point("control_mode").enum[0] == "standby"
     assert [s.point for s in m.safe_state] == ["output_enable", "control_mode"]
     assert [p.name for p in m.overlapping("holding", 5, 1)] == ["proportional_band"]
+
+
+def test_encode_float32_overflow_is_a_refusal_not_a_crash():
+    # struct.pack(">f", 1e39) raises OverflowError (not struct.error); it must become a ValueError
+    # so the driver reports "Refused ... Nothing was sent" instead of an internal error.
+    p = Point("big", "holding", 0, "float32", scale=1e-3, writable=True, min=0, max=1e37)
+    with pytest.raises(ValueError, match="does not fit in a float32"):
+        p.encode(1e37)

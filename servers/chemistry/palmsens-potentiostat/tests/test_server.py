@@ -327,3 +327,39 @@ def test_limit_error_type():
     server.configure(simulate=True, limits={"max_potential_v": 1})
     with pytest.raises(SafetyLimitError):
         server.check("max_potential_v", 1.5)
+
+
+# ------------------------------------------------------------------ regressions (vendor-doc review)
+
+
+def test_runtime_error_switches_cell_off():
+    # MethodSCRIPT manual 10.1: on_finished: is NOT executed after a script error, so the driver
+    # must switch the cell off itself.
+    sim = MethodScriptSimulator(speed=1000.0)
+    dev = MethodScriptDevice(SimulatedTransport(sim, read_termination="\n", write_termination="\n"))
+    dev.identify()
+    result = dev.execute(["set_e 0", "cell_on", "set_e 3", "on_finished:", "cell_off"], timeout_s=5)
+    assert result.error and "0x000F" in result.error
+    assert result.cell_off_sent is True
+    assert sim.cell_powered is False
+
+
+def test_script_potentials_cover_more_techniques():
+    script = [
+        "meas_loop_swv p c f r -500m 500m 10m 100m 10",
+        "meas_loop_npv p c -300m 700m 10m 5m 100m",
+        "meas_loop_eis f zr zi 10m 100k 100 11i 1500m",
+        "meas_fast_cv p c n 0 800m -900m 10m 1",
+        "meas_loop_pad p c 500m 1200m 10m 50m 2",
+    ]
+    values = {round(v, 6) for _, v in script_potentials(script)}
+    assert {-0.5, 0.5, -0.7, 0.7, -0.3, 1.5, 0.0, 0.8, -0.9, 1.2} <= values  # SWV ends +- 2 x amplitude
+
+
+async def test_raw_swv_script_potential_limit_refuses():
+    async with simulated_client(server, options=FAST, limits={"max_potential_v": 1.0}) as client:
+        with pytest.raises(Exception, match="max_potential_v"):
+            await client.call_tool(
+                "run_methodscript",
+                {"script": "var p\nvar c\nvar f\nvar r\ncell_on\nmeas_loop_swv p c f r 0 5 10m 20m 10\nendloop"},
+            )

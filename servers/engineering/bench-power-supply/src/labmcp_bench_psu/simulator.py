@@ -384,10 +384,11 @@ class TTiSimulator(_PSUSim):
             if what == "OP":
                 o.update()
                 return "1" if o.on else "0"
+            # A disabled trip (MX) reads back as "VP<N> OFF" / "CP<N> OFF".
             if what == "OVP":
-                return f"VP{ch} {o.ovp_v:.2f}"
+                return f"VP{ch} {o.ovp_v:.2f}" if o.ovp_on else f"VP{ch} OFF"
             if what == "OCP":
-                return f"CP{ch} {o.ocp_a:.3f}"
+                return f"CP{ch} {o.ocp_a:.3f}" if o.ocp_on else f"CP{ch} OFF"
             o.update()
             events, o.events = o.events, 0
             return str(events)
@@ -397,6 +398,16 @@ class TTiSimulator(_PSUSim):
             self.set_current(ch, float(arg))
         elif what == "OP":
             self.switch(ch, _onoff(arg))
+        elif what in {"OVP", "OCP"} and arg.strip().upper() in {"ON", "OFF"}:
+            # "OVP<N> ON|OFF" / "OCP<N> ON|OFF": MX series only (MX100T/TP Iss. 6, 14.2.1).
+            if not self.model.upper().startswith("MX"):
+                raise self.undefined()
+            on = arg.strip().upper() == "ON"
+            if what == "OVP":
+                o.ovp_on = on
+            else:
+                o.ocp_on = on
+            o.update()
         elif what in {"OVP", "OCP"}:
             level = float(arg)
             if what == "OVP":

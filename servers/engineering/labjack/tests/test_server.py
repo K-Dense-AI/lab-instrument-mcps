@@ -149,6 +149,16 @@ def test_thermocouple():
         d.read_thermocouple(0, "K", cjc="lm34")
 
 
+def test_t8_thermocouple_uses_documented_default_cjc_register():
+    # Datasheet 14.1.1: on the T8 the default CJC register (TEMPERATURE_DEVICE_K, 60052) is mapped
+    # by the firmware to TEMPERATURE#_CAPTURE, so CONFIG_B must be 60052, not 700 + 2n.
+    d = make_driver("T8")
+    r = d.read_thermocouple(3, "K")
+    assert d.ljm.device.ef_config[(3, "B")] == 60052
+    assert r.temperature_c == pytest.approx(37.0, abs=0.5)
+    assert 20 < r.cjc_temperature_c < 35
+
+
 def test_stream_two_channels():
     d = make_driver("T7")
     s = d.stream_ain([0, 1], scan_rate_hz=1000, num_scans=200)

@@ -39,10 +39,9 @@ MAX_STREAM_SAMPLES = 2_000_000
 
 #: AIN#_EF_INDEX values of the thermocouple extended feature (datasheet 14.1.1, T7/T8 only).
 THERMOCOUPLE_EF_INDEX = {"E": 20, "J": 21, "K": 22, "R": 23, "T": 24, "S": 25, "N": 27, "B": 28, "C": 30}
-#: Modbus address of TEMPERATURE_DEVICE_K, the T7 default CJC source (datasheet 14.1.1).
+#: Modbus address of TEMPERATURE_DEVICE_K, the default CJC source (datasheet 14.1.1). On the T8
+#: the firmware maps this default to the channel's own TEMPERATURE#_CAPTURE terminal sensor.
 TEMPERATURE_DEVICE_K_ADDRESS = 60052
-#: TEMPERATURE#(0:7)_CAPTURE base address; the T8 default CJC for AIN n is 700 + 2n.
-T8_TEMPERATURE_CAPTURE_ADDRESS = 700
 #: LM34 CJC sensor conversion from the LabJack thermocouple app note (K/V and K).
 LM34_SLOPE_K_PER_V, LM34_OFFSET_K = 55.56, 255.37
 
@@ -476,10 +475,10 @@ class LabJackT:
             self._check_ain_channels([channel])
             self._check_differential([channel], differential)
             if cjc == "internal":
-                if spec is T8:
-                    cjc_address = T8_TEMPERATURE_CAPTURE_ADDRESS + 2 * channel
-                else:
-                    cjc_address = TEMPERATURE_DEVICE_K_ADDRESS
+                # Datasheet 14.1.1: "When using the T8, the default of the CJC register
+                # (AIN#_EF_CONFIG_B) which is TEMPERATURE_DEVICE_K will instead be mapped to the
+                # TEMPERATURE#_CAPTURE for the CJC measurement." So 60052 is right on every model.
+                cjc_address = TEMPERATURE_DEVICE_K_ADDRESS
                 slope, offset = 1.0, 0.0
             else:
                 if cjc_channel is None:

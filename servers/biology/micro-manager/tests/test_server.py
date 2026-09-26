@@ -169,6 +169,21 @@ def test_save_tiff_hyperstack_and_unique_paths(tmp_path):
     assert auto == tmp_path / "data" / "snap_20260101-120000.tif"
 
 
+def test_save_tiff_handles_rgb_camera_images(tmp_path):
+    # CMMCorePlus.getImage() returns (Y, X, 3) for RGB32 colour cameras; ImageJ needs axes 'YXS'.
+    rgb = np.random.default_rng(2).integers(0, 255, (16, 20, 3), dtype=np.uint8)
+    path = save_tiff(tmp_path / "rgb.tif", rgb, "YX")
+    np.testing.assert_array_equal(tifffile.imread(path), rgb)
+    stack = np.stack([np.stack([rgb]), np.stack([rgb])])  # Z, C, Y, X, S
+    path = save_tiff(tmp_path / "rgb_stack.tif", stack, "ZCYX", z_step_um=1.0)
+    assert tifffile.imread(path).shape == (2, 16, 20, 3)
+    rgb16 = rgb.astype(np.uint16) * 256  # 64-bit RGB: no ImageJ RGB type, saved as 3 channels
+    path = save_tiff(tmp_path / "rgb16.tif", rgb16, "YX")
+    np.testing.assert_array_equal(tifffile.imread(path), np.moveaxis(rgb16, -1, 0))
+    path = save_tiff(tmp_path / "rgb16_stack.tif", np.stack([np.stack([rgb16])] * 2), "ZCYX")
+    assert tifffile.imread(path).shape == (2, 3, 16, 20)
+
+
 def test_driver_only_calls_real_cmmcoreplus_methods():
     """Every core method the driver calls must exist on pymmcore-plus' CMMCorePlus."""
     pmp = pytest.importorskip("pymmcore_plus")

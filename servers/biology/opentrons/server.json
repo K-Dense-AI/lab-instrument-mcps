@@ -3,7 +3,7 @@
   "name": "io.github.K-Dense-AI/labmcp-opentrons",
   "title": "Opentrons OT-2 / Flex",
   "description": "MCP server for Opentrons OT-2 and Flex liquid-handling robots (HTTP API): upload and analyze protoco",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "repository": {
     "url": "https://github.com/K-Dense-AI/lab-instrument-mcps",
     "source": "github",
@@ -15,7 +15,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "labmcp-opentrons",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "transport": {
         "type": "stdio"
       },

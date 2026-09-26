@@ -491,7 +491,7 @@ def wait_for_blood_pressure(
 def read_temperature(
     timeout_s: Annotated[float, Field(ge=5, le=1800, description="Seconds to wait for a measurement")] = 60.0,
     accept_intermediate: Annotated[
-        bool, Field(description="Also accept Intermediate Temperature values (probe still settling)")
+        bool, Field(description="If no final measurement arrives before the timeout, return the latest Intermediate Temperature value (probe still settling) instead of an error")
     ] = False,
 ) -> TemperatureReading:
     """Wait for a thermometer to send a temperature measurement and return it in °C.

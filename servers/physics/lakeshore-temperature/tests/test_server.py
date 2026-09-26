@@ -261,3 +261,13 @@ def test_limit_error_type():
     server.configure(simulate=True, limits={"max_setpoint_k": 10})
     with pytest.raises(SafetyLimitError):
         server.check("max_setpoint_k", 300)
+
+
+def test_mirroring_output_has_no_control_input():
+    # 336 OUTMODE mode 6 = Mirroring: the 2nd field is the mirrored OUTPUT, not an input letter.
+    ls, sim, _ = make_driver("336")
+    sim.outputs[3].mode = 6
+    sim.outputs[3].control_input = 1  # mirrors output 1
+    mode, inp, _ = ls.output_mode(3)
+    assert mode == "mirroring"
+    assert inp is None

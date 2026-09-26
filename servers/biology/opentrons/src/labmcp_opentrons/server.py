@@ -13,6 +13,7 @@ from labmcp import (
     SAFETY,
     ConnectContext,
     InstrumentConnectionError,
+    InstrumentError,
     InstrumentProtocolError,
     InstrumentServer,
     Limit,
@@ -605,18 +606,21 @@ def deactivate_modules(
         commands = DEACTIVATE_COMMANDS.get(mtype, [])
         if not commands:
             continue
-        error = None
+        # Send every deactivate command even if an earlier one fails (e.g. a Heater-Shaker whose
+        # deactivateShaker times out must still get deactivateHeater), and keep going with the
+        # remaining modules on any instrument error, including timeouts.
+        errors: list[str] = []
         for ctype in commands:
             try:
                 drv.stateless_command(ctype, {"moduleId": mod["id"]}, timeout_s=30)
             except RobotHTTPError as exc:
-                error = str(exc)
+                msg = f"{ctype}: {exc}"
                 if exc.status == 409:
-                    error += " Stop the current run first (stop_run), then try again."
-                break
-            except InstrumentProtocolError as exc:
-                error = str(exc)
-                break
+                    msg += " Stop the current run first (stop_run), then try again."
+                errors.append(msg)
+            except InstrumentError as exc:
+                errors.append(f"{ctype}: {exc}")
+        error = " | ".join(errors) if errors else None
         results.append(
             ModuleDeactivation(module_id=mod["id"], module_type=_MODULE_NAMES.get(mtype, mtype),
                                commands=commands, ok=error is None, error=error)

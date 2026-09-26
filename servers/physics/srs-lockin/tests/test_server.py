@@ -302,3 +302,25 @@ def test_limit_error_type():
     server.configure(simulate=True, limits={"max_amplitude_v": 0.1})
     with pytest.raises(SafetyLimitError):
         server.check("max_amplitude_v", 0.5)
+
+
+def test_sr86x_snapshot_is_one_coherent_snap():
+    # SR860 SNAP? takes at most 3 parameters; X, Y and θ must come from ONE snapshot and R is
+    # derived from them, otherwise X/Y and R/θ could be several time constants apart.
+    import math
+
+    lockin, sim, clock = make_driver("SR860")
+    lockin.set_frequency_hz(10_000.0)
+    clock.t += 10.0
+    sent: list[str] = []
+    original = sim.handle
+
+    def spy(command):
+        sent.append(command)
+        return original(command)
+
+    sim.handle = spy
+    snap = lockin.snapshot()
+    snaps = [c for c in sent if c.upper().startswith("SNAP?")]
+    assert snaps == ["SNAP? 0,1,3"]
+    assert snap.r == pytest.approx(math.hypot(snap.x, snap.y))

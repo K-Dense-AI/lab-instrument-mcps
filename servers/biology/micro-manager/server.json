@@ -3,7 +3,7 @@
   "name": "io.github.K-Dense-AI/labmcp-micro-manager",
   "title": "Micro-Manager Microscope",
   "description": "MCP server for microscopes controlled by Micro-Manager (pymmcore-plus): snap images, z-stacks and ti",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "repository": {
     "url": "https://github.com/K-Dense-AI/lab-instrument-mcps",
     "source": "github",
@@ -15,7 +15,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "labmcp-micro-manager",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "transport": {
         "type": "stdio"
       },

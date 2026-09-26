@@ -385,3 +385,13 @@ async def test_read_only_hides_clear_results():
         assert "get_results" in names and "get_connection_status" in names
         assert "clear_results" not in names
         assert "reconnect" in names  # safety tools stay available
+
+
+def test_lis2_a2_standard_abnormal_flags_are_decoded():
+    # CLSI LIS2-A2 9.7 defines L H LL HH < > N A U D B W; A/U/D/B/W are standard, not vendor codes.
+    rec = BECKMAN_UPLOAD[:3] + ["R|1|^^^CULT^1|Growth|||A\\W||F", "R|2|^^^X^1|1.0|||U||F", "R|3|^^^Y^1|1.0|||Q9||F", "L|1|F"]
+    m = parse_message(rec, message_id=1, received_at="x", source="t", complete=True, redacted=False)
+    assert m.results[0].abnormal_flags == ["A", "W"]
+    assert m.results[0].abnormal_flag_meanings == ["abnormal", "worse (direction not relevant or not defined)"]
+    assert m.results[1].abnormal_flag_meanings == ["significant change up"]
+    assert m.results[2].abnormal_flag_meanings == ["analyzer-specific code"]

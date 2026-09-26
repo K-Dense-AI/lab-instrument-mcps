@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from decimal import Decimal
 
 from labmcp import InstrumentProtocolError, Transport
 
@@ -29,6 +30,12 @@ _ERRORS = {
 }
 
 DOOR_POSITIONS = {0: "closed", 1: "right_open", 2: "left_open", 8: "error", 9: "intermediate"}
+
+
+def _decimal(value: float) -> str:
+    """Shortest exact decimal representation of ``value`` without an exponent."""
+    text = format(Decimal(repr(float(value))), "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
 
 
 @dataclass
@@ -118,7 +125,9 @@ class MTSICSBalance:
         return self._parse_weight("TA", self.command("TA"))
 
     def preset_tare(self, value: float, unit: str) -> Weight:
-        cmd = f"TA {value:g} {unit}"
+        # Plain decimal notation without precision loss: ``:g`` would send "52.1873" for
+        # 52.18734 and "1e-05" for 0.00001, which MT-SICS does not accept as a number.
+        cmd = f"TA {_decimal(value)} {unit}"
         return self._parse_weight(cmd, self.command(cmd))
 
     def clear_tare(self) -> None:

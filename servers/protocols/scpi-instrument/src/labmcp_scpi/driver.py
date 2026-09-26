@@ -30,7 +30,7 @@ import time
 from dataclasses import dataclass
 
 from labmcp import InstrumentProtocolError, InstrumentTimeout, Transport
-from labmcp.scpi import SCPIDriver
+from labmcp.scpi import SCPIDriver, consume_block_terminator
 
 from labmcp_scpi.policy import CommandPolicy, CommandRefused
 
@@ -211,10 +211,9 @@ class SCPIInstrument(SCPIDriver):
                 data = self.t.read_bytes(length, timeout)
             except InstrumentTimeout as exc:
                 raise self._timeout_error(command, exc) from exc
-            # The block is followed by the response terminator (best effort, as in
-            # labmcp.scpi.SCPIDriver.query_block).
-            with contextlib.suppress(Exception):
-                self.t.read_bytes(len(self.t.read_termination), 0.05)
+            # The block is followed by the response terminator (IEEE 488.2 NL^END);
+            # leaving it unread would shift every later reply by one.
+            consume_block_terminator(self.t, timeout)
         return data
 
     # ------------------------------------------------------------ common commands

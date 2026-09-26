@@ -230,6 +230,7 @@ class ScriptResult:
     aborted: bool = False
     timed_out: bool = False
     duration_s: float = 0.0
+    cell_off_sent: bool | None = None  # after a runtime error: was a separate cell_off accepted?
 
 
 # ---------------------------------------------------------------- script generation
@@ -309,13 +310,23 @@ def build_script(
     return lines
 
 
-_POTENTIAL_ARGS = {  # command -> indices of potential arguments (MethodSCRIPT manual 14.9 / 14.11)
+_POTENTIAL_ARGS = {  # command -> indices of potential arguments (MethodSCRIPT manual 14.9-14.11)
     "set_e": (0,),
     "meas_loop_lsv": (2, 3),
     "meas_loop_cv": (2, 3, 4),
     "meas_loop_dpv": (2, 3),
+    "meas_loop_swv": (4, 5),  # p c f r E_begin E_end E_step E_amp freq
+    "meas_loop_npv": (2, 3),
+    "meas_loop_acv": (6, 7),  # 6 output vars, then E_begin E_end ...
     "meas_loop_ca": (2,),
+    "meas_loop_ca_alt_mux": (2,),
+    "meas_loop_pad": (2, 3),  # E_dc, E_pulse (absolute, not relative to E_dc)
+    "meas_loop_eis": (7,),  # f zr zi E_ac f_start f_end n E_dc
+    "meas_fast_cv": (3, 4, 5),  # p c n E_begin E_vtx1 E_vtx2 ...
+    "meas_fast_ca": (3,),  # p c n E_dc ...
 }
+#: Pulse / amplitude arguments that add to the step potential: command -> (index, multiplier).
+_PULSE_ARGS = {"meas_loop_dpv": (5, 1.0), "meas_loop_swv": (7, 2.0)}
 
 
 def parse_literal(token: str) -> float | None:
@@ -356,8 +367,9 @@ def script_potentials(lines: list[str]) -> list[tuple[int, float]]:
                 value = known.get(args[i]) if value is None else value
                 if value is not None:
                     found.append((number, value))
-        if cmd == "meas_loop_dpv" and len(args) > 5:  # the pulse adds to the step potential
-            pulse = parse_literal(args[5]) or known.get(args[5]) or 0.0
+        if cmd in _PULSE_ARGS and len(args) > _PULSE_ARGS[cmd][0]:  # the pulse adds to the step potential
+            index, factor = _PULSE_ARGS[cmd]
+            pulse = factor * abs(parse_literal(args[index]) or known.get(args[index]) or 0.0)
             ends = [v for n, v in found[-2:] if n == number]
             found += [(number, v + math.copysign(pulse, v)) for v in ends]
     return found
@@ -437,10 +449,12 @@ class MethodScriptDevice:
 
     # ------------------------------------------------------------ scripts
 
-    def execute(self, script: list[str], timeout_s: float) -> ScriptResult:
+    def execute(self, script: list[str], timeout_s: float, *, cell_off_on_error: bool = True) -> ScriptResult:
         """Run a script (``e`` + lines + empty line) and collect its output until the final empty line.
 
-        If the script is still running after ``timeout_s`` it is aborted with ``Z``.
+        If the script is still running after ``timeout_s`` it is aborted with ``Z``. After a runtime
+        error the ``on_finished:`` section is NOT executed (MethodSCRIPT manual 10.1), so the cell
+        may still be on: a separate ``cell_off`` script is then run (``cell_off_sent``).
         """
         lines = [ln.rstrip() for ln in script if ln.strip()]  # empty lines would end the script early
         if any(len(ln) >= 256 for ln in lines):
@@ -462,6 +476,12 @@ class MethodScriptDevice:
             self._running.clear()
             self._run_lock.release()
         result.duration_s = time.monotonic() - t0
+        if result.error and cell_off_on_error:
+            try:
+                off = self.execute(["cell_off"], timeout_s=5.0, cell_off_on_error=False)
+                result.cell_off_sent = off.error is None
+            except InstrumentError:
+                result.cell_off_sent = False
         return result
 
     def _collect(self, script: list[str], timeout_s: float) -> ScriptResult:
@@ -566,7 +586,7 @@ class MethodScriptDevice:
                 self._recover_after_error()
         note = "cell switched off"
         try:
-            res = self.execute(["cell_off"], timeout_s=5.0)
+            res = self.execute(["cell_off"], timeout_s=5.0, cell_off_on_error=False)
             if res.error:
                 note = f"cell_off script reported {res.error}"
         except InstrumentError as exc:

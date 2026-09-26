@@ -1,4 +1,5 @@
 import struct
+import threading
 import time
 
 import pytest
@@ -380,3 +381,45 @@ async def test_read_only_refuses_measure_queries_by_default():
     async with simulated_client(server, read_only=True, options={"allow_measure_in_read_only": "true"}) as client:
         result = await client.call_tool("scpi_query", {"command": "MEAS:VOLT:DC?"})
         assert result.structured_content
+
+
+def test_write_denylist_resolves_relative_headers_in_compound_messages():
+    # SCPI-99 Vol. 1, 6.2.4: after ';' a header without a leading colon continues the previous
+    # path, so 'OUTP:POL NORM;STAT ON' switches the output on (OUTP:STAT ON).
+    policy = CommandPolicy.from_options({"write_denylist": r"^OUTP\d*(:STAT)? (ON|1)$"})
+    for cmd in ["OUTP:POL NORM;STAT ON", "OUTPut1:PROTection OFF;STATe 1", "*CLS;OUTP:POL NORM;*WAI;STAT ON"]:
+        with pytest.raises(CommandRefused, match="denylist"):
+            policy.check_command(cmd)
+    # a leading colon returns to the root, so this STAT is not under OUTP
+    assert policy.check_command("OUTP:POL NORM;:STAT ON") == ["OUTP:POL NORM", ":STAT ON"]
+    # and a deeper path does not collapse: this is OUTP:PROT:STAT, not OUTP:STAT
+    assert policy.check_command("OUTP:PROT:CLE;STAT ON") == ["OUTP:PROT:CLE", "STAT ON"]
+
+
+def test_expand_headers():
+    from labmcp_scpi.policy import expand_headers
+
+    assert expand_headers(["SOUR:VOLT 1", "CURR 2", "*OPC", "LEV 3", ":OUTP ON", "PROT:CLE"]) == [
+        "SOUR:VOLT 1", "SOUR:CURR 2", "*OPC", "SOUR:LEV 3", "OUTP ON", "PROT:CLE",
+    ]
+
+
+def test_binary_block_late_terminator_is_consumed():
+    """IEEE 488.2 ends a block response with NL; if it arrives late it must still be consumed."""
+    d, _ = make_driver()
+    t = d.t
+    d.checked_write("FORM REAL,64")
+    real_push = t._push
+
+    def delayed(data: bytes) -> None:  # hold back the final terminator of the block reply
+        if data.startswith(b"#") and data.endswith(b"\n"):
+            real_push(data[:-1])
+            threading.Timer(0.2, real_push, args=(b"\n",)).start()
+        else:
+            real_push(data)
+
+    t._push = delayed
+    d.read_block("READ?", max_bytes=1000)
+    t._push = real_push
+    time.sleep(0.3)
+    assert d.checked_query("*IDN?").response.startswith("LabMCP")

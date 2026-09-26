@@ -297,10 +297,13 @@ class _SimDevice:
             raise self._error(2583)
         if letter != "A":
             return self.ef_result.get((c, letter), 0.0)
-        address = int(self.ef_config.get((c, "B"), 60052 if self.model != "T8" else 700 + 2 * c))
+        address = int(self.ef_config.get((c, "B"), 60052))
         slope = self.ef_config.get((c, "D"), 1.0)
         offset = self.ef_config.get((c, "E"), 0.0)
-        if address == 60052:
+        if address == 60052 and self.model == "T8":
+            # The T8 firmware maps the default TEMPERATURE_DEVICE_K to TEMPERATURE#_CAPTURE.
+            raw = self.device_temp_k(t) + 0.05 * c
+        elif address == 60052:
             raw = self.device_temp_k(t)
         elif 700 <= address < 716:
             raw = self.device_temp_k(t) + 0.05 * ((address - 700) // 2)

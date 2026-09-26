@@ -81,7 +81,8 @@ def enc_sfloat(value: float | None, exponent: int = 0, special: int | None = Non
     if special is not None or value is None:
         return struct.pack("<H", 0x07FF if special is None else special)  # default NaN
     mantissa = round(value / 10**exponent)
-    if not -2046 <= mantissa <= 2045:
+    # 0x7FE-0x7FF and 0x800-0x802 are the special values (+INF, NaN, NRes, reserved, -INF).
+    if not -2045 <= mantissa <= 2045:
         raise ValueError(f"{value} does not fit an SFLOAT with exponent {exponent}")
     return struct.pack("<H", ((exponent & 0xF) << 12) | (mantissa & 0x0FFF))
 
@@ -342,12 +343,18 @@ class SimulatedBLEBackend:
         yield 0.3, 0x2A35, self._bp_packet(126, 82, 71, datetime.now() - timedelta(days=1, minutes=13))
         yield 0.1, 0x2A35, self._bp_packet(121, 79, 66, datetime.now())
 
+    #: Seconds between Intermediate Temperature notifications, and before the final value.
+    temperature_step_s = 0.5
+    temperature_final = True
+
     def _temperature(self) -> Iterator[Emission]:
         """Intermediate Temperature (0x2A1E) while the probe settles, then one Temperature
         Measurement (0x2A1C) indication: 36.8 C (FLOAT, exponent -1), time stamp, type."""
         for value in (36.2, 36.5, 36.7):
-            yield 0.5, 0x2A1E, bytes([0x00]) + enc_float(value, -1)
-        yield 0.5, 0x2A1C, bytes([0x02 | 0x04]) + enc_float(36.8, -1) + enc_date_time(datetime.now()) + bytes([9])
+            yield self.temperature_step_s, 0x2A1E, bytes([0x00]) + enc_float(value, -1)
+        if not self.temperature_final:
+            return
+        yield self.temperature_step_s, 0x2A1C, bytes([0x02 | 0x04]) + enc_float(36.8, -1) + enc_date_time(datetime.now()) + bytes([9])
 
     def _weight(self) -> Iterator[Emission]:
         """Weight Measurement (0x2A9D): 72.35 kg (uint16 in 0.005 kg), time stamp, user 1,
