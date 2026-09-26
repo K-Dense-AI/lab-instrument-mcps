@@ -3,7 +3,7 @@
   "name": "io.github.K-Dense-AI/labmcp-ni-daqmx",
   "title": "NI-DAQmx DAQ Devices",
   "description": "MCP server for National Instruments DAQ devices (NI-DAQmx): analog/thermocouple acquisition, digital",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "repository": {
     "url": "https://github.com/K-Dense-AI/lab-instrument-mcps",
     "source": "github",
@@ -15,7 +15,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "labmcp-ni-daqmx",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "transport": {
         "type": "stdio"
       },

@@ -84,7 +84,7 @@ Add `--read-only` to allow reading flow but block setpoints, gas changes, tares 
 | Limit | Default | Meaning |
 |---|---|---|
 | `max_setpoint` | 100 (device units) | Largest setpoint magnitude an agent may send, **in the controller's own setpoint units** (SCCM, SLPM, PSIA, ... as shown by `get_device_info`). Setpoints above the device's full scale are refused as well. |
-| `max_series_duration_s` | 600 s | Longest logging series an agent may start |
+| `max_series_duration_s` | 600 s | Longest logging series an agent may start (never more than 850 s, so a series always finishes within one tool call) |
 
 Override at launch, e.g. `--limit max_setpoint=500`. The default of 100 is deliberately conservative: on a 500 SCCM controller it caps the agent at 100 SCCM until you raise it.
 
@@ -102,6 +102,7 @@ Override at launch, e.g. `--limit max_setpoint=500`. The default of 100 is delib
 - **Setpoints** use `LS` on firmware 9v00+ and `S` on older firmware. After every change the reply is checked: if the controller reports a different requested setpoint (out of range, negative on a unidirectional device, or an analog setpoint source), the tool reports an error with what the device is now using.
 - **`close_valve`** sets the flow setpoint to 0 (on a flow controller this closes the valve) and then sends `HC` (hold valves closed, firmware 5v07+), and confirms `HLD` in the reply. On a **pressure controller** it only sends `HC`, because a 0 pressure setpoint can *open* valves depending on the zero-pressure-control setting (Serial Primer p. 17). `resume_control` (`C`) releases the hold; it is marked as a hazard because flow restarts at the current setpoint.
 - **Tares** must be done with no flow. `tare_flow` and `tare_pressure` refuse if a flow controller's setpoint is not 0, or if the device still reads more than 2% of full scale. They cannot detect every unsafe situation (e.g. a meter with a small real flow), so still shut the gas off first. Gauge-pressure tares need the port open to atmosphere; absolute tares need the barometer option and an unpressurised line.
+- **`log_flow_series` `save_path`** must be a new `.csv` file: `~` is expanded, missing folders are created, and an existing file is never overwritten. The path is checked before logging starts.
 - **Gas selection** uses `GS` (10v05+, not saved as the power-up gas unless `save_as_power_up`) or the older `G`. Only gases installed on the device are accepted; `list_gases` shows them.
 - **Safety guard:** a unit ID followed by digits (e.g. `A49408`) is Alicat's legacy *integer setpoint* command. The driver refuses to send anything of that shape.
 - Meters and gauges silently ignore controller commands; the server refuses controller tools on devices whose data frame has no setpoint.

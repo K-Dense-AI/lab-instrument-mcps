@@ -10,7 +10,6 @@ import math
 import struct
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from labmcp import (
@@ -22,6 +21,7 @@ from labmcp import (
     InstrumentError,
     InstrumentServer,
     Limit,
+    prepare_save_path,
 )
 from pydantic import BaseModel, Field
 
@@ -203,8 +203,9 @@ class DecodedBlock(BaseModel):
     minimum: float | None
     maximum: float | None
     mean: float | None
+    non_finite: int = Field(description="Number of NaN / infinite values (left out of the statistics)")
     stride: int = Field(description="Every stride-th value is returned in `values`")
-    values: list[float]
+    values: list[float | None] = Field(description="Downsampled values; NaN and infinities are null")
 
 
 class BlockResult(BaseModel):
@@ -377,7 +378,7 @@ def _decode(data: bytes, data_type: str, byte_order: str, max_points: int) -> tu
             "Check the instrument's data format (e.g. FORMat:DATA?) and pick the matching decode_as."
         )
     n = len(data) // size
-    values = [float(v) for v in struct.unpack(("<" if byte_order == "little" else ">") + code * n, data)]
+    values = [float(v) for v in struct.unpack(f"{'<' if byte_order == 'little' else '>'}{n}{code}", data)]
     finite = [v for v in values if math.isfinite(v)]
     stride = max(1, math.ceil(n / max_points)) if n else 1
     decoded = DecodedBlock(
@@ -386,20 +387,18 @@ def _decode(data: bytes, data_type: str, byte_order: str, max_points: int) -> tu
         count=n,
         minimum=min(finite) if finite else None,
         maximum=max(finite) if finite else None,
-        mean=sum(finite) / len(finite) if finite else None,
+        mean=math.fsum(finite) / len(finite) if finite else None,
+        non_finite=n - len(finite),
         stride=stride,
-        values=values[::stride],
+        # JSON has no NaN/Infinity: they would break the tool's structured output
+        values=[v if math.isfinite(v) else None for v in values[::stride]],
     )
     return decoded, values
 
 
-def _output_path(save_path: str, overwrite: bool) -> Path:
-    path = Path(save_path).expanduser()
-    if not path.parent.is_dir():
-        raise InstrumentError(f"Cannot save to {path}: directory {path.parent} does not exist.")
-    if path.exists() and not overwrite:
-        raise InstrumentError(f"{path} already exists. Choose another save_path or pass overwrite=true.")
-    return path
+#: Extensions query_binary_block may write: .csv holds decoded values (or the raw bytes when
+#: decode_as is "none", e.g. a CSV file read from the instrument), the rest hold the raw payload.
+SAVE_SUFFIXES = (".csv", ".bin", ".dat", ".raw", ".txt", ".png", ".bmp", ".jpg", ".jpeg", ".gif", ".tif", ".tiff")
 
 
 @mcp.tool(**READ, timeout=310)
@@ -417,7 +416,12 @@ def query_binary_block(
         int, Field(ge=0, le=262_144, description="Return the raw payload as base64 only up to this size")
     ] = 4096,
     save_path: Annotated[
-        str | None, Field(description="Write the full data here: .csv with decode_as writes values, else raw bytes")
+        str | None,
+        Field(
+            max_length=1000,
+            description="Write the full data here: .csv with decode_as writes index,value rows; .bin/.dat/.raw/"
+            ".txt/.png/.bmp/.jpg/.gif/.tif (or .csv with decode_as none) get the raw payload",
+        ),
     ] = None,
     overwrite: Annotated[bool, Field(description="Allow replacing an existing save_path")] = False,
     timeout_s: Annotated[float, Field(ge=0.1, le=300, description="Timeout for the whole transfer")] = 10.0,
@@ -427,7 +431,7 @@ def query_binary_block(
     `scpi_query`. Returns length, SHA-256 and (optionally) decoded values with summary
     statistics, downsampled to max_points; use save_path for the full data. Blocks larger
     than the `max_block_bytes` limit are discarded."""
-    path = _output_path(save_path, overwrite) if save_path else None
+    path = prepare_save_path(save_path, suffixes=SAVE_SUFFIXES, overwrite=overwrite) if save_path else None
     max_bytes = int(server.limits["max_block_bytes"])
     data = server.driver.read_block(command, max_bytes=max_bytes, timeout=timeout_s)
     decoded: DecodedBlock | None = None
@@ -435,13 +439,16 @@ def query_binary_block(
     if decode_as != "none":
         decoded, values = _decode(data, decode_as, byte_order, max_points)
     if path is not None:
-        if path.suffix.lower() == ".csv" and decode_as != "none":
-            with path.open("w", newline="") as fh:
-                writer = csv.writer(fh)
-                writer.writerow(["index", "value"])
-                writer.writerows(enumerate(values))
-        else:
-            path.write_bytes(data)
+        try:
+            if path.suffix.lower() == ".csv" and decode_as != "none":
+                with path.open("w", newline="", encoding="utf-8") as fh:
+                    writer = csv.writer(fh)
+                    writer.writerow(["index", "value"])
+                    writer.writerows(enumerate(values))
+            else:
+                path.write_bytes(data)
+        except OSError as exc:
+            raise InstrumentError(f"The block was read but could not be saved to {path}: {exc}") from exc
     return BlockResult(
         command=command.strip(),
         length_bytes=len(data),
@@ -493,7 +500,14 @@ def scpi_write(
     return _write_result(server.driver.checked_write(command, timeout=timeout_s))
 
 
-@mcp.tool(**HAZARD, timeout=900)
+#: scpi_batch's tool timeout. FastMCP cannot stop a sync tool's thread when it times out, so
+#: the batch itself stops starting new steps BATCH_MARGIN_S before it; otherwise steps would
+#: keep reaching the instrument after the client was told the call failed.
+BATCH_TIMEOUT_S = 900
+BATCH_MARGIN_S = 30
+
+
+@mcp.tool(**HAZARD, timeout=BATCH_TIMEOUT_S)
 def scpi_batch(
     steps: Annotated[
         list[Annotated[str, Field(max_length=2000)]],
@@ -505,9 +519,11 @@ def scpi_batch(
 ) -> BatchResult:
     """Run a short sequence of SCPI commands and queries in order, checking the error queue
     after every step. Every step is checked against the command policy BEFORE the first one
-    is sent, so a refused step means nothing was sent. Returns per-step replies and errors."""
+    is sent, so a refused step means nothing was sent. Returns per-step replies and errors.
+    Steps not started within ~14 minutes are not sent (status not_run)."""
     for command in steps:  # validate everything first
         server.driver.policy.check_command(command)
+    deadline = time.monotonic() + BATCH_TIMEOUT_S - BATCH_MARGIN_S
     results: list[BatchStep] = []
     stopped = False
     for i, command in enumerate(steps):
@@ -516,6 +532,17 @@ def scpi_batch(
             continue
         if i and delay_between_s:
             time.sleep(delay_between_s)
+        if time.monotonic() > deadline:
+            results.append(
+                BatchStep(
+                    index=i,
+                    command=command,
+                    status="not_run",
+                    detail=f"not sent: the batch used up its {BATCH_TIMEOUT_S - BATCH_MARGIN_S} s time budget",
+                )
+            )
+            stopped = True
+            continue
         try:
             r = server.driver.checked_write(command, timeout=timeout_s)
         except InstrumentError as exc:

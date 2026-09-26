@@ -31,7 +31,7 @@ import math
 import re
 from dataclasses import dataclass
 
-from labmcp import InstrumentProtocolError, Transport
+from labmcp import InstrumentError, InstrumentProtocolError, Transport
 
 STX = "\x02"
 
@@ -359,6 +359,10 @@ class NewEraPump:
         """
         if direction not in {"INF", "WDR"}:
             raise ValueError("direction must be 'INF' or 'WDR'")
+        try:  # before anything is sent
+            rate_text, units, actual = choose_rate_units(rate_ml_min)
+        except ValueError as exc:
+            raise InstrumentProtocolError(f"{exc} Nothing was sent to the pump.") from exc
         with self.t.lock:
             reset_cleared = False
             st = self.status()
@@ -384,7 +388,16 @@ class NewEraPump:
             has_program = self._select_phase(1)
             if has_program:
                 self.command("FUNRAT")
-            rate_text, units, actual = choose_rate_units(rate_ml_min)
+            # The volume units (µL or mL) follow the syringe diameter; format the volume before the
+            # rate is sent so an unrepresentable volume leaves the phase settings untouched.
+            _, vol_units = self.volume()
+            try:
+                vol_text = format_float(volume_ml / VOLUME_UNITS[vol_units])
+            except ValueError as exc:
+                raise InstrumentProtocolError(
+                    f"A volume of {volume_ml:g} mL cannot be sent to the pump, which works in "
+                    f"{'µL' if vol_units == 'UL' else 'mL'} with this syringe: {exc} The pump was not started."
+                ) from exc
             try:
                 self.command(f"RAT{rate_text}{units}")
             except InstrumentProtocolError as exc:
@@ -396,8 +409,6 @@ class NewEraPump:
                     f"{diameter:g} mm syringe. (On an NE-1000 this syringe allows about "
                     f"{lo * 1000:.3g} µL/min to {hi:.3g} mL/min; other models differ.)"
                 ) from exc
-            _, vol_units = self.volume()
-            vol_text = format_float(volume_ml / VOLUME_UNITS[vol_units])
             self.command(f"VOL{vol_text}")
             self.command(f"DIR{direction}")
             if has_program:
@@ -426,15 +437,34 @@ class NewEraPump:
         return True
 
     def stop(self) -> Reply:
-        """Stop pumping. A second STP cancels the resulting pause so nothing can resume it."""
+        """Stop pumping. A second STP cancels the resulting pause so nothing can resume it.
+
+        Best effort: a lost or garbled reply does not end the attempt; STP is sent up to three
+        times until the pump reports that it is neither running nor paused.
+        """
+        errors: list[str] = []
+        st: Reply | None = None
         with self.t.lock:
             for _ in range(3):
-                self.send("STP")
-                st = self.status()
-                if st.alarm:  # that reply acknowledged the alarm; read the real state
+                try:
+                    self.send("STP")
+                except InstrumentError as exc:
+                    errors.append(f"STP: {exc}")
+                try:
                     st = self.status()
+                    if st.alarm:  # that reply acknowledged the alarm; read the real state
+                        st = self.status()
+                except InstrumentError as exc:
+                    errors.append(f"status: {exc}")
+                    st = None
+                    continue
                 if st.prompt not in {"I", "W", "X", "T", "U", "P"}:
-                    break
+                    return st
+        if st is None:
+            raise InstrumentProtocolError(
+                "Could not confirm that the pump stopped: " + "; ".join(errors)
+                + ". Press STOP on the pump or switch it off."
+            )
         return st
 
     def close(self) -> None:

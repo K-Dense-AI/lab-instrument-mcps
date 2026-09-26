@@ -159,18 +159,39 @@ class DataRoot:
             return str(path)
         return rel.as_posix() or "."
 
-    def output_path(self, user_path: str, *, suffix: str | None = None) -> Path:
-        """A path to write to (the parent folder is created, inside the root)."""
-        if suffix and not user_path.lower().endswith(suffix):
+    def output_path(self, user_path: str, *, suffix: str = ".csv", overwrite: bool = False) -> Path:
+        """A new file to write inside the root (its parent folder is created, inside the root).
+
+        A name without an extension gets ``suffix``; any other extension is refused (so a typo can't
+        clobber a data file with CSV), and an existing file is refused unless ``overwrite``.
+        """
+        ext = Path(user_path).suffix
+        if not ext:
             user_path += suffix
+        elif ext.lower() != suffix.lower():
+            raise InstrumentProtocolError(
+                f"save_path must end in {suffix} (got {Path(user_path).name!r}). Nothing was written."
+            )
         p = self.resolve(user_path, must_exist=False)
         if p.is_dir():
-            raise InstrumentProtocolError(f"{user_path!r} is a folder; give a file name.")
-        p.parent.mkdir(parents=True, exist_ok=True)
+            raise InstrumentProtocolError(f"{user_path!r} is a folder; give a file name. Nothing was written.")
+        if p.exists() and not overwrite:
+            raise InstrumentProtocolError(
+                f"{self.relative(p)!r} already exists and was not overwritten. Choose another save_path or "
+                "pass overwrite=true. Nothing was written."
+            )
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise InstrumentProtocolError(f"Cannot create the folder for {user_path!r}: {exc}") from exc
         # Re-check after mkdir (a parent could be a symlink created in the meantime).
         if not self._inside(p):
             raise InstrumentProtocolError(f"Refused: {user_path!r} is outside the data folder.")
         return p
+
+    def contains(self, p: Path) -> bool:
+        """True if ``p`` (symlinks resolved) is the root or inside it."""
+        return self._inside(p)
 
     def find_runs(
         self, subfolder: str = ".", *, recursive: bool = True, max_depth: int = 6

@@ -1,13 +1,13 @@
 [project]
 name = "labmcp-ble-health"
-version = "0.1.1"
+version = "0.1.2"
 description = "MCP server for Bluetooth LE health sensors (standard GATT profiles): heart rate + HRV, SpO2, blood pressure, temperature, weight."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [{ name = "K-Dense and LabMCP contributors" }]
 keywords = ["mcp", "lab-instrument", "bluetooth", "ble", "gatt", "heart-rate", "hrv", "pulse-oximeter", "blood-pressure", "research"]
-dependencies = ["labmcp>=0.1,<0.2", "bleak>=1.0,<4"]
+dependencies = ["labmcp>=0.1.2,<0.2", "bleak>=1.0,<4"]
 
 [project.scripts]
 labmcp-ble-health = "labmcp_ble_health.server:main"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Annotated, Literal
 
 import numpy as np
@@ -13,9 +14,12 @@ from labmcp import (
     READ,
     SAFETY,
     ConnectContext,
+    InstrumentError,
     InstrumentProtocolError,
     InstrumentServer,
     Limit,
+    SafetyLimitError,
+    prepare_save_path,
 )
 from pydantic import BaseModel, Field
 
@@ -31,6 +35,11 @@ from labmcp_ocean_spectrometer.driver import (
 from labmcp_ocean_spectrometer.simulator import MODELS, FakeSpectrometer
 
 BACKENDS = {"cseabreeze", "pyseabreeze"}
+
+#: Timeout of the tools that acquire spectra. Every acquisition (including the spectrum discarded
+#: after an integration-time change) must fit in HARD_MAX_ACQUISITION_S, whatever the limits say.
+TOOL_TIMEOUT_S = 600
+HARD_MAX_ACQUISITION_S = 540.0
 
 
 def connect(ctx: ConnectContext) -> OceanSpectrometer:
@@ -217,7 +226,10 @@ Boxcar = Annotated[
 ]
 WlMin = Annotated[float | None, Field(ge=0, description="Only report/search above this wavelength (nm)")]
 WlMax = Annotated[float | None, Field(ge=0, description="Only report/search below this wavelength (nm)")]
-SavePath = Annotated[str | None, Field(description="Optional CSV path for the full-resolution data")]
+SavePath = Annotated[
+    str | None,
+    Field(description="Optional new .csv file for the full-resolution data (existing files are not overwritten)"),
+]
 
 
 def _window(wl: np.ndarray, lo: float | None, hi: float | None) -> np.ndarray:
@@ -284,9 +296,21 @@ def _intensity_warnings(drv: OceanSpectrometer, s: Spectrum) -> list[str]:
 
 
 def _check_acquisition(drv: OceanSpectrometer, scans: int) -> None:
-    server.check(
-        "max_acquisition_duration_s", scans * drv.integration_time_ms / 1000.0, "acquisition duration"
-    )
+    duration = scans * drv.integration_time_ms / 1000.0
+    server.check("max_acquisition_duration_s", duration, "acquisition duration")
+    # The first spectrum after an integration-time change is read and discarded.
+    worst = duration + drv.integration_time_ms / 1000.0
+    if worst > HARD_MAX_ACQUISITION_S:
+        raise SafetyLimitError(
+            f"Refused: {scans} scan(s) at {drv.integration_time_ms:g} ms (plus one discarded scan) take "
+            f"{worst:g} s, more than one tool call allows ({HARD_MAX_ACQUISITION_S:g} s). Use fewer scans or a "
+            "shorter integration time. Nothing was acquired."
+        )
+
+
+def _save_target(save_path: str | None) -> Path | None:
+    """Check ``save_path`` before acquiring, so a bad path does not waste a measurement."""
+    return prepare_save_path(save_path, suffixes=(".csv",)) if save_path else None
 
 
 # ---------------------------------------------------------------- tools
@@ -356,7 +380,7 @@ def set_integration_time(
     return {"integration_time_ms": actual, "note": note}
 
 
-@mcp.tool(**READ, timeout=600)
+@mcp.tool(**READ, timeout=TOOL_TIMEOUT_S)
 def acquire_spectrum(
     scans_to_average: Scans = 1,
     boxcar_half_width: Boxcar = 0,
@@ -377,9 +401,11 @@ def acquire_spectrum(
 ) -> SpectrumResult:
     """Acquire an intensity spectrum (raw counts) with optional averaging, boxcar smoothing and
     corrections. Returns downsampled (wavelength, counts), summary statistics, the most
-    prominent peaks with FWHM, and a saturation check; `save_path` writes the full spectrum."""
+    prominent peaks with FWHM, and a saturation check; `save_path` writes the full spectrum to a
+    new .csv file (an existing file is never overwritten)."""
     drv = server.driver
     _check_acquisition(drv, scans_to_average)
+    target = _save_target(save_path)
     s = drv.acquire(scans_to_average, boxcar_half_width, correct_dark_counts, correct_nonlinearity)
     if subtract_stored_dark:
         if drv.dark is None:
@@ -395,8 +421,8 @@ def acquire_spectrum(
     xw, yw = wl[mask], s.counts[mask]
     xs, ys = analysis.downsample(xw, yw, max_points)
     saved = None
-    if save_path:
-        saved = analysis.write_csv(save_path, ["wavelength_nm", "counts"], [wl, s.counts])
+    if target is not None:
+        saved = analysis.write_csv(target, ["wavelength_nm", "counts"], [wl, s.counts])
     imax = int(np.argmax(yw))
     return SpectrumResult(
         model=drv.model,
@@ -461,7 +487,7 @@ def _reference_summary(
     )
 
 
-@mcp.tool(**CONTROL, timeout=600)
+@mcp.tool(**CONTROL, timeout=TOOL_TIMEOUT_S)
 def store_dark_reference(
     scans_to_average: Scans = 10,
     boxcar_half_width: Boxcar = 0,
@@ -486,7 +512,7 @@ def store_dark_reference(
     return _reference_summary(drv, "dark", s)
 
 
-@mcp.tool(**CONTROL, timeout=600)
+@mcp.tool(**CONTROL, timeout=TOOL_TIMEOUT_S)
 def store_reference(
     scans_to_average: Scans = 10,
     boxcar_half_width: Boxcar = 0,
@@ -515,7 +541,7 @@ def _ratio_result(
     wavelength_max_nm: float | None,
     max_points: int,
     num_peaks: int,
-    save_path: str | None,
+    target: Path | None,
 ) -> RatioResult:
     assert drv.dark is not None and drv.reference is not None
     drv.last = r
@@ -538,6 +564,15 @@ def _ratio_result(
     warnings = _intensity_warnings(drv, r.sample) if r.sample.saturated_pixels else []
     if not finite.any():
         warnings.append("No valid pixels in the requested range (reference too dark or saturated there).")
+    else:
+        idx = np.flatnonzero(finite)
+        gaps = int((~finite[idx[0] : idx[-1] + 1]).sum())
+        if gaps:
+            warnings.append(
+                f"{gaps} pixel(s) inside the range are invalid (null): saturated, too little reference light, "
+                "or too little light through the sample (absorbance too high). The maximum and peaks cannot be "
+                "determined there; dilute the sample or change the integration time."
+            )
     max_value = max_at = None
     if finite.any():
         k = int(np.nanargmax(yw))
@@ -547,10 +582,10 @@ def _ratio_result(
                 "Absorbance above ~2.5 AU is unreliable (stray light, too little light): dilute the sample."
             )
     saved = None
-    if save_path:
+    if target is not None:
         name = "absorbance_au" if r.kind == "absorbance" else "transmittance_percent"
         saved = analysis.write_csv(
-            save_path,
+            target,
             ["wavelength_nm", "dark_counts", "reference_counts", "sample_counts", name],
             [wl, drv.dark.counts, drv.reference.counts, r.sample.counts, r.values],
         )
@@ -582,7 +617,7 @@ RatioWavelengths = Annotated[
 ]
 
 
-@mcp.tool(**READ, timeout=600)
+@mcp.tool(**READ, timeout=TOOL_TIMEOUT_S)
 def measure_absorbance(
     wavelengths_nm: RatioWavelengths = None,
     scans_to_average: Annotated[
@@ -599,13 +634,14 @@ def measure_absorbance(
     sample first. Also returns values at `wavelengths_nm` and the absorbance maxima."""
     drv = server.driver
     _check_acquisition(drv, scans_to_average or (drv.reference.scans_to_average if drv.reference else 1))
+    target = _save_target(save_path)
     r = drv.measure_ratio("absorbance", scans_to_average)
     return _ratio_result(
-        drv, r, wavelengths_nm, wavelength_min_nm, wavelength_max_nm, max_points, num_peaks, save_path
+        drv, r, wavelengths_nm, wavelength_min_nm, wavelength_max_nm, max_points, num_peaks, target
     )
 
 
-@mcp.tool(**READ, timeout=600)
+@mcp.tool(**READ, timeout=TOOL_TIMEOUT_S)
 def measure_transmittance(
     wavelengths_nm: RatioWavelengths = None,
     scans_to_average: Annotated[
@@ -622,13 +658,14 @@ def measure_transmittance(
     returns values at `wavelengths_nm` and the deepest transmission dips."""
     drv = server.driver
     _check_acquisition(drv, scans_to_average or (drv.reference.scans_to_average if drv.reference else 1))
+    target = _save_target(save_path)
     r = drv.measure_ratio("transmittance", scans_to_average)
     return _ratio_result(
-        drv, r, wavelengths_nm, wavelength_min_nm, wavelength_max_nm, max_points, num_peaks, save_path
+        drv, r, wavelengths_nm, wavelength_min_nm, wavelength_max_nm, max_points, num_peaks, target
     )
 
 
-@mcp.tool(**READ, timeout=120)
+@mcp.tool(**READ, timeout=TOOL_TIMEOUT_S)
 def find_peaks(
     max_peaks: Annotated[int, Field(ge=1, le=100, description="Maximum number of peaks")] = 10,
     min_prominence_fraction: Annotated[
@@ -672,7 +709,7 @@ def find_peaks(
     }
 
 
-@mcp.tool(**CONTROL, timeout=600)
+@mcp.tool(**CONTROL, timeout=TOOL_TIMEOUT_S)
 def auto_integration_time(
     target_min_percent: Annotated[
         float, Field(ge=10, le=95, description="Lower edge of the target band, % of saturation")
@@ -699,10 +736,16 @@ def auto_integration_time(
         max_iterations=max_iterations,
         max_ms=server.limits["max_integration_time_ms"],
         window=window,
+        time_budget_s=HARD_MAX_ACQUISITION_S,
     )
     last = result["history"][-1]["peak_fraction"] if result["history"] else None
     if not result["converged"]:
-        if last is not None and last < target_min_percent / 100:
+        if result["time_limited"]:
+            result["message"] = (
+                f"Stopped after {len(result['history'])} step(s) to stay within the tool's time limit; "
+                f"the integration time is now {result['integration_time_ms']:g} ms. Call it again to continue."
+            )
+        elif last is not None and last < target_min_percent / 100:
             result["message"] = (
                 f"Signal too weak: at {result['integration_time_ms']:g} ms the peak is {100 * last:.1f}% of "
                 "saturation. Increase the light level or the max_integration_time_ms limit."
@@ -743,7 +786,12 @@ def detector_cooling_off() -> dict[str, str | float]:
     if not drv.has_tec:
         return {"status": f"The {drv.model} has no TEC; nothing to do."}
     drv.set_tec(False)
-    return {"status": "TEC off", "temperature_c": drv.tec_temperature_c(), "timestamp": _now()}
+    out: dict[str, str | float] = {"status": "TEC off", "timestamp": _now()}
+    try:  # the TEC is already off; a failed read must not turn this into an error
+        out["temperature_c"] = drv.tec_temperature_c()
+    except InstrumentError as exc:
+        out["temperature_error"] = str(exc)
+    return out
 
 
 def main() -> None:

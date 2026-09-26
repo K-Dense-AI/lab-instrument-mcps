@@ -37,6 +37,7 @@ import shutil
 import sqlite3
 import tempfile
 import threading
+import weakref
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from collections.abc import Iterable, Iterator
@@ -184,17 +185,40 @@ def _scan_number(native_id: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def _minutes(value: Any) -> float:
-    """Convert a pyteomics unitfloat retention time to minutes (mzML allows seconds or minutes)."""
+_UO_TO_MIN = {"UO:0000010": 1 / 60.0, "UO:0000031": 1.0, "UO:0000032": 60.0}  # second, minute, hour
+
+
+def _minutes(value: Any, unit_accession: str | None = None) -> float:
+    """Convert a pyteomics unitfloat retention time to minutes (mzML allows seconds or minutes).
+
+    The unit accession (UO:0000010 second, UO:0000031 minute) is authoritative; the free-text unit
+    name is only a fallback, matched loosely ("second", "seconds", "sec", "s", ...).
+    """
     if value is None:
         return float("nan")
-    unit = str(getattr(value, "unit_info", "") or "").lower()
-    v = float(value)
-    if unit in ("second", "s", "uo:0000010"):
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+    acc = str(unit_accession or "").upper()
+    if acc in _UO_TO_MIN:
+        return v * _UO_TO_MIN[acc]
+    unit = str(getattr(value, "unit_info", "") or "").strip().lower()
+    if unit.upper() in _UO_TO_MIN:
+        return v * _UO_TO_MIN[unit.upper()]
+    if unit == "s" or unit.startswith("sec"):
         return v / 60.0
-    if unit in ("hour", "uo:0000032"):
+    if unit in ("h", "hr") or unit.startswith("hour"):
         return v * 60.0
     return v  # minute (the usual unit) or unspecified
+
+
+def _param(d: dict[str, Any], name: str) -> tuple[Any, str | None]:
+    """A cvParam value and its unit accession (pyteomics keeps it on the dictionary key)."""
+    for k, v in d.items():
+        if k == name:
+            return v, getattr(k, "unit_accession", None)
+    return None, None
 
 
 def _array_values(value: Any) -> np.ndarray | None:
@@ -225,7 +249,10 @@ def parse_mzml_header(source: Path | BinaryIO) -> RunMetadata:
     component_depth = 0
     fh = open(source, "rb") if isinstance(source, Path) else nullcontext(source)  # noqa: SIM115
     with fh as stream:
-        for event, el in etree.iterparse(stream, events=("start", "end"), huge_tree=True):
+        # No external entities / network access (lxml < 5 resolves entities by default).
+        for event, el in etree.iterparse(
+            stream, events=("start", "end"), huge_tree=True, resolve_entities=False, no_network=True
+        ):
             tag = _local(el.tag)
             if event == "start":
                 if tag in ("spectrumList", "chromatogramList"):
@@ -285,7 +312,7 @@ def _row_from_pyteomics(i: int, s: dict[str, Any]) -> dict[str, Any]:
         "native_id": native_id,
         "scan": _scan_number(native_id),
         "ms_level": s.get("ms level"),
-        "rt_min": _minutes(scan0.get("scan start time")),
+        "rt_min": _minutes(*_param(scan0, "scan start time")),
         "tic": s.get("total ion current"),
         "base_peak_mz": s.get("base peak m/z"),
         "base_peak_intensity": s.get("base peak intensity"),
@@ -395,17 +422,26 @@ class MzMLBackend(RunBackend):
             raise InstrumentProtocolError(
                 "pyteomics is not installed: `pip install pyteomics lxml`."
             ) from exc
-        self._tmp: tempfile.TemporaryDirectory[str] | None = None
-        self.source = self._prepare_source(path)
-        self._md = self._read_header()
-        self._reader = self._open_indexed()
-        self._table, im = self._build_table()
+        # File handles and the decompressed copy are released when the backend is closed or, if a
+        # tool call still holds it after the driver dropped it from its cache, when it is freed.
+        self._res = _Resources()
+        self._finalizer = weakref.finalize(self, self._res.release)
+        try:
+            self.source = self._prepare_source(path)
+            self._md = self._read_header()
+            self._reader = self._open_indexed()
+            self._res.readers.append(self._reader)
+            self._table, im = self._build_table()
+        except BaseException:
+            self._finalizer()
+            raise
         self._md.ion_mobility = im
 
     def _prepare_source(self, path: Path) -> Path:
         if path.name.lower().endswith(".gz"):
-            self._tmp = tempfile.TemporaryDirectory(prefix="labmcp-ms-")
-            out = Path(self._tmp.name) / path.name[:-3]
+            tmp = tempfile.TemporaryDirectory(prefix="labmcp-ms-", ignore_cleanup_errors=True)
+            self._res.tmp = tmp
+            out = Path(tmp.name) / path.name[:-3]
             try:
                 with gzip.open(path, "rb") as src, open(out, "wb") as dst:
                     shutil.copyfileobj(src, dst, 1 << 20)
@@ -483,22 +519,51 @@ class MzMLBackend(RunBackend):
         from pyteomics import mzml
 
         want = set(wanted)
-        with mzml.MzML(str(self.source), use_index=False, decode_binary=True, cv=psi_ms_cv()) as reader:
-            for i, s in enumerate(reader):
-                if i in want:
+        try:
+            reader = mzml.MzML(str(self.source), use_index=False, decode_binary=True, cv=psi_ms_cv())
+        except Exception as exc:
+            raise InstrumentProtocolError(f"Could not reopen {self.path.name}: {type(exc).__name__}: {exc}") from exc
+        with reader:
+            it = enumerate(reader)
+            while True:
+                try:
+                    i, s = next(it)
+                    if i not in want:
+                        continue
                     mz, inten = _sorted_arrays(s.get("m/z array"), s.get("intensity array"))
-                    yield i, mz, inten
+                except StopIteration:
+                    return
+                except InstrumentProtocolError:
+                    raise
+                except Exception as exc:
+                    raise InstrumentProtocolError(
+                        f"Error while reading spectra from {self.path.name}: {type(exc).__name__}: {exc}"
+                    ) from exc
+                yield i, mz, inten
                 if i >= wanted[-1]:
-                    break
+                    return
 
     def close(self) -> None:
-        try:
-            self._reader.close()
-        except Exception:
-            pass
-        if self._tmp is not None:
-            self._tmp.cleanup()
-            self._tmp = None
+        self._finalizer()
+
+
+class _Resources:
+    """What an :class:`MzMLBackend` must release; kept apart so a finalizer can hold it."""
+
+    def __init__(self) -> None:
+        self.readers: list[Any] = []
+        self.tmp: tempfile.TemporaryDirectory[str] | None = None
+
+    def release(self) -> None:
+        for reader in self.readers:
+            try:
+                reader.close()
+            except Exception:
+                pass
+        self.readers.clear()
+        if self.tmp is not None:
+            self.tmp.cleanup()
+            self.tmp = None
 
 
 class MzMLbBackend(MzMLBackend):
@@ -584,7 +649,7 @@ class BrukerTdfBackend(RunBackend):
             raise InstrumentProtocolError(f"Cannot open {self.tdf}: {exc}") from exc
         try:
             self._md, self._table, self._kinds = self._read(con)
-        except sqlite3.Error as exc:
+        except (sqlite3.Error, TypeError, ValueError) as exc:  # also NULL / non-numeric columns
             raise InstrumentProtocolError(
                 f"{path.name}/analysis.tdf is not a readable TDF database ({exc})."
             ) from exc
@@ -799,7 +864,7 @@ class MsDataDriver:
         self.simulated_run = simulated_run
         self.converter = converter or {}
         self.cache_size = max(1, cache_size)
-        self._cache: OrderedDict[Path, tuple[float, RunBackend]] = OrderedDict()
+        self._cache: OrderedDict[Path, tuple[tuple[int, int], RunBackend]] = OrderedDict()
         self.lock = threading.RLock()
 
     @property
@@ -850,22 +915,27 @@ class MsDataDriver:
                     f"{user_path!r} is not a recognised MS data file or folder (mzML, mzML.gz, mzMLb, "
                     "Bruker .d, or a vendor format to convert). Call list_runs."
                 )
+        if fmt == "bruker_tdf":
+            # The folder was checked by resolve(); its database files must not link out of the sandbox.
+            for part in ("analysis.tdf", "analysis.tdf_bin"):
+                if (path / part).exists() and not self.root.contains(path / part):
+                    raise InstrumentProtocolError(
+                        f"Refused: {self.root.relative(path)}/{part} is a symlink to outside the data folder."
+                    )
         with self.lock:
-            mtime = path.stat().st_mtime
-            if fmt == "bruker_tdf":
-                mtime = (path / "analysis.tdf").stat().st_mtime
+            st = (path / "analysis.tdf" if fmt == "bruker_tdf" else path).stat()
+            stamp = (st.st_mtime_ns, st.st_size)  # a copy that keeps the mtime still changes the size
             cached = self._cache.get(path)
-            if cached and cached[0] == mtime:
+            if cached and cached[0] == stamp:
                 self._cache.move_to_end(path)
                 return cached[1]
-            if cached:
-                cached[1].close()
-                del self._cache[path]
+            # A stale or evicted backend is only dropped here, never closed: another tool call may
+            # still be reading it. Its files are released when the last user lets go of it.
+            self._cache.pop(path, None)
             backend = open_backend(path, fmt)
-            self._cache[path] = (mtime, backend)
+            self._cache[path] = (stamp, backend)
             while len(self._cache) > self.cache_size:
-                _, (_, old) = self._cache.popitem(last=False)
-                old.close()
+                self._cache.popitem(last=False)
             return backend
 
     def display_path(self, backend: RunBackend) -> str:
@@ -874,9 +944,9 @@ class MsDataDriver:
         return self.root.relative(backend.path)
 
     def close(self) -> None:
+        # Dropped, not closed: a tool call still running on a run keeps it usable until it finishes;
+        # each backend releases its files when it is freed.
         with self.lock:
-            for _, backend in self._cache.values():
-                backend.close()
             self._cache.clear()
 
 

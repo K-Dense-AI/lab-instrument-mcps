@@ -133,6 +133,15 @@ def decode_error_word(word: str) -> list[str]:
     return [text for digit, text in zip(word, ERROR_WORD, strict=True) if digit == "1"]
 
 
+def _ints(cmd: str, reply: str) -> list[int]:
+    try:
+        return [int(v) for v in reply.split(",")]
+    except ValueError as exc:
+        raise InstrumentProtocolError(
+            f"Unexpected reply to {cmd!r} from the gauge controller: {reply!r}"
+        ) from exc
+
+
 def _parse_pressure(channel: int, status: str, value: str, unit: str) -> Pressure:
     try:
         code, raw = int(status), float(value)
@@ -245,7 +254,7 @@ class TPGController:
     # ------------------------------------------------------------ measurement
 
     def unit(self) -> str:
-        code = int(self.query("UNI"))
+        code = _ints("UNI", self.query("UNI"))[0]
         return self.units_table.get(code, f"unit {code}")
 
     def set_unit(self, unit: str) -> str:
@@ -255,7 +264,8 @@ class TPGController:
                 f"The {self.spec.model} supports the units {', '.join(codes)}; got {unit!r}."
             )
         reply = self.query(f"UNI,{codes[unit]}")
-        return self.units_table.get(int(reply), reply)
+        code = _ints("UNI", reply)[0]
+        return self.units_table.get(code, reply)
 
     def pressure(self, channel: int) -> Pressure:
         self._check_channel(channel)
@@ -287,14 +297,18 @@ class TPGController:
         return ids
 
     def sensor_states(self) -> list[int]:
-        return [int(v) for v in self.query("SEN").split(",")]
+        states = _ints("SEN", self.query("SEN"))
+        if len(states) != self.channels:
+            raise InstrumentProtocolError(f"Expected {self.channels} values from SEN, got {states}")
+        return states
 
     def set_sensor(self, channel: int, on: bool) -> list[int]:
         """``SEN`` with 2 (on) or 1 (off) for ``channel`` and 0 (no change) for the others."""
         self._check_channel(channel)
         values = ["0"] * self.channels
         values[channel - 1] = "2" if on else "1"
-        return [int(v) for v in self.query("SEN," + ",".join(values)).split(",")]
+        cmd = "SEN," + ",".join(values)
+        return _ints(cmd, self.query(cmd))
 
     def errors(self) -> list[str]:
         return decode_error_word(self.query("ERR"))

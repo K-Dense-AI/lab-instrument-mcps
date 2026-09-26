@@ -138,7 +138,8 @@ async def test_tools_via_mcp(tmp_path):
                 "log_power_series", {"count": 20, "interval_s": 0.0, "max_points": 10, "save_path": str(out)}
             )
         ).structured_content
-        assert series["count"] == 20 and series["points_returned"] == 10
+        assert series["count"] == 20 and series["points_returned"] == 10 and series["completed"] is True
+        assert series["saved_to"] == str(out.resolve())
         assert series["rms_stability_percent"] < 1.0
         with out.open() as fh:
             assert len(list(csv.reader(fh))) == 21
@@ -177,3 +178,43 @@ def test_limit_error_type():
     server.configure(simulate=True, limits={"max_series_duration_s": 1})
     with pytest.raises(SafetyLimitError):
         server.check("max_series_duration_s", 5)
+
+
+async def test_series_duration_includes_the_measurement_time():
+    # With interval_s=0 the old check saw a 0 s series whatever the count or averaging; at 10000
+    # samples x 3 ms each reading takes ~30 s, so 30 readings take ~15 min.
+    async with simulated_client(server) as client:
+        await client.call_tool("set_averaging", {"count": 10000})
+        with pytest.raises(Exception, match="max_series_duration_s"):
+            await client.call_tool("log_power_series", {"count": 30, "interval_s": 0})
+    async with simulated_client(server, limits={"max_series_duration_s": 1e6}) as client:
+        with pytest.raises(Exception, match="one call can take"):
+            await client.call_tool("log_power_series", {"count": 5000, "interval_s": 1})
+
+
+async def test_series_stops_early_within_the_time_budget(monkeypatch):
+    from labmcp_thorlabs_pm import server as server_module
+
+    monkeypatch.setattr(server_module, "_SERIES_BUDGET_S", 3.5)  # measure_timeout() is ~3 s
+    async with simulated_client(server) as client:
+        series = (
+            await client.call_tool("log_power_series", {"count": 100, "interval_s": 0.01})
+        ).structured_content
+        assert series["completed"] is False
+        assert 2 <= series["count"] < 100
+        assert series["duration_s"] < 1.5
+
+
+async def test_series_save_path_is_checked_before_logging(tmp_path):
+    existing = tmp_path / "series.csv"
+    existing.write_text("keep me", encoding="utf-8")
+    async with simulated_client(server) as client:
+        with pytest.raises(Exception, match="already exists"):
+            await client.call_tool(
+                "log_power_series", {"count": 5, "interval_s": 0, "save_path": str(existing)}
+            )
+        with pytest.raises(Exception, match=r"must end in \.csv"):
+            await client.call_tool("log_power_series", {"count": 5, "save_path": str(tmp_path / "s.xlsx")})
+        log = (await client.call_tool("get_command_log", {"limit": 200})).data
+        assert not any(entry["data"] == "MEAS:POW?" for entry in log)
+    assert existing.read_text(encoding="utf-8") == "keep me"

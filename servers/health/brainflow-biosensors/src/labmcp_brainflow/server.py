@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Annotated, Literal
 
 import numpy as np
-from labmcp import CONTROL, READ, ConnectContext, InstrumentConnectionError, InstrumentServer, Limit
+from labmcp import (
+    CONTROL,
+    HAZARD,
+    READ,
+    SAFETY,
+    ConnectContext,
+    InstrumentConnectionError,
+    InstrumentServer,
+    Limit,
+    prepare_save_path,
+)
 from pydantic import BaseModel, Field
 
 from labmcp_brainflow.driver import (
@@ -35,6 +44,23 @@ RAILED_PERCENT = 90.0
 LINE_NOISE_RATIO = 1.0
 HIGH_RMS_UV = 100.0
 
+#: Programmable gains of the ADS1299 amplifier (datasheet, CONFIG CHnSET GAIN bits).
+ADS1299_GAINS = (1, 2, 4, 6, 8, 12, 24)
+SAVE_SUFFIXES = {"csv": (".csv",), "brainflow": (".csv", ".tsv", ".txt")}
+
+
+def _exg_gain(ctx: ConnectContext) -> int:
+    raw = ctx.option("exg_gain", "24") or "24"
+    try:
+        gain = int(raw)
+    except ValueError:
+        gain = 0
+    if gain not in ADS1299_GAINS:
+        raise InstrumentConnectionError(
+            f"exg_gain must be one of the ADS1299 gains {', '.join(map(str, ADS1299_GAINS))}, got {raw!r}."
+        )
+    return gain
+
 
 def connect(ctx: ConnectContext) -> BiosensorBoard:
     options = ctx.settings.options
@@ -60,6 +86,7 @@ def connect(ctx: ConnectContext) -> BiosensorBoard:
         ) from exc
     board = resolve_board(ctx.option("board"), lib.BoardIds)
     params = input_params(board, ctx.address, options)
+    gain = _exg_gain(ctx)
     descr_id = board.board_id
     if board.enum_name in {"PLAYBACK_FILE_BOARD", "STREAMING_BOARD"}:
         master = resolve_board(options["master_board"], lib.BoardIds)
@@ -73,7 +100,7 @@ def connect(ctx: ConnectContext) -> BiosensorBoard:
         descr_board_id=descr_id,
         params=params,
         audit=ctx.audit,
-        exg_gain=int(ctx.option("exg_gain", "24") or 24),
+        exg_gain=gain,
     )
 
 
@@ -112,7 +139,7 @@ OpenBCI Cyton/Daisy/Ganglion/Galea, Muse 2/S/Athena, Neurosity Crown, g.tec Unic
         "other_info": "board-specific string, e.g. Muse preset p50, Ganglion fw:2",
         "timeout": "device discovery timeout in seconds (BLE/WiFi boards)",
         "master_board": "board the data came from (playback/streaming boards)",
-        "exg_gain": "ADS1299 PGA gain for railed-% on OpenBCI Cyton boards (default 24)",
+        "exg_gain": "ADS1299 PGA gain for railed-% on OpenBCI Cyton boards: 1, 2, 4, 6, 8, 12 or 24 (default)",
         "simulator": "with --simulate: brainflow (synthetic board, default) or fake (pure numpy)",
     },
 )
@@ -207,6 +234,9 @@ class RecordResult(BaseModel):
     traces_dc_removed: bool
     saved_to: str | None = None
     saved_format: str | None = None
+    stopped_early: bool = Field(
+        False, description="True if stop_streaming ended the recording early: the data covers only the time before it"
+    )
     timestamp: str
 
 
@@ -352,19 +382,23 @@ def start_streaming(
     the live stream. Call `stop_streaming` when finished."""
     b = _board()
     fs = b.sampling_rate(0)
-    already = b.streaming
+    already, adopted = b.streaming, b.streaming and not b.user_stream
     b.start_stream(int(buffer_duration_s * fs))
+    if adopted:
+        message = "A recording's temporary stream was already running; it now stays on until stop_streaming."
+    else:
+        message = "Stream was already running." if already else "Streaming started."
     return StreamState(
         streaming=True, sampling_rate_hz=fs, buffer_duration_s=b.buffer_samples / fs,
-        buffered_samples=b.buffered_samples(0),
-        message="Stream was already running." if already else "Streaming started.", timestamp=_now(),
+        buffered_samples=b.buffered_samples(0), message=message, timestamp=_now(),
     )
 
 
-@mcp.tool(**CONTROL)
+@mcp.tool(**SAFETY)
 def stop_streaming() -> StreamState:
-    """Stop acquisition (saves battery). Data already in the buffer is kept until the session is
-    released (`reconnect`) or read."""
+    """Stop acquisition (saves battery). A `record` in progress ends at once with the data acquired
+    so far. Data already in the buffer is kept until the next stream starts or the session is
+    released (`reconnect`)."""
     b = _board()
     was = b.streaming
     b.stop_stream()
@@ -383,7 +417,8 @@ def record(
     include_traces: Annotated[bool, Field(description="Return downsampled traces")] = True,
     remove_dc: Annotated[bool, Field(description="Subtract each channel's mean from the traces")] = True,
     save_path: Annotated[
-        str | None, Field(description="Write the full-resolution data (all rows) to this file")
+        str | None,
+        Field(description="Write the full-resolution data (all rows) to this new file (.csv; never overwrites a file)"),
     ] = None,
     save_format: Annotated[
         Literal["csv", "brainflow"],
@@ -392,8 +427,10 @@ def record(
 ) -> RecordResult:
     """Record `duration_s` seconds and return per-channel statistics, event markers and downsampled
     traces. Uses the live stream if one is running, otherwise starts a temporary one. The full data
-    (every row, full sampling rate) can be written to `save_path`."""
+    (every row, full sampling rate) can be written to `save_path`. `stop_streaming` ends a recording
+    early."""
     server.check("max_record_duration_s", duration_s, "recording duration")
+    path = prepare_save_path(save_path, suffixes=SAVE_SUFFIXES[save_format]) if save_path else None
     b = _board()
     p = _preset(preset)
     channels = b.channels(channel_type, p)
@@ -419,9 +456,7 @@ def record(
             x = rec.data[ch.row]
             traces[ch.name] = downsample(x - x.mean() if remove_dc else x, max_points)
     saved = None
-    if save_path:
-        path = Path(save_path).expanduser()
-        path.parent.mkdir(parents=True, exist_ok=True)
+    if path is not None:
         b.save(rec, str(path), save_format)
         saved = str(path)
     return RecordResult(
@@ -430,7 +465,8 @@ def record(
         start_time=_iso(float(ts[0])) if ts is not None else None,
         end_time=_iso(float(ts[-1])) if ts is not None else None,
         channels=_channel_stats(rec, channels), markers=markers, trace_times_s=trace_times, traces=traces,
-        traces_dc_removed=remove_dc, saved_to=saved, saved_format=save_format if saved else None, timestamp=_now(),
+        traces_dc_removed=remove_dc, saved_to=saved, saved_format=save_format if saved else None,
+        stopped_early=rec.stopped_early, timestamp=_now(),
     )
 
 
@@ -555,15 +591,20 @@ def insert_marker(
     return MarkerResult(value=value, timestamp=_now(), message=f"Marker {value:g} inserted.")
 
 
-@mcp.tool(**CONTROL)
+@mcp.tool(**HAZARD)
 def configure_board(
     command: Annotated[
         str, Field(min_length=1, max_length=200, description="Board-specific configuration string")
     ],
 ) -> ConfigResult:
-    """Send a board-specific configuration command through BrainFlow's config_board (e.g. OpenBCI
-    channel settings 'x1060110X', test signals, or Muse presets 'p50'/'p61' to enable PPG). Only
-    acquisition settings of the amplifier change. Consult the board's SDK documentation first."""
+    """Send a raw board-specific command to the firmware through BrainFlow's config_board (e.g.
+    OpenBCI channel settings 'x1060110X', test signals, or Muse presets 'p50'/'p61' to enable PPG).
+
+    The string is passed through unchecked: besides acquisition settings, some commands switch on
+    outputs such as the lead-off (impedance-test) current that flows through the participant's
+    electrodes. Settings persist until another command changes them or the board is power-cycled
+    (stopping the stream does not undo them). Consult the board's SDK documentation first and tell
+    the user what the command does."""
     reply = _board().config_board(command)
     return ConfigResult(command=command, reply=reply, timestamp=_now())
 

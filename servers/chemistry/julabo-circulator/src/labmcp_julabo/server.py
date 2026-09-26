@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from datetime import datetime, timezone
 from typing import Annotated, Literal
@@ -11,6 +12,7 @@ from labmcp import (
     READ,
     SAFETY,
     ConnectContext,
+    InstrumentConnectionError,
     InstrumentProtocolError,
     InstrumentServer,
     Limit,
@@ -37,12 +39,29 @@ def connect(ctx: ConnectContext) -> JulaboCirculator:
         write_termination="\r",
         timeout=3.0,
     )
-    delay = float(ctx.option("command_delay_s", "0.25") or 0.25)
+    try:
+        delay = _seconds_option(ctx, "command_delay_s", "0.25", minimum=0.0)
+        keepalive = _seconds_option(ctx, "keepalive_s", "0", minimum=0.0)
+    except InstrumentConnectionError:
+        transport.close()
+        raise
     drv = JulaboCirculator(transport, command_delay_s=0.0 if ctx.simulate else delay)
-    keepalive = float(ctx.option("keepalive_s", "0") or 0)
     if keepalive > 0:
         drv.start_keepalive(keepalive)
     return drv
+
+
+def _seconds_option(ctx: ConnectContext, name: str, default: str, *, minimum: float) -> float:
+    """A ``--option name=<seconds>``; a negative or non-numeric value would otherwise only fail
+    later, inside a setting or stop command (``time.sleep`` rejects negative delays)."""
+    raw = ctx.option(name, default) or default
+    try:
+        value = float(raw)
+    except ValueError:
+        value = math.nan
+    if not math.isfinite(value) or value < minimum:
+        raise InstrumentConnectionError(f"--option {name} must be a number of seconds >= {minimum:g} (got {raw!r}).")
+    return value
 
 
 server = InstrumentServer(

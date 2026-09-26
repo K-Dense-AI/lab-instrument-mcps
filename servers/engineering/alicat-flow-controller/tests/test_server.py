@@ -263,3 +263,37 @@ async def test_unit_id_option():
         reading = (await client.call_tool("read_flow", {})).structured_content
         assert reading["unit_id"] == "B"
     server.configure(options={})
+
+
+async def test_series_save_path_is_validated_before_logging(tmp_path):
+    async with simulated_client(server) as client:
+        path = tmp_path / "sub" / "series.csv"
+        series = (
+            await client.call_tool("log_flow_series", {"count": 2, "interval_s": 0.05, "save_path": str(path)})
+        ).structured_content
+        assert series["saved_to"] == str(path.resolve())
+        rows = path.read_text(encoding="utf-8").splitlines()
+        assert rows[0].startswith("timestamp,t_s,") and len(rows) == 3
+        # An existing file is never overwritten, and the check happens before any polling.
+        before = len((await client.call_tool("get_command_log", {"limit": 500})).data)
+        with pytest.raises(Exception, match="already exists"):
+            await client.call_tool("log_flow_series", {"count": 2, "interval_s": 0.05, "save_path": str(path)})
+        with pytest.raises(Exception, match=r"\.csv"):
+            await client.call_tool("log_flow_series", {"count": 2, "interval_s": 0.05, "save_path": str(tmp_path / "x.txt")})
+        after = len((await client.call_tool("get_command_log", {"limit": 500})).data)
+        assert after == before
+        assert len(path.read_text(encoding="utf-8").splitlines()) == 3
+
+
+async def test_series_longer_than_the_tool_timeout_is_refused():
+    # Raising the limit must not allow a series the tool timeout would cut off.
+    async with simulated_client(server, limits={"max_series_duration_s": 100_000}) as client:
+        with pytest.raises(Exception, match="single tool call"):
+            await client.call_tool("log_flow_series", {"count": 1000, "interval_s": 1.0})
+
+
+def test_nan_full_scale_is_treated_as_unknown():
+    dev, _ = make_device()
+    dev._full_scale.clear()
+    dev.command = lambda cmd, timeout=None: "A nan 12 SCCM"  # type: ignore[method-assign]
+    assert dev.full_scale(37) is None

@@ -249,31 +249,38 @@ PRECURSOR = """<precursorList count="1"><precursor spectrumRef="scan=1"><selecte
  </selectedIon></selectedIonList><activation><cvParam cvRef="MS" accession="MS:1000133" name="collision-induced dissociation" value=""/></activation></precursor></precursorList>"""
 
 
-def write_minimal_mzml(path: Path) -> Path:
-    """Hand-written vendor-style mzML: profile, negative mode, RT in seconds, no TIC/base-peak cvParams,
-    mixed 64/32-bit and compressed/uncompressed arrays, instrument model via a referenceable group."""
+def write_spectra_mzml(path: Path, rows: list, spectrum: str = SPECTRUM) -> Path:
+    """Hand-written mzML from (scan, ms level, RT in s, m/z list, intensity list) rows."""
     specs = []
-    for i, (scan, level, rt_s, mz, inten) in enumerate(
-        [
-            (1, 1, 30.0, [300.0, 300.5, 301.1, 301.2, 301.3], [10, 50, 200, 900, 150]),
-            (2, 2, 31.5, [100.0, 150.0, 283.0], [5, 40, 20]),
-            (3, 1, 33.0, [300.0, 301.2, 400.0], [20, 450, 30]),
-        ]
-    ):
+    for i, (scan, level, rt_s, mz, inten) in enumerate(rows):
         specs.append(
-            SPECTRUM.format(
+            spectrum.format(
                 i=i,
                 scan=scan,
                 n=len(mz),
                 level=level,
                 rt_s=rt_s,
-                precursor=PRECURSOR if level == 2 else "",
+                precursor=PRECURSOR if level >= 2 else "",
                 mz=_b64(mz, "<f8"),
                 inten=_b64(inten, "<f4", compress=True),
             )  # fmt: skip
         )
-    path.write_text(MINIMAL_MZML.replace("{spectra}", "\n".join(specs)))
+    text = MINIMAL_MZML.replace("{spectra}", "\n".join(specs))
+    path.write_text(text.replace('spectrumList count="3"', f'spectrumList count="{len(rows)}"'))
     return path
+
+
+def write_minimal_mzml(path: Path) -> Path:
+    """Hand-written vendor-style mzML: profile, negative mode, RT in seconds, no TIC/base-peak cvParams,
+    mixed 64/32-bit and compressed/uncompressed arrays, instrument model via a referenceable group."""
+    return write_spectra_mzml(
+        path,
+        [
+            (1, 1, 30.0, [300.0, 300.5, 301.1, 301.2, 301.3], [10, 50, 200, 900, 150]),
+            (2, 2, 31.5, [100.0, 150.0, 283.0], [5, 40, 20]),
+            (3, 1, 33.0, [300.0, 301.2, 400.0], [20, 450, 30]),
+        ],
+    )
 
 
 def test_minimal_hand_written_mzml(tmp_path):
@@ -433,9 +440,11 @@ def test_conversion_command_lines(tmp_path):
     wiff.write_bytes(b"")
     p = converter.plan_conversion(wiff, "sciex_wiff", tmp_path, converter="docker", converter_path="docker")
     assert p.argv[:3] == ["docker", "run", "--rm"]
-    assert "-v" in p.argv and f"{tmp_path}:/data" in p.argv
+    # Only the input's folder (read-only) and the output folder are mounted.
+    mounts = [p.argv[k + 1] for k, a in enumerate(p.argv) if a == "-v"]
+    assert mounts == [f"{tmp_path}:/data:ro", f"{tmp_path}:/out"]
     i = p.argv.index(converter.DOCKER_IMAGE)
-    assert p.argv[i + 1 : i + 6] == ["wine", "msconvert", "/data/run1.wiff", "-o", "/data"]
+    assert p.argv[i + 1 : i + 6] == ["wine", "msconvert", "/data/run1.wiff", "-o", "/out"]
     assert p.output == tmp_path / "run1.mzML"
     with pytest.raises(InstrumentProtocolError, match="only reads Thermo"):
         converter.plan_conversion(wiff, "sciex_wiff", tmp_path, converter="thermorawfileparser")
@@ -709,3 +718,240 @@ def test_mzmlb_via_psims_writer(tmp_path):
     assert t.precursor_mz[1] == 150.0 and t.precursor_charge[1] == 2 and t.precursor_scan[1] == 1
     np.testing.assert_allclose(b.read_peaks(1)[1], [1.0, 2.0])
     b.close()
+
+
+# ---------------------------------------------------------------- regression tests (review 2026-09)
+
+
+def test_save_path_needs_csv_and_never_overwrites(tmp_path):
+    dr = DataRoot(tmp_path)
+    (tmp_path / "run.mzML").write_text("<mzML/>")
+    for bad in ("notes.txt", "run.mzML", "sub/table.tsv"):
+        with pytest.raises(InstrumentProtocolError, match=r"must end in \.csv"):
+            dr.output_path(bad)
+    assert dr.output_path("tic") == (tmp_path / "tic.csv").resolve()  # no extension: .csv is added
+    assert dr.output_path("sub/TIC.CSV").parent.is_dir()
+    (tmp_path / "old.csv").write_text("keep me")
+    with pytest.raises(InstrumentProtocolError, match="already exists"):
+        dr.output_path("old.csv")
+    assert dr.output_path("old.csv", overwrite=True) == (tmp_path / "old.csv").resolve()
+    assert (tmp_path / "old.csv").read_text() == "keep me"
+    # an existing file that appears between the check and the write is not clobbered either
+    target = dr.output_path("race.csv")
+    target.write_text("appeared")
+    with pytest.raises(FileExistsError):
+        analysis.write_csv(target, ["a"], [[1.0]])
+    assert target.read_text() == "appeared"
+
+
+async def test_save_path_via_mcp_refuses_overwrite_and_wrong_suffix(tmp_path):
+    (tmp_path / "tic.csv").write_text("precious")
+    async with simulated_client(server, address=str(tmp_path)) as client:
+        r = await client.call_tool("get_tic", {"save_path": "tic.csv"}, raise_on_error=False)
+        assert r.is_error and "already exists" in r.content[0].text
+        assert (tmp_path / "tic.csv").read_text() == "precious"
+        r = await client.call_tool(
+            "extract_ion_chromatogram", {"mz": [CAFFEINE.mz], "save_path": "xic.mzML"}, raise_on_error=False
+        )
+        assert r.is_error and "must end in .csv" in r.content[0].text and not (tmp_path / "xic.mzML").exists()
+        r = await client.call_tool("get_spectrum", {"index": 0, "save_path": "tic.csv", "overwrite": True})
+        assert r.structured_content["saved_to"] and (tmp_path / "tic.csv").read_text().startswith("mz,intensity")
+
+
+SPECTRUM_SECONDS = 'unitCvRef="UO" unitAccession="UO:0000010" unitName="second"'
+
+
+@pytest.mark.parametrize(
+    "unit_attrs",
+    [
+        'unitCvRef="UO" unitAccession="UO:0000010" unitName="seconds"',
+        'unitCvRef="UO" unitAccession="UO:0000010" unitName="sec"',
+        'unitCvRef="UO" unitAccession="UO:0000010" unitName="Second"',
+        'unitCvRef="UO" unitAccession="UO:0000010"',
+    ],
+)
+def test_rt_in_seconds_recognised_by_accession(tmp_path, unit_attrs):
+    # The unit accession is authoritative; free-text names like "seconds" used to be read as minutes.
+    p = write_spectra_mzml(
+        tmp_path / "s.mzML",
+        [(1, 1, 30.0, [100.0], [1.0]), (2, 1, 90.0, [100.0], [2.0])],
+        spectrum=SPECTRUM.replace(SPECTRUM_SECONDS, unit_attrs),
+    )
+    b = MzMLBackend(p)
+    try:
+        np.testing.assert_allclose(b.table.rt_min, [0.5, 1.5])
+    finally:
+        b.close()
+
+
+def test_minutes_helper():
+    from labmcp_ms_data.driver import _minutes
+
+    class U(float):
+        unit_info = "minute"
+
+    assert _minutes(U(2.0)) == 2.0
+    assert _minutes(U(120.0), "UO:0000010") == 2.0  # accession wins over the name
+    assert _minutes(U(1.0), "UO:0000032") == 60.0
+    assert np.isnan(_minutes(None))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses a POSIX shell wrapper as the fake converter")
+def test_conversion_timeout_kills_the_whole_process_tree(tmp_path):
+    # Converters are often started through wrapper scripts (ThermoRawFileParser.sh, conda wrappers).
+    pidfile = tmp_path / "child.pid"
+    wrapper = tmp_path / "wrapper.sh"
+    wrapper.write_text(
+        f"#!/bin/sh\n'{sys.executable}' -c 'import os, time; "
+        f'open("{pidfile}", "w").write(str(os.getpid())); time.sleep(60)\'\n'
+    )
+    wrapper.chmod(0o755)
+    res = converter.run_conversion(converter.ConversionPlan("msconvert", [str(wrapper)], tmp_path / "x.mzML"), 1.0)
+    assert res.timed_out and res.duration_s < 15
+    pid = int(pidfile.read_text())
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        import time
+
+        time.sleep(0.05)
+    else:
+        os.kill(pid, 9)
+        pytest.fail("the converter's child process survived the timeout")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses a shebang script as the fake converter")
+async def test_convert_timeout_deletes_partial_output_and_refuses_the_root(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "QC_02.raw").write_bytes(b"RAW")
+    fake = _fake_converter(
+        tmp_path,
+        "args = sys.argv[1:]\nsrc = pathlib.Path(args[0]); out = pathlib.Path(args[args.index('-o') + 1])\n"
+        "(out / (src.stem + '.mzML')).write_text('<mzML><run>')\ntime.sleep(30)",
+    )
+    opts = {"converter": "msconvert", "converter_path": fake}
+    async with simulated_client(server, simulate=False, address=str(data), options=opts) as client:
+        res = (await client.call_tool("convert_to_mzml", {"path": "QC_02.raw", "timeout_s": 1})).structured_content
+        assert not res["success"] and any("Timed out" in n for n in res["notes"])
+        assert not (data / "QC_02.mzML").exists()  # the truncated file is not left behind
+        r = await client.call_tool("convert_to_mzml", {"path": "."}, raise_on_error=False)
+        assert r.is_error and "data folder itself" in r.content[0].text
+
+
+def test_converter_path_with_auto_is_used(tmp_path, monkeypatch):
+    monkeypatch.setattr(converter.shutil, "which", lambda name: "/usr/bin/" + name)  # others are on PATH
+    trfp = "/opt/trfp/ThermoRawFileParser.dll"
+    assert converter.choose_converter("thermo_raw", "auto", trfp) == ("thermorawfileparser", trfp)
+    assert converter.choose_converter("sciex_wiff", "auto", "C:/pwiz/msconvert.exe")[0] == "msconvert"
+    with pytest.raises(InstrumentProtocolError, match="Cannot tell"):
+        converter.choose_converter("sciex_wiff", "auto", "/opt/tools/convert")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="':' is not allowed in Windows folder names")
+def test_docker_refuses_paths_it_would_misparse(tmp_path):
+    folder = tmp_path / "a:b"
+    folder.mkdir()
+    (folder / "x.wiff").write_bytes(b"")
+    with pytest.raises(InstrumentProtocolError, match="Docker cannot mount"):
+        converter.plan_conversion(folder / "x.wiff", "sciex_wiff", folder, converter="docker", converter_path="docker")
+
+
+def test_evicted_run_stays_readable_by_a_running_call(tmp_path, sim_mzml):
+    # With cache_size=1, opening another run used to close the first one under a tool call still reading it.
+    with open(sim_mzml, "rb") as src, gzip.open(tmp_path / "a.mzML.gz", "wb", compresslevel=1) as dst:
+        shutil.copyfileobj(src, dst)
+    write_minimal_mzml(tmp_path / "b.mzML")
+    drv = MsDataDriver(DataRoot(tmp_path), cache_size=1)
+    a = drv.open_run("a.mzML.gz")
+    a.read_peaks(0)
+    drv.open_run("b.mzML")  # evicts a
+    assert a.read_peaks(1)[0].size > 0
+    ms1 = np.flatnonzero(a.table.ms_level == 1)
+    assert sum(1 for _ in a.iter_peaks(ms1)) == ms1.size  # sequential pass over the decompressed copy
+    tmp_dir = Path(a.source).parent
+    del a
+    import gc
+
+    gc.collect()
+    assert not tmp_dir.exists()  # released once nobody uses it
+    drv.close()
+
+
+def test_driver_cache_reopens_a_replacement_with_the_same_mtime(tmp_path, sim_mzml):
+    shutil.copy(sim_mzml, tmp_path / "a.mzML")
+    os.utime(tmp_path / "a.mzML", (1e9, 1e9))
+    drv = MsDataDriver(DataRoot(tmp_path))
+    b1 = drv.open_run("a.mzML")
+    write_minimal_mzml(tmp_path / "a.mzML")
+    os.utime(tmp_path / "a.mzML", (1e9, 1e9))  # e.g. `cp -p` / rsync -a keep the timestamp
+    b2 = drv.open_run("a.mzML")
+    assert b2 is not b1 and len(b2.table) == 3
+    drv.close()
+
+
+async def test_bpc_mz_matches_its_own_point_when_rts_repeat(tmp_path):
+    # Two MS1 scans with the same (rounded) RT: the base-peak m/z must follow the point, not the RT.
+    write_spectra_mzml(
+        tmp_path / "dup.mzML",
+        [(1, 1, 30.0, [301.2, 400.0], [900.0, 10.0]), (2, 1, 30.0, [301.2, 400.0], [10.0, 450.0])],
+    )
+    async with simulated_client(server, simulate=False, address=str(tmp_path)) as client:
+        bpc = (await client.call_tool("get_bpc", {"path": "dup.mzML"})).structured_content
+        assert bpc["base_peak_mz"] == [pytest.approx(301.2), pytest.approx(400.0)]
+        assert bpc["intensity"] == [900.0, 450.0]
+
+
+def test_fwhm_ignores_a_coeluting_neighbour():
+    rt = np.linspace(0.5, 1.6, 1101)
+    s = 0.05
+    y = 1e6 * np.exp(-0.5 * ((rt - 1.0) / s) ** 2) + 8e5 * np.exp(-0.5 * ((rt - 1.15) / s) ** 2)
+    pk = analysis.integrate_apex_peak(rt, y)
+    assert pk.end_rt_min < 1.1  # stopped at the valley between the peaks
+    # the right half-maximum is not reached before the valley: FWHM unknown, not ~2x too wide
+    assert pk.fwhm_s is None
+
+
+async def test_ms2_per_cycle_does_not_count_ms3(tmp_path):
+    p = [100.0, 200.0]
+    rows = [(1, 1, 60, p, [5e6, 1e6]), (2, 2, 61, p, [1, 2]), (3, 3, 62, p, [1, 2]), (4, 3, 63, p, [1, 2]),
+            (5, 1, 64, p, [5e6, 1e6]), (6, 2, 65, p, [1, 2]), (7, 2, 66, p, [1, 2]), (8, 1, 67, p, [5e6, 1e6])]  # fmt: skip
+    write_spectra_mzml(tmp_path / "sps.mzML", rows)
+    async with simulated_client(server, simulate=False, address=str(tmp_path)) as client:
+        qc = (await client.call_tool("summarise_run", {"path": "sps.mzML"})).structured_content
+        assert qc["ms2_per_cycle_max"] == 2 and qc["ms2_per_cycle_mean"] == 1.0  # cycles: 1, 2, 0 MS2
+        assert qc["msn_higher_spectra"] == 2
+
+
+async def test_spectrum_mz_window_must_be_ordered(tmp_path):
+    async with simulated_client(server, address=str(tmp_path)) as client:
+        r = await client.call_tool("get_spectrum", {"index": 0, "mz_min": 500, "mz_max": 200}, raise_on_error=False)
+        assert r.is_error and "above mz_max" in r.content[0].text
+
+
+def test_tdf_database_symlinked_outside_is_refused(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    real = make_tdf(tmp_path)  # tmp_path/sample.d, outside the root
+    d = root / "linked.d"
+    d.mkdir()
+    try:
+        (d / "analysis.tdf").symlink_to(real / "analysis.tdf")
+    except OSError:
+        pytest.skip("symlinks not permitted on this system")
+    drv = MsDataDriver(DataRoot(root))
+    with pytest.raises(InstrumentProtocolError, match="outside the data folder"):
+        drv.open_run("linked.d")
+
+
+def test_default_data_folder_is_not_the_filesystem_root(monkeypatch):
+    from labmcp import ConnectContext, SafetyLimits, Settings
+    from labmcp.audit import AuditLog
+    from labmcp_ms_data.server import connect
+
+    monkeypatch.chdir(Path(Path.cwd().anchor))
+    with pytest.raises(InstrumentProtocolError, match="--address"):
+        connect(ConnectContext(Settings(), AuditLog(), SafetyLimits()))
+    assert connect(ConnectContext(Settings(simulate=True), AuditLog(), SafetyLimits())).simulated

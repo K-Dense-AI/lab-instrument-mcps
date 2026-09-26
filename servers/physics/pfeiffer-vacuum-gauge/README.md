@@ -66,7 +66,7 @@ Add `--read-only` to allow reading and logging but block unit changes and switch
 | `get_connection_info` | 👁 read | Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first. |
 | `get_errors` | 👁 read | Read (and clear) the controller's ERROR word: controller error, no hardware, inadmissible parameter or syntax error. An empty list means no error. |
 | `get_gauge_types` | 👁 read | List the gauge connected to each channel (TID), what kind it is, and whether it is an ionisation gauge that is currently switched on or off (SEN). |
-| `log_pressure_series` | 👁 read | Log pressures at a fixed interval (e.g. a pump-down curve, leak-up/rate-of-rise test or bake-out). Returns per-channel statistics in log-space plus a downsampled series; the full series can be written to CSV. Bounded by `max_log_duration_s`. |
+| `log_pressure_series` | 👁 read | Log pressures at a fixed interval (e.g. a pump-down curve, leak-up/rate-of-rise test or bake-out). Returns per-channel statistics in log-space plus a downsampled series; the full series can be written to a new CSV file (an existing file is never overwritten). Bounded by `max_log_duration_s` and 2 h per call. |
 | `read_all_pressures` | 👁 read | Read every channel of the controller at once (PRX), with status per channel. |
 | `read_pressure` | 👁 read | Read one gauge channel: status, pressure in the display unit and in mbar. |
 | `reconnect` | 🛑 safety | Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged). |
@@ -84,7 +84,7 @@ Add `--read-only` to allow reading and logging but block unit changes and switch
 | `max_switch_on_pressure_mbar` | 1e-2 mbar | An ionisation gauge may only be switched on when a valid reading (its own, or `reference_channel`) is at or below this pressure |
 | `max_log_duration_s` | 3600 s | Longest `log_pressure_series` an agent may start |
 
-Override at launch: `--limit max_switch_on_pressure_mbar=1e-3 --limit max_log_duration_s=86400`.
+Override at launch: `--limit max_switch_on_pressure_mbar=1e-3 --limit max_log_duration_s=7200`. One `log_pressure_series` call logs at most 2 h (the tool's timeout); for a longer bake-out, log in consecutive calls to separate files. `save_path` must end in `.csv` and must not exist yet (an existing file is never overwritten); it is checked before logging starts.
 
 ## Example prompts
 

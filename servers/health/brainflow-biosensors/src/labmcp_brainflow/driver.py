@@ -28,11 +28,12 @@ import math
 import re
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import numpy as np
-from labmcp import InstrumentConnectionError, InstrumentProtocolError
+from labmcp import InstrumentConnectionError, InstrumentError, InstrumentProtocolError
 
 # --------------------------------------------------------------------------- board table
 
@@ -428,33 +429,39 @@ class BrainFlowLibrary:
             setattr(p, key, value)
         return self.BoardShim(board_id, p)
 
-    # DataFilter works in place on contiguous float64 1-D arrays.
+    # DataFilter works in place on contiguous float64 1-D arrays. Its BrainFlowErrors (e.g. too
+    # few samples for a filter or a PSD) are translated like the BoardShim ones.
     def detrend(self, x: np.ndarray, linear: bool = False) -> np.ndarray:
         y = np.ascontiguousarray(x, dtype=np.float64).copy()
         op = self.DetrendOperations.LINEAR if linear else self.DetrendOperations.CONSTANT
-        self.DataFilter.detrend(y, op.value)
+        with _translated("detrending"):
+            self.DataFilter.detrend(y, op.value)
         return y
 
     def bandpass(self, x: np.ndarray, fs: float, lo: float, hi: float) -> np.ndarray:
         y = np.ascontiguousarray(x, dtype=np.float64).copy()
-        self.DataFilter.perform_bandpass(
-            y, int(fs), float(lo), float(hi), 4, self.FilterTypes.BUTTERWORTH_ZERO_PHASE.value, 0.0
-        )
+        with _translated("band-pass filtering"):
+            self.DataFilter.perform_bandpass(
+                y, int(fs), float(lo), float(hi), 4, self.FilterTypes.BUTTERWORTH_ZERO_PHASE.value, 0.0
+            )
         return y
 
     def bandstop(self, x: np.ndarray, fs: float, lo: float, hi: float) -> np.ndarray:
         y = np.ascontiguousarray(x, dtype=np.float64).copy()
-        self.DataFilter.perform_bandstop(
-            y, int(fs), float(lo), float(hi), 4, self.FilterTypes.BUTTERWORTH_ZERO_PHASE.value, 0.0
-        )
+        with _translated("band-stop filtering"):
+            self.DataFilter.perform_bandstop(
+                y, int(fs), float(lo), float(hi), 4, self.FilterTypes.BUTTERWORTH_ZERO_PHASE.value, 0.0
+            )
         return y
 
     def avg_band_powers(self, data: np.ndarray, rows: list[int], fs: int) -> tuple[list[float], list[float]]:
-        avg, std = self.DataFilter.get_avg_band_powers(np.ascontiguousarray(data), rows, int(fs), True)
+        with _translated(f"computing band powers ({data.shape[1]} samples at {fs} Hz)"):
+            avg, std = self.DataFilter.get_avg_band_powers(np.ascontiguousarray(data), rows, int(fs), True)
         return [float(v) for v in avg], [float(v) for v in std]
 
     def write_file(self, data: np.ndarray, path: str) -> None:
-        self.DataFilter.write_file(np.ascontiguousarray(data), path, "w")
+        with _translated(f"writing {path}"):
+            self.DataFilter.write_file(np.ascontiguousarray(data), path, "w")
 
 
 def brainflow_error(exc: Exception, doing: str) -> InstrumentProtocolError:
@@ -480,6 +487,16 @@ def brainflow_error(exc: Exception, doing: str) -> InstrumentProtocolError:
     return InstrumentProtocolError(f"BrainFlow error while {doing}: {text}")
 
 
+@contextlib.contextmanager
+def _translated(doing: str) -> Iterator[None]:
+    try:
+        yield
+    except InstrumentError:
+        raise
+    except Exception as exc:
+        raise brainflow_error(exc, doing) from exc
+
+
 # --------------------------------------------------------------------------- driver
 
 
@@ -497,6 +514,7 @@ class Recording:
     sampling_rate: float
     preset: int
     started: float = field(default_factory=time.time)
+    stopped_early: bool = False  # the stream was stopped (stop_streaming) before duration_s elapsed
 
 
 EXG_KINDS = ("eeg", "emg", "ecg", "eog", "exg")
@@ -534,6 +552,11 @@ class BiosensorBoard:
         self.streaming = False
         self.stream_started: float | None = None
         self.buffer_samples = 0
+        # Who needs the running stream: start_streaming (user_stream) and/or recordings that started
+        # a temporary one. A recording stops the stream only if nobody else still needs it.
+        self.user_stream = False
+        self._stream_users = 0
+        self._stream_stopped = threading.Event()  # set when the current stream stops
         self._ever_streamed = False  # BrainFlow logs an error if the buffer is queried before
         self._prepared = False
         self._event(f"prepare_session board_id={board_id}")
@@ -643,9 +666,13 @@ class BiosensorBoard:
 
     # ------------------------------------------------------------ streaming
 
-    def start_stream(self, buffer_samples: int) -> None:
+    def start_stream(self, buffer_samples: int, *, temporary: bool = False) -> None:
+        """Start streaming. ``temporary`` streams belong to a recording and stop when it ends; a
+        non-temporary call on a running temporary stream keeps it running afterwards."""
         with self.lock:
             if self.streaming:
+                if not temporary:
+                    self.user_stream = True
                 return
             self._event(f"start_stream buffer={buffer_samples}")
             try:
@@ -653,6 +680,9 @@ class BiosensorBoard:
             except Exception as exc:
                 raise brainflow_error(exc, "starting the stream") from exc
             self.streaming = True
+            self.user_stream = not temporary
+            self._stream_users = 0
+            self._stream_stopped = threading.Event()
             self._ever_streamed = True
             self.stream_started = time.time()
             self.buffer_samples = int(buffer_samples)
@@ -668,7 +698,9 @@ class BiosensorBoard:
                 raise brainflow_error(exc, "stopping the stream") from exc
             finally:
                 self.streaming = False
+                self.user_stream = False
                 self.stream_started = None
+                self._stream_stopped.set()  # wakes recordings waiting on this stream
 
     def buffered_samples(self, preset: int = 0) -> int:
         if not self._ever_streamed:
@@ -679,31 +711,35 @@ class BiosensorBoard:
             return 0
 
     def acquire(self, duration_s: float, preset: int = 0) -> Recording:
-        """Collect ``duration_s`` of new data. Uses the running stream (non-destructively), or starts
-        and stops a temporary stream if none is running."""
+        """Collect ``duration_s`` of new data (read non-destructively from the stream). Uses the
+        running stream, or starts a temporary one that is stopped afterwards unless something else
+        (``start_streaming``, another recording) still needs it. If the stream is stopped meanwhile,
+        returns at once with only the data acquired since the call began (``stopped_early``)."""
         fs = self.sampling_rate(preset)
         n = max(2, int(round(duration_s * fs)))
         started = time.time()
-        if self.streaming:
-            time.sleep(duration_s)
+        with self.lock:
+            if not self.streaming:
+                self.start_stream(max(n * 2, 45000), temporary=True)
+            self._stream_users += 1
+            stopped = self._stream_stopped
+        try:
+            stopped_early = stopped.wait(duration_s)
+            if stopped_early:  # no new samples arrive after the stop: older ones are not ours
+                n = min(n, max(2, int(round((time.time() - started) * fs))))
             data = self._current(n, preset)
-        else:
-            self.start_stream(max(n * 2, 45000))
-            try:
-                time.sleep(duration_s)
-                try:
-                    data = self.h.get_board_data(None, preset)
-                except Exception as exc:
-                    raise brainflow_error(exc, "reading data") from exc
-            finally:
-                self.stop_stream()
-            data = data[:, -n:] if data.shape[1] > n else data
+        finally:
+            with self.lock:
+                if self._stream_stopped is stopped:  # still the stream this call joined
+                    self._stream_users -= 1
+                    if self._stream_users <= 0 and self.streaming and not self.user_stream:
+                        self.stop_stream()
         if data.shape[1] < 2:
             raise InstrumentProtocolError(
                 "No data arrived from the board. Check that it is powered on, in range, and streaming "
                 "(electrodes do not need to be attached to get data)."
             )
-        return Recording(np.asarray(data, dtype=float), fs, preset, started)
+        return Recording(np.asarray(data, dtype=float), fs, preset, started, stopped_early)
 
     def latest(self, window_s: float, preset: int = 0) -> Recording:
         """The most recent ``window_s`` of data: from the running stream if it already holds enough,

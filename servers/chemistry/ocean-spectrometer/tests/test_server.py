@@ -335,3 +335,129 @@ def test_open_seabreeze_device_selection(monkeypatch):
         {"model": "USB2000PLUS", "serial_number": "A1", "is_open": False},
         {"model": "QE-PRO", "serial_number": "B2", "is_open": False},
     ]
+
+
+# ---------------------------------------------------------------- regressions (software review)
+
+
+def test_find_peaks_does_not_report_the_edges_of_an_invalid_gap():
+    # Regression: NaN pixels (e.g. the centre of a band too strong to measure) were filled with the
+    # minimum, so the pixels at both edges of the gap came back as two sharp, prominent "peaks".
+    x = np.linspace(400, 700, 601)
+    a = 3.0 * np.exp(-0.5 * ((x - 520) / 20) ** 2) + 0.05 + 0.3 * np.exp(-0.5 * ((x - 620) / 8) ** 2)
+    y = np.where(a > 2.2, np.nan, a)
+    peaks = analysis.find_peaks(x, y, max_peaks=5)
+    assert [round(p.wavelength_nm) for p in peaks] == [620]
+    assert peaks[0].fwhm_nm == pytest.approx(2.3548 * 8, rel=0.02)
+
+
+def test_boxcar_spreads_saturation_to_neighbours_in_ratio_validity():
+    # Regression: with boxcar smoothing, pixels next to a saturated one include its clipped value
+    # but were still reported as valid absorbance.
+    drv, spec = make_driver()
+    drv.store_dark(scans_to_average=2, boxcar_half_width=2)
+    drv.store_reference(scans_to_average=2, boxcar_half_width=2)
+    real = spec.intensities
+
+    def clipped(*args, **kwargs):
+        out = real(*args, **kwargs)
+        out[1000] = drv.max_intensity
+        return out
+
+    spec.intensities = clipped
+    r = drv.measure_ratio("absorbance")
+    assert r.sample.saturated_pixels == 1
+    assert not r.valid[998:1003].any() and r.valid[995] and r.valid[1005]
+
+
+def test_acquisition_does_not_hold_the_lock_for_the_whole_series():
+    # Regression: acquire() held the driver lock for every scan of the series (up to minutes), so
+    # detector_cooling_off (SAFETY) and reconnect waited for the whole acquisition.
+    import threading
+
+    drv, _ = make_driver(model="QE-PRO")
+    drv.set_tec(True, -10.0)
+    worker = threading.Thread(target=drv.acquire, kwargs={"scans_to_average": 100})  # ~2 s simulated
+    worker.start()
+    time.sleep(0.2)
+    t0 = time.monotonic()
+    drv.set_tec(False)
+    assert time.monotonic() - t0 < 0.3 and worker.is_alive()
+    worker.join(10)
+
+
+def test_integration_time_change_during_acquisition_is_refused():
+    import threading
+
+    drv, _ = make_driver()
+    box = {}
+
+    def run():
+        try:
+            drv.acquire(scans_to_average=100)
+        except InstrumentProtocolError as exc:
+            box["error"] = exc
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    time.sleep(0.2)
+    drv.set_integration_time_ms(20)
+    worker.join(10)
+    assert "changed during the acquisition" in str(box["error"])
+
+
+def test_auto_integration_respects_time_budget():
+    drv, _ = make_driver()
+    result = drv.auto_integration_time(time_budget_s=0.0)
+    assert result["time_limited"] is True and result["history"] == [] and not result["converged"]
+
+
+async def test_acquisition_longer_than_the_tool_timeout_is_refused():
+    # Regression: with the limits raised (the README suggests max_integration_time_ms=60000), an
+    # acquisition (or find_peaks with its 120 s timeout) could outlast its tool timeout.
+    limits = {"max_integration_time_ms": 600_000, "max_acquisition_duration_s": 100_000}
+    async with simulated_client(server, limits=limits) as client:
+        await client.call_tool("set_integration_time", {"integration_time_ms": 60_000})
+        with pytest.raises(Exception, match="more than one tool call allows"):
+            await client.call_tool("acquire_spectrum", {"scans_to_average": 10})
+    for name in ("acquire_spectrum", "measure_absorbance", "find_peaks", "auto_integration_time"):
+        tool = await server.mcp.get_tool(name)
+        assert tool.timeout >= 540
+
+
+async def test_save_path_is_checked_before_acquiring(tmp_path):
+    existing = tmp_path / "spectrum.csv"
+    existing.write_text("keep me", encoding="utf-8")
+    async with simulated_client(server) as client:
+        with pytest.raises(Exception, match="already exists"):
+            await client.call_tool("acquire_spectrum", {"save_path": str(existing)})
+        with pytest.raises(Exception, match=r"\.csv"):
+            await client.call_tool("acquire_spectrum", {"save_path": str(tmp_path / "spectrum.txt")})
+        assert server.driver.last is None  # nothing was acquired
+        nested = tmp_path / "new" / "dir" / "s.csv"
+        result = (await client.call_tool("acquire_spectrum", {"save_path": str(nested)})).structured_content
+        assert result["saved_to"] == str(nested.resolve()) and nested.exists()
+    assert existing.read_text(encoding="utf-8") == "keep me"
+
+
+async def test_strong_absorbance_warns_about_invalid_pixels():
+    async with simulated_client(server) as client:
+        await client.call_tool("store_dark_reference", {"scans_to_average": 3})
+        await client.call_tool("store_reference", {"scans_to_average": 3})
+        server.driver.spec.sample["peak_absorbance"] = 6.0  # ~1e-6 transmission at the band centre
+        result = (await client.call_tool("measure_absorbance", {})).structured_content
+        assert any("inside the range are invalid" in w for w in result["warnings"])
+
+
+async def test_detector_cooling_off_survives_a_failed_temperature_read(monkeypatch):
+    async with simulated_client(server, options={"sim_model": "QE-PRO"}) as client:
+        await client.call_tool("set_detector_cooling", {"setpoint_c": -10})
+        tec = server.driver.tec
+
+        def broken():
+            raise RuntimeError("USB read failed")
+
+        monkeypatch.setattr(tec, "read_temperature_degrees_celsius", broken)
+        off = (await client.call_tool("detector_cooling_off", {})).structured_content
+        assert off["status"] == "TEC off" and "USB read failed" in off["temperature_error"]
+        assert tec.enabled is False

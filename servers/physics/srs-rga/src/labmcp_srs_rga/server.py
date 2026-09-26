@@ -6,6 +6,7 @@ import csv
 import math
 import statistics
 import time
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Literal
@@ -16,9 +17,11 @@ from labmcp import (
     READ,
     SAFETY,
     ConnectContext,
+    InstrumentError,
     InstrumentProtocolError,
     InstrumentServer,
     Limit,
+    prepare_save_path,
 )
 from pydantic import BaseModel, Field
 
@@ -73,7 +76,8 @@ Controls a Stanford Research Systems RGA100/200/300 quadrupole residual gas anal
   scan settings and any error bytes (e.g. a filament shut down by the overpressure protection).
 - Measurements need the filament ON (typically 1 mA). The filament must only be switched on below
   1e-4 Torr: `set_filament` needs either a reading from a separate vacuum gauge passed as
-  `external_pressure_torr`, or (if the filament is already on) the RGA's own total pressure.
+  `external_pressure_torr`, or (if the filament is already on) the RGA's own total pressure. When
+  both are available the higher one is used.
 - The CDEM gives ~1000x more signal but is damaged by high pressure: `set_cdem` requires a
   pressure below `max_cdem_pressure_torr` (default 5e-6 Torr). Total pressure reads 0 while the
   CDEM is on, so check the pressure with the Faraday cup first.
@@ -81,8 +85,8 @@ Controls a Stanford Research Systems RGA100/200/300 quadrupole residual gas anal
   gases have different sensitivities (H2 ~0.4x, He ~0.14x, Ar ~1.2x): treat values as estimates.
 - Typical residual gases: H2 (2), He (4), CH4 (16), H2O (18/17), N2/CO (28), O2 (32), Ar (40),
   CO2 (44). N2 28 + O2 32 in a ~4:1 ratio with Ar 40 means an air leak.
-- When finished, call `all_off` (filament, CDEM and RF off). Degassing shortens filament life;
-  use it only when needed.
+- When finished, call `all_off` (filament, CDEM and RF off). It also interrupts a running scan or
+  leak check. Degassing shortens filament life; use it only when needed.
 """,
     limits=[
         Limit(
@@ -96,7 +100,10 @@ Controls a Stanford Research Systems RGA100/200/300 quadrupole residual gas anal
         ),
         Limit("max_cdem_voltage_v", 2000, "V", "Highest CDEM high voltage an agent may set"),
         Limit(
-            "max_pressure_reading_age_s", 60, "s", "Oldest RGA total-pressure reading accepted as evidence"
+            "max_pressure_reading_age_s",
+            60,
+            "s",
+            "Oldest RGA total-pressure reading accepted as evidence (only while the filament stays on)",
         ),
         Limit("max_degas_minutes", 3, "min", "Longest ionizer degas an agent may start"),
         Limit("max_scan_duration_s", 900, "s", "Longest estimated scan duration"),
@@ -288,7 +295,19 @@ def _measure_total(rga: SrsRga) -> TotalPressure:
     if emission <= 0:
         notes.append("Filament is OFF: there is no ionisation, so this value is only electrometer noise.")
     elif raw > 0:
-        rga.last_total_pressure = PressureEvidence(torr, f"RGA total pressure {torr:.2e} Torr")
+        # The ion current is proportional to the emission current and ST is defined at 1 mA, so a
+        # reading at a lower emission underestimates the pressure (50x at 0.02 mA). The interlock
+        # evidence is scaled up accordingly (never down).
+        scale = 1.0 / min(emission, 1.0)
+        source = f"RGA total pressure {torr * scale:.2e} Torr"
+        if scale > 1.02:
+            source += f" (read at {emission:.2f} mA emission, scaled to 1 mA)"
+        rga.last_total_pressure = PressureEvidence(torr * scale, source)
+    if emission > 0 and abs(emission - 1.0) > 0.02:
+        notes.append(
+            f"Emission is {emission:.2f} mA: the stored sensitivity ST applies at 1 mA and the ion current "
+            "scales with emission, so this value is off by roughly that factor."
+        )
     notes.append("N2-equivalent: the RGA total-pressure sensitivity is strongly gas dependent.")
     return TotalPressure(
         pressure_torr=torr,
@@ -300,32 +319,55 @@ def _measure_total(rga: SrsRga) -> TotalPressure:
 
 
 def _pressure_evidence(
-    rga: SrsRga, external_pressure_torr: float | None, allow_fresh_tp: bool
+    rga: SrsRga, external_pressure_torr: float | None, *, filament_on: bool, cdem_on: bool
 ) -> PressureEvidence:
-    """Pick the pressure used for the switch-on check: a user-confirmed gauge value, a fresh RGA
-    total pressure (filament on, CDEM off), or a recent one."""
+    """Pick the pressure used for a switch-on check: the highest of the evidence available.
+
+    * ``external_pressure_torr``: a separate gauge read by the user;
+    * a total pressure measured now by the RGA (needs the filament on and the CDEM off);
+    * only when it can't measure now (CDEM on) and the filament is *still* on: a reading from the
+      last ``max_pressure_reading_age_s``. Once the filament is off (switched off, or tripped by
+      the overpressure protection) an older reading says nothing about the present pressure.
+    """
+    found: list[PressureEvidence] = []
     if external_pressure_torr is not None:
-        return PressureEvidence(
-            external_pressure_torr, f"external gauge reading {external_pressure_torr:.2e} Torr"
+        found.append(
+            PressureEvidence(
+                external_pressure_torr, f"external gauge reading {external_pressure_torr:.2e} Torr"
+            )
         )
-    if allow_fresh_tp:
+    measured = False
+    if filament_on and not cdem_on:
+        rga.last_total_pressure = None
         tp = _measure_total(rga)
-        if tp.filament_on and tp.ion_current_a > 0:
-            return PressureEvidence(
-                tp.pressure_torr, f"RGA total pressure {tp.pressure_torr:.2e} Torr (just measured)"
-            )
-    cached = rga.last_total_pressure
-    if cached is not None:
-        age = time.monotonic() - cached.monotonic
-        if age <= server.limits["max_pressure_reading_age_s"]:
-            return PressureEvidence(
-                cached.torr, f"{cached.source}, measured {age:.0f} s ago", cached.monotonic
-            )
-    raise InstrumentProtocolError(
-        "Refused: no trustworthy pressure reading. The RGA can only measure pressure while its filament "
-        "is emitting (and with the CDEM off). Read a separate vacuum gauge (ion/Pirani/cold cathode) and "
-        "pass the value as `external_pressure_torr` after confirming it with the user. Nothing was sent."
-    )
+        cached = rga.last_total_pressure
+        if tp.filament_on and tp.ion_current_a > 0 and cached is not None:
+            found.append(PressureEvidence(cached.torr, f"{cached.source} (just measured)", cached.monotonic))
+            measured = True
+    if filament_on and not measured:
+        cached = rga.last_total_pressure
+        if cached is not None:
+            age = time.monotonic() - cached.monotonic
+            if 0 <= age <= server.limits["max_pressure_reading_age_s"]:
+                found.append(
+                    PressureEvidence(
+                        cached.torr, f"{cached.source}, measured {age:.0f} s ago", cached.monotonic
+                    )
+                )
+    if not found:
+        raise InstrumentProtocolError(
+            "Refused: no trustworthy pressure reading. The RGA can only measure pressure while its filament "
+            "is emitting (and with the CDEM off). Read a separate vacuum gauge (ion/Pirani/cold cathode) "
+            "and pass the value as `external_pressure_torr` after confirming it with the user. Nothing was "
+            "sent."
+        )
+    worst = max(found, key=lambda e: e.torr)
+    others = [e.source for e in found if e is not worst]
+    if others:
+        return PressureEvidence(
+            worst.torr, f"{worst.source} (highest of: {'; '.join(others)})", worst.monotonic
+        )
+    return worst
 
 
 def _action_result(
@@ -383,7 +425,7 @@ def _spectrum(
     kind: Literal["analog", "histogram"],
     duration: float,
     max_points: int,
-    save_path: str | None,
+    save_path: Path | None,
     warnings: list[str],
 ) -> Spectrum:
     sp, gain = _sensitivity(rga)
@@ -398,10 +440,9 @@ def _spectrum(
         for m, p, s in find_peaks(masses, torr, noise_torr=noise, histogram=kind == "histogram")
     ]
     saved = None
-    if save_path:
-        path = Path(save_path).expanduser()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", newline="") as fh:
+    if save_path is not None:
+        path = save_path
+        with path.open("x", newline="") as fh:
             w = csv.writer(fh)
             w.writerow(["mz", "ion_current_a", "partial_pressure_torr_n2_equivalent"])
             for m, r, p in zip(masses, result.currents_raw, torr, strict=True):
@@ -533,7 +574,10 @@ def measure_masses(
         _check_mass(rga, *masses)
         sp, gain = _sensitivity(rga)
         nf = rga.noise_floor()
-        raws = [rga.single_mass(m) for m in masses]
+        raws = []
+        for m in masses:
+            rga.check_abort("mass measurement")
+            raws.append(rga.single_mass(m))
         rga.rf_off()
         warnings = _health_warnings(rga)
     readings = [
@@ -563,12 +607,16 @@ def analog_scan(
     stop_mass: Annotated[int, Field(ge=1, le=300, description="Last m/z")] = 50,
     points_per_amu: Annotated[int, Field(ge=10, le=25, description="Steps per amu (SA)")] = 10,
     max_points: Annotated[int, Field(ge=20, le=5000, description="Spectrum points returned")] = 500,
-    save_path: Annotated[str | None, Field(description="Optional CSV path for the full spectrum")] = None,
+    save_path: Annotated[
+        str | None, Field(description="Optional CSV path for the full spectrum (must not exist yet)")
+    ] = None,
 ) -> Spectrum:
     """Record an analog mass spectrum (SC1): the quadrupole steps through the mass range and the
     full peak shapes are returned (downsampled) with a peak list, the total pressure measured at
     the end of the scan, and optionally the full data as CSV. Use it to check peak positions and
-    to survey unknown gases. Duration depends on the noise floor (e.g. 126 ms/amu at NF4)."""
+    to survey unknown gases. Duration depends on the noise floor (e.g. 126 ms/amu at NF4). An
+    existing save_path file is never overwritten."""
+    path = prepare_save_path(save_path, suffixes=(".csv",)) if save_path else None
     rga = server.driver
     with rga.t.lock:
         _check_mass(rga, start_mass, stop_mass)
@@ -579,17 +627,18 @@ def analog_scan(
         result = rga.analog_scan(start_mass, stop_mass, points_per_amu)
         duration = time.monotonic() - t0
         warnings = _health_warnings(rga)
-        return _spectrum(rga, result, "analog", duration, max_points, save_path, warnings)
+        return _spectrum(rga, result, "analog", duration, max_points, path, warnings)
 
 
 @mcp.tool(**READ, timeout=1900)
 def histogram_scan(
     start_mass: Annotated[int, Field(ge=1, le=300, description="First m/z")] = 1,
     stop_mass: Annotated[int, Field(ge=1, le=300, description="Last m/z")] = 50,
-    save_path: Annotated[str | None, Field(description="Optional CSV path")] = None,
+    save_path: Annotated[str | None, Field(description="Optional CSV path (must not exist yet)")] = None,
 ) -> Spectrum:
     """Record a bar-graph spectrum (HS1): one peak-locked value per integer m/z plus the total
     pressure. Faster than an analog scan and the usual way to follow a residual gas composition."""
+    path = prepare_save_path(save_path, suffixes=(".csv",)) if save_path else None
     rga = server.driver
     with rga.t.lock:
         _check_mass(rga, start_mass, stop_mass)
@@ -600,10 +649,12 @@ def histogram_scan(
         result = rga.histogram_scan(start_mass, stop_mass)
         duration = time.monotonic() - t0
         warnings = _health_warnings(rga)
-        return _spectrum(rga, result, "histogram", duration, 1000, save_path, warnings)
+        return _spectrum(rga, result, "histogram", duration, 1000, path, warnings)
 
 
-@mcp.tool(**READ, timeout=3700)
+# The Field allows up to 7200 s of monitoring: the tool timeout must be longer, or the result of a
+# long run would be discarded as "timed out" after the measurement completed.
+@mcp.tool(**READ, timeout=7500)
 def leak_check(
     duration_s: Annotated[float, Field(gt=0, le=7200, description="How long to monitor")] = 120,
     interval_s: Annotated[float, Field(ge=0.1, le=60, description="Seconds between readings")] = 1.0,
@@ -613,13 +664,16 @@ def leak_check(
     ] = 3.0,
     baseline_points: Annotated[int, Field(ge=3, le=100, description="Readings used for the baseline")] = 5,
     max_points: Annotated[int, Field(ge=10, le=5000, description="Points returned")] = 300,
-    save_path: Annotated[str | None, Field(description="Optional CSV file for every reading")] = None,
+    save_path: Annotated[
+        str | None, Field(description="Optional CSV file for every reading (must not exist yet)")
+    ] = None,
 ) -> LeakCheck:
     """Helium leak check: monitor m/z 4 while someone sprays helium on suspect joints, and report
     the baseline, every response above `threshold_factor` x baseline (start/end time, peak) and
     the time series. Keep the first few seconds free of helium so the baseline is clean. The
     response time of a real leak is a few seconds. Bounded by `max_leak_check_duration_s`."""
     server.check("max_leak_check_duration_s", duration_s, "leak-check duration")
+    path = prepare_save_path(save_path, suffixes=(".csv",)) if save_path else None
     rga = server.driver
     started = _now()
     with rga.t.lock:
@@ -636,10 +690,11 @@ def leak_check(
         t0 = time.monotonic()
         times: list[float] = []
         values: list[float] = []
+        end = t0 + duration_s + max(interval_s, 5.0)  # slow readings must not stretch the run
         for i in range(n):
-            delay = t0 + i * interval_s - time.monotonic()
-            if delay > 0:
-                time.sleep(delay)
+            rga.pause(t0 + i * interval_s - time.monotonic(), "leak check")
+            if i and time.monotonic() > end:
+                break
             raw = rga.single_mass(mz)
             times.append(time.monotonic() - t0)
             values.append(SrsRga.to_torr(raw, sp, gain))
@@ -662,10 +717,8 @@ def leak_check(
     if current:
         events.append(_event(times, values, current, baseline))
     saved = None
-    if save_path:
-        path = Path(save_path).expanduser()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", newline="") as fh:
+    if path is not None:
+        with path.open("x", newline="") as fh:
             w = csv.writer(fh)
             w.writerow(["time_s", f"mz{mz}_partial_pressure_torr_n2_equivalent"])
             for t, v in zip(times, values, strict=True):
@@ -799,7 +852,7 @@ def set_filament(
     with rga.t.lock:
         filament_on = rga.emission_ma() > 0
         cdem_on = rga.has_cdem() and rga.cdem_voltage_v() > 10
-        evidence = _pressure_evidence(rga, external_pressure_torr, allow_fresh_tp=filament_on and not cdem_on)
+        evidence = _pressure_evidence(rga, external_pressure_torr, filament_on=filament_on, cdem_on=cdem_on)
         server.check(
             "max_filament_pressure_torr", evidence.torr, f"pressure ({evidence.source}) for filament on"
         )
@@ -838,7 +891,7 @@ def set_cdem(
             )
         filament_on = rga.emission_ma() > 0
         cdem_on = rga.cdem_voltage_v() > 10
-        evidence = _pressure_evidence(rga, external_pressure_torr, allow_fresh_tp=filament_on and not cdem_on)
+        evidence = _pressure_evidence(rga, external_pressure_torr, filament_on=filament_on, cdem_on=cdem_on)
         server.check("max_cdem_pressure_torr", evidence.torr, f"pressure ({evidence.source}) for CDEM on")
         status = rga.set_cdem_voltage(voltage_v)
         return _action_result(
@@ -868,7 +921,7 @@ def degas(
     with rga.t.lock:
         filament_on = rga.emission_ma() > 0
         cdem_on = rga.has_cdem() and rga.cdem_voltage_v() > 10
-        evidence = _pressure_evidence(rga, external_pressure_torr, allow_fresh_tp=filament_on and not cdem_on)
+        evidence = _pressure_evidence(rga, external_pressure_torr, filament_on=filament_on, cdem_on=cdem_on)
         server.check("max_filament_pressure_torr", evidence.torr, f"pressure ({evidence.source}) for degas")
         fil_err = rga.filament_error_byte()
         if fil_err & 0xFE:
@@ -913,9 +966,10 @@ def calibrate(
 
 @mcp.tool(**SAFETY, timeout=90)
 def filament_off() -> ActionResult:
-    """Switch the filament off (FL0), stopping a degas first if one is running. Always allowed."""
+    """Switch the filament off (FL0), stopping a degas first if one is running. Always allowed,
+    and it interrupts a running scan, mass measurement or leak check."""
     rga = server.driver
-    with rga.t.lock:
+    with rga.safety_priority():
         stopped = rga.stop_degas()
         status = rga.status_command("FL0", timeout=60.0, check=False)
         msg = "Filament off." + (" A running degas was aborted." if stopped else "")
@@ -924,9 +978,10 @@ def filament_off() -> ActionResult:
 
 @mcp.tool(**SAFETY, timeout=90)
 def cdem_off() -> ActionResult:
-    """Switch the electron multiplier off (HV0) and return to Faraday-cup detection. Always allowed."""
+    """Switch the electron multiplier off (HV0) and return to Faraday-cup detection. Always
+    allowed, and it interrupts a running scan, mass measurement or leak check."""
     rga = server.driver
-    with rga.t.lock:
+    with rga.safety_priority():
         rga.stop_degas()
         if not rga.has_cdem():
             return _action_result(rga, "cdem_off", 0, "No CDEM installed; nothing to do.")
@@ -934,22 +989,44 @@ def cdem_off() -> ActionResult:
         return _action_result(rga, "cdem_off", status, "CDEM off, Faraday cup active.")
 
 
-@mcp.tool(**SAFETY, timeout=120)
+@mcp.tool(**SAFETY, timeout=180)
 def all_off() -> ActionResult:
     """Put the RGA in a safe state: abort any degas, CDEM off (HV0), filament off (FL0)
-    and quadrupole RF/DC off (MR0). Use when finished, before venting, or if anything looks wrong."""
+    and quadrupole RF/DC off (MR0). Use when finished, before venting, or if anything looks wrong.
+    It interrupts a running scan or leak check, and every step is attempted even if an earlier
+    one fails."""
     rga = server.driver
-    with rga.t.lock:
-        stopped = rga.stop_degas()
-        rga.t.flush_input()
-        statuses = []
-        if rga.has_cdem():
-            statuses.append(rga.status_command("HV0", timeout=60.0, check=False))
-        statuses.append(rga.status_command("FL0", timeout=60.0, check=False))
-        rga.rf_off()
+    with rga.safety_priority():
+        errors: list[str] = []
+        done: list[str] = []
         status = 0
-        for s in statuses:
-            status |= s
+
+        def attempt(label: str, step: Callable[[], object]) -> object:
+            try:
+                result = step()
+            except InstrumentError as exc:
+                errors.append(f"{label}: {exc}")
+                return None
+            done.append(label)
+            return result
+
+        stopped = attempt("abort degas", rga.stop_degas)
+        attempt("clear input", rga.t.flush_input)
+        if attempt("check for a CDEM", rga.has_cdem) is not False:  # unknown -> try HV0 anyway
+            hv = attempt("CDEM off (HV0)", lambda: rga.status_command("HV0", timeout=60.0, check=False))
+            status |= hv if isinstance(hv, int) else 0
+        fl = attempt("filament off (FL0)", lambda: rga.status_command("FL0", timeout=60.0, check=False))
+        status |= fl if isinstance(fl, int) else 0
+        attempt("RF off (MR0)", rga.rf_off)
+        if errors:
+            raise InstrumentError(
+                "all_off did not complete: "
+                + " | ".join(errors)
+                + ". Succeeded: "
+                + (", ".join(done) or "nothing")
+                + ". Check the RGA (power, cable) and switch the "
+                "filament and CDEM off at the RGA if they may still be on; then call `reconnect`."
+            )
         msg = "CDEM, filament and RF are off." + (" A running degas was aborted." if stopped else "")
         if status:
             msg += f" STATUS={status}: call `get_status` for the error details."

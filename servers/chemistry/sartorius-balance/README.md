@@ -76,7 +76,7 @@ Add `--read-only` to allow weighing but block taring, zeroing and adjustment. Fo
 |---|---|---|
 | `max_series_duration_s` | 600 s | Longest weight-logging series an agent may start |
 
-Override at launch: `--limit max_series_duration_s=3600`. No tool of this server moves anything or heats, so there are no hazard tools.
+Override at launch: `--limit max_series_duration_s=3600`. Whatever the limit says, a single series is capped at one hour (the tool's time limit). No tool of this server moves anything or heats, so there are no hazard tools.
 
 ## Example prompts
 

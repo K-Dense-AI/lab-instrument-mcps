@@ -526,3 +526,130 @@ def test_driver_on_real_pymmcore_plus_core():
         scope.autofocus()
     with pytest.raises(InstrumentProtocolError, match="has no preset"):
         scope.set_config("Channel", "Cy5")
+
+
+# ------------------------------------------------------------------ regressions (bug review)
+
+
+def test_resolve_save_path_rejects_folders_and_returns_absolute_paths(tmp_path, monkeypatch):
+    folder = tmp_path / "images.tif"
+    folder.mkdir()
+    with pytest.raises(InstrumentProtocolError, match="is a folder"):
+        resolve_save_path(str(folder), None, "snap", "x")
+    with pytest.raises(InstrumentProtocolError, match=r"\.tif"):
+        resolve_save_path(str(tmp_path / "images"), None, "snap", "x")
+    monkeypatch.chdir(tmp_path)
+    path = resolve_save_path("new/sub/cells.TIFF", None, "snap", "x")
+    assert path.is_absolute() and path.parent.is_dir() and path.name == "cells.TIFF"
+
+
+def test_stop_stages_tries_every_stage_and_reports_failures():
+    scope, core = make_scope()
+
+    def broken():
+        raise RuntimeError("XY adapter crashed")
+
+    core.getXYStageDevice = broken
+    errors: list[str] = []
+    assert scope.stop_stages(errors) == ["Z"]  # Z is still stopped
+    assert core.stops == ["Z"] and scope.abort.is_set()
+    assert "XY adapter crashed" in errors[0]
+
+
+async def test_z_stack_with_tiny_step_is_refused_without_building_the_positions():
+    # Regression: the slice list was built before the max_frames check, so a tiny step over a
+    # normal span allocated ~1e10 positions (hang / out of memory).
+    async with simulated_client(server) as client:
+        with pytest.raises(Exception, match="max_frames"):
+            await client.call_tool("acquire_z_stack", {"start_offset_um": -10, "end_offset_um": 10, "step_um": 1e-9})
+        assert sim_core().snaps == 0
+
+
+def test_z_stack_refuses_non_finite_offsets():
+    from labmcp_micro_manager.server import acquire_z_stack
+
+    server.configure(simulate=True, options={})
+    try:
+        z0 = server.driver.core.z
+        with pytest.raises(InstrumentProtocolError, match="finite"):
+            acquire_z_stack(start_offset_um=float("nan"), end_offset_um=5.0, step_um=1.0)
+        with pytest.raises(InstrumentProtocolError, match="finite"):
+            acquire_z_stack(start_offset_um=-5.0, end_offset_um=float("inf"), step_um=1.0)
+        assert server.driver.core.z == z0 and server.driver.core.snaps == 0
+    finally:
+        server.disconnect()
+
+
+async def test_acquisition_cannot_rotate_the_objective_turret():
+    async with simulated_client(server) as client:
+        with pytest.raises(Exception, match="objective turret"):
+            await client.call_tool("acquire_z_stack", {"start_offset_um": 0, "end_offset_um": 2, "step_um": 1,
+                                                       "channels": ["10x", "40x"], "channel_group": "Objective"})
+        assert sim_core().config["Objective"] == "10x" and sim_core().snaps == 0
+
+
+async def test_bad_save_path_is_refused_before_moving_or_imaging(tmp_path):
+    async with simulated_client(server) as client:
+        z0 = sim_core().z
+        with pytest.raises(Exception, match=r"\.tif"):
+            await client.call_tool("acquire_z_stack", {"start_offset_um": -2, "end_offset_um": 2, "step_um": 1,
+                                                       "save_path": str(tmp_path / "stack.png")})
+        with pytest.raises(Exception, match="is a folder"):
+            folder = tmp_path / "lapse.tif"
+            folder.mkdir()
+            await client.call_tool("acquire_time_lapse", {"timepoints": 2, "interval_s": 0, "save_path": str(folder)})
+        with pytest.raises(Exception, match=r"\.tif"):
+            await client.call_tool("snap_image", {"save_path": str(tmp_path / "snap.jpg")})
+        assert sim_core().z == z0 and sim_core().snaps == 0
+
+
+async def test_acquisition_longer_than_one_tool_call_is_refused():
+    # Regression: default limits allowed 500 frames x 10 s = 5000 s, beyond the 3700 s tool timeout.
+    async with simulated_client(server) as client:
+        await client.call_tool("set_exposure", {"exposure_ms": 10_000})
+        with pytest.raises(Exception, match="one tool call"):
+            await client.call_tool("acquire_time_lapse", {"timepoints": 400, "interval_s": 0})
+        with pytest.raises(Exception, match="one tool call"):
+            await client.call_tool("acquire_z_stack", {"start_offset_um": -50, "end_offset_um": 49.75,
+                                                       "step_um": 0.25})
+        assert sim_core().snaps == 0
+    async with simulated_client(server, limits={"max_acquisition_duration_s": 7200}) as client:
+        with pytest.raises(Exception, match="one tool call"):
+            await client.call_tool("acquire_time_lapse", {"timepoints": 3, "interval_s": 3000})
+
+
+async def test_slow_acquisition_stops_within_the_time_budget(tmp_path, monkeypatch):
+    import time as _time
+
+    from labmcp_micro_manager import server as server_module
+
+    monkeypatch.setattr(server_module, "ACQ_MAX_S", 0.3)
+    monkeypatch.setattr(server_module, "_ACQ_OVERRUN_S", 0.0)
+    async with simulated_client(server) as client:
+        core = sim_core()
+        z0 = core.z
+        real_snap = core.snapImage
+
+        def slow_snap():  # e.g. a slow camera readout the exposure-based estimate cannot see
+            _time.sleep(0.1)
+            real_snap()
+
+        core.snapImage = slow_snap
+        s = (await client.call_tool("acquire_z_stack", {"start_offset_um": -4, "end_offset_um": 4, "step_um": 1,
+                                                        "save_path": str(tmp_path / "s.tif")})).structured_content
+        assert s["aborted"] is True and "one tool call" in s["note"]
+        assert 1 <= s["shape"][0] < 9
+        assert s["returned_to_z_um"] == pytest.approx(z0)
+
+
+async def test_close_shutter_reports_a_failure_but_still_aborts():
+    async with simulated_client(server) as client:
+        core = sim_core()
+
+        def jammed(*args):
+            raise RuntimeError("shutter jammed")
+
+        core.setShutterOpen = jammed
+        with pytest.raises(Exception, match="shutter jammed"):
+            await client.call_tool("close_shutter", {})
+        assert server.driver.abort.is_set()

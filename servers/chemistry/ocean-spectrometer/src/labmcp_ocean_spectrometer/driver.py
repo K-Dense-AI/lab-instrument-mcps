@@ -31,7 +31,10 @@ recently *completed* spectrum.
 from __future__ import annotations
 
 import threading
+import time
 import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -39,7 +42,7 @@ from typing import Any, Literal
 import numpy as np
 from labmcp import AuditLog, InstrumentConnectionError, InstrumentError, InstrumentProtocolError
 
-from labmcp_ocean_spectrometer.analysis import boxcar
+from labmcp_ocean_spectrometer.analysis import boxcar, dilate
 
 SATURATION_FRACTION = 0.98  # raw counts at or above this fraction of max_intensity are saturated
 
@@ -157,6 +160,9 @@ class OceanSpectrometer:
         self.backend = backend
         self.audit = audit
         self.lock = threading.RLock()
+        #: Threads waiting for :meth:`_priority` access; a scan series lets them go first.
+        self._waiting = 0
+        self._waiting_lock = threading.Lock()
         self.wavelengths_nm = np.asarray(
             self._call(spec.wavelengths, what="reading wavelengths"), dtype=float
         )
@@ -200,6 +206,19 @@ class OceanSpectrometer:
                 f"seabreeze error while {what}: {type(exc).__name__}: {exc}"
             ) from exc
 
+    @contextmanager
+    def _priority(self) -> Iterator[None]:
+        """The device lock, taken ahead of a running scan series (which takes the lock per scan
+        and yields to waiting threads between scans; Python locks are not fair)."""
+        with self._waiting_lock:
+            self._waiting += 1
+        try:
+            with self.lock:
+                yield
+        finally:
+            with self._waiting_lock:
+                self._waiting -= 1
+
     def _user_action(self, step: str) -> None:
         """Only the simulator implements this hook (it emulates the scientist blocking the beam
         or inserting a blank/sample). With real hardware the scientist does it."""
@@ -236,10 +255,19 @@ class OceanSpectrometer:
         }
 
     def close(self) -> None:
+        # Wait (bounded) for a scan in progress so the device is not closed under seabreeze's feet.
+        with self._waiting_lock:
+            self._waiting += 1
+        locked = self.lock.acquire(timeout=2 * self.integration_time_ms / 1000.0 + 5.0)
         try:
             self.spec.close()
         except Exception:
             pass
+        finally:
+            if locked:
+                self.lock.release()
+            with self._waiting_lock:
+                self._waiting -= 1
 
     # ------------------------------------------------------------ acquisition
 
@@ -251,7 +279,7 @@ class OceanSpectrometer:
                 f"Integration time {ms:g} ms is outside this spectrometer's range "
                 f"({lo / 1000:g}-{hi / 1000:g} ms). Nothing was sent."
             )
-        with self.lock:
+        with self._priority():
             self._call(self.spec.integration_time_micros, us, what="setting the integration time")
             self.integration_time_ms = us / 1000.0
             self._discard_next = True
@@ -292,8 +320,20 @@ class OceanSpectrometer:
             if self._discard_next:
                 self._raw()  # may contain light integrated with the previous integration time
                 self._discard_next = False
-            raws = [self._raw() for _ in range(scans_to_average)]
             it = self.integration_time_ms
+        # The lock is taken per scan, not for the whole series (up to minutes), so the TEC-off
+        # SAFETY tool, a temperature read or reconnect wait for one scan at most.
+        raws = []
+        for _ in range(scans_to_average):
+            while self._waiting:  # let a TEC/integration-time/close call through first
+                time.sleep(0.001)
+            with self.lock:
+                if self._discard_next or self.integration_time_ms != it:
+                    raise InstrumentProtocolError(
+                        "The integration time was changed during the acquisition; the averaged spectrum "
+                        "would mix two settings. Acquire again."
+                    )
+                raws.append(self._raw())
         self._event(f"intensities() x{scans_to_average} at {it:g} ms")
         stack = np.vstack(raws)
         saturated = (stack >= SATURATION_FRACTION * self.max_intensity).any(axis=0)
@@ -361,7 +401,9 @@ class OceanSpectrometer:
         )
         denom = ref.counts - dark.counts
         valid = denom > max(0.005 * float(np.max(denom)), 1e-12)
-        valid &= ~ref.saturated_mask & ~sample.saturated_mask
+        # With boxcar smoothing a saturated pixel also biases its neighbours within the half width.
+        hw = ref.boxcar_half_width
+        valid &= ~dilate(ref.saturated_mask, hw) & ~dilate(sample.saturated_mask, hw)
         with np.errstate(divide="ignore", invalid="ignore"):
             transmission = (sample.counts - dark.counts) / denom
             if kind == "absorbance":
@@ -379,8 +421,13 @@ class OceanSpectrometer:
         max_iterations: int = 8,
         max_ms: float | None = None,
         window: tuple[float, float] | None = None,
+        time_budget_s: float | None = None,
     ) -> dict[str, Any]:
-        """Iteratively scale the integration time until the raw peak is within the target band."""
+        """Iteratively scale the integration time until the raw peak is within the target band.
+
+        With ``time_budget_s``, stops before an acquisition that would not finish within it
+        (``time_limited`` in the result), so the caller's tool timeout is never hit mid-scan.
+        """
         lo_us, hi_us = self.integration_limits_us
         lo_ms, hi_ms = lo_us / 1000.0, hi_us / 1000.0
         if max_ms is not None:
@@ -392,8 +439,14 @@ class OceanSpectrometer:
                 raise InstrumentProtocolError(f"No pixels between {window[0]:g} and {window[1]:g} nm.")
         target = 0.5 * (target_min + target_max)
         history: list[dict[str, float]] = []
-        converged = False
+        converged = time_limited = False
+        t0 = time.monotonic()
         for _ in range(max_iterations):
+            # the first spectrum after an integration-time change is discarded: two integrations
+            needed = (2 if self._discard_next else 1) * self.integration_time_ms / 1000.0
+            if time_budget_s is not None and time.monotonic() - t0 + needed > time_budget_s:
+                time_limited = True
+                break
             spec = self.acquire()
             peak = float(spec.counts[mask].max())
             fraction = peak / self.max_intensity
@@ -413,7 +466,12 @@ class OceanSpectrometer:
             if abs(new_t - t) < 1e-3:
                 break  # pinned at a limit
             self.set_integration_time_ms(new_t)
-        return {"converged": converged, "integration_time_ms": self.integration_time_ms, "history": history}
+        return {
+            "converged": converged,
+            "integration_time_ms": self.integration_time_ms,
+            "history": history,
+            "time_limited": time_limited,
+        }
 
     # ------------------------------------------------------------ TEC
 
@@ -430,11 +488,12 @@ class OceanSpectrometer:
 
     def tec_temperature_c(self) -> float:
         tec = self._require_tec()
-        return float(self._call(tec.read_temperature_degrees_celsius, what="reading the TEC temperature"))
+        with self._priority():  # seabreeze device access is serialised
+            return float(self._call(tec.read_temperature_degrees_celsius, what="reading the TEC temperature"))
 
     def set_tec(self, enabled: bool, setpoint_c: float | None = None) -> None:
         tec = self._require_tec()
-        with self.lock:
+        with self._priority():
             if setpoint_c is not None:
                 self._call(
                     tec.set_temperature_setpoint_degrees_celsius, setpoint_c, what="setting the TEC setpoint"

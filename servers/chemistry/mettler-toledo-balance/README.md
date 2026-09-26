@@ -84,7 +84,7 @@ Add `--read-only` to allow weighing but block taring, zeroing and door movement.
 |---|---|---|
 | `max_series_duration_s` | 600 s | Longest weight-logging series an agent may start |
 
-Override at launch: `--limit max_series_duration_s=3600`.
+Override at launch: `--limit max_series_duration_s=3600`. Whatever the limit says, a single series is capped at one hour (the tool's time limit).
 
 ## Example prompts
 
@@ -98,6 +98,9 @@ Override at launch: `--limit max_series_duration_s=3600`.
 - `read_weight(stable=True)` sends `S`, which waits for stability. If the balance cannot settle (draughts, vibration), it returns `S I`. The server reports this as an error, so retry or use `stable=false`.
 - Weights are in the balance's **unit 1** (normally grams). Units shown on the display (unit 2) don't affect the interface.
 - Draft-shield (`WS`) and temperature (`M28`) commands exist only on balances with that hardware; other balances answer `ES`/`L`, which the server reports clearly.
+- `run_internal_adjustment` waits for the final `C3 A` without blocking the connection: `reset_balance` aborts a running adjustment, and other commands are refused until it ends (their replies would be mixed up with the result).
+- Before each command the server discards anything the balance sent unasked (e.g. a print-key transmission) and checks that the reply belongs to the command, so one late reply cannot shift every later reply by one.
+- `show_message` accepts printable ASCII only, and `set_tare_preset` only a unit symbol: a line break would otherwise reach the balance as a second MT-SICS command.
 
 ## Hardware verification
 

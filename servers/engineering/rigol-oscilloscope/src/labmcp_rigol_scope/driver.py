@@ -25,6 +25,7 @@ YINCrement and time = (i - XREFerence) x XINCrement + XORigin, with the paramete
 
 from __future__ import annotations
 
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -146,7 +147,15 @@ class Preamble:
             f = [float(p) for p in parts]
         except ValueError as exc:
             raise InstrumentProtocolError(f"Unparseable :WAVeform:PREamble? reply {reply!r}") from exc
+        if not all(math.isfinite(x) for x in f):  # would turn every sample into NaN/inf volts
+            raise InstrumentProtocolError(f"Non-finite value in :WAVeform:PREamble? reply {reply!r}")
         return cls(int(f[0]), int(f[1]), int(f[2]), int(f[3]), f[4], f[5], f[6], f[7], f[8], f[9])
+
+    def same_scaling(self, other: Preamble) -> bool:
+        """True if ``other`` has the same volts scaling and sample interval as this preamble. (XORigin
+        is left out: it may drift in roll mode, and a changed offset only shifts the time axis.)"""
+        keys = ("format", "xincrement", "xreference", "yincrement", "yorigin", "yreference")
+        return all(getattr(self, k) == getattr(other, k) for k in keys)
 
 
 @dataclass
@@ -156,7 +165,7 @@ class Waveform:
     time_s: list[float]
     volts: list[float]
     preamble: Preamble
-    #: Fraction of screen points at the top/bottom code (0 or 255): the trace is off-screen/clipped.
+    #: Fraction of points at the ADC limits (byte code 0 or 255): the signal is clipped there.
     clipped_fraction: float
 
 
@@ -404,12 +413,21 @@ class RigolScope(SCPIDriver):
                             f"Asked for points {start}-{stop} ({stop - start + 1}) but the scope returned {len(chunk)} bytes."
                         )
                     raw += chunk
-        if not raw:
-            raise InstrumentProtocolError("The scope returned no waveform data. Is the channel enabled?")
+            if not raw:
+                raise InstrumentProtocolError("The scope returned no waveform data. Is the channel enabled?")
+            # A front-panel change (V/div, offset, timebase) while the data was read would make the
+            # preamble used for scaling wrong: read it again and refuse mismatched data.
+            after = Preamble.parse(self.query(":WAVeform:PREamble?"))
+        if not preamble.same_scaling(after):
+            raise InstrumentProtocolError(
+                "The scope's vertical or timebase settings changed while the waveform was being read, so it "
+                "cannot be scaled reliably. Nothing was returned; capture again."
+            )
         p = preamble
         volts = [(b - p.yorigin - p.yreference) * p.yincrement for b in raw]
         times = [(i - p.xreference) * p.xincrement + p.xorigin for i in range(len(raw))]
-        clipped = sum(1 for b in raw if b in (0, 255)) / len(raw) if mode == "screen" else 0.0
+        # Codes 0 and 255 are the ADC limits in both screen (NORMal) and memory (RAW) data.
+        clipped = sum(1 for b in raw if b in (0, 255)) / len(raw)
         return Waveform(channel, mode, times, volts, p, clipped)
 
     # ------------------------------------------------------------ screenshot

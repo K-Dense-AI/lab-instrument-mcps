@@ -3,7 +3,7 @@
   "name": "io.github.K-Dense-AI/labmcp-pfeiffer-tpg",
   "title": "Pfeiffer Vacuum Gauge Controller",
   "description": "MCP server for Pfeiffer Vacuum TPG 361/362/366 and TPG 261/262 gauge controllers: read and log press",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "repository": {
     "url": "https://github.com/K-Dense-AI/lab-instrument-mcps",
     "source": "github",
@@ -15,7 +15,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "labmcp-pfeiffer-tpg",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "transport": {
         "type": "stdio"
       },

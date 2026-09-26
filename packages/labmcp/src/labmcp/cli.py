@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 import sys
 from importlib import resources
@@ -113,9 +114,12 @@ def cmd_config(args: argparse.Namespace) -> None:
     entry = {"command": "uvx", "args": server_args}
 
     if args.client == "claude-code":
-        print(f"claude mcp add {key} -- uvx {shlex.join(server_args)}")
+        print(f"claude mcp add {shlex.quote(key)} -- uvx {shlex.join(server_args)}")
     elif args.client == "codex":
-        print(f"[mcp_servers.{key.replace('-', '_')}]")
+        table = key.replace("-", "_")
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", table):  # not a TOML bare key: quote it
+            table = json.dumps(table)
+        print(f"[mcp_servers.{table}]")
         print('command = "uvx"')
         print("args = " + json.dumps(server_args))
     elif args.client == "vscode":
@@ -152,6 +156,12 @@ def main(argv: list[str] | None = None) -> None:
     sp.set_defaults(fn=cmd_config)
 
     args = p.parse_args(argv)
+    # Catalog text has characters such as θ and ≈ that a legacy code page (Windows, when output
+    # is piped or redirected) can't encode; print a replacement instead of crashing.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(errors="replace")
     args.fn(args)
 
 

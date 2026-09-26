@@ -30,6 +30,7 @@ send anything of that shape, so a formatting bug can never become a setpoint.
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 
@@ -391,7 +392,9 @@ class AlicatDevice:
             result = None
             try:
                 parts = self.command(f"FPF {statistic}").split()
-                result = (abs(float(parts[1])), _unit_label(parts[-1]) if len(parts) >= 4 else "")
+                value = abs(float(parts[1]))
+                # A NaN/inf full scale would silently disable the full-scale setpoint check.
+                result = (value, _unit_label(parts[-1]) if len(parts) >= 4 else "") if math.isfinite(value) else None
             except (InstrumentProtocolError, InstrumentTimeout, IndexError, ValueError):
                 result = None
             self._full_scale[statistic] = result

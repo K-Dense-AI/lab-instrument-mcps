@@ -548,3 +548,68 @@ async def test_deactivate_modules_sends_every_command_even_after_a_timeout():
         sent = [c["commandType"] for c in sim.stateless]
         assert "heaterShaker/deactivateHeater" in sent
         assert all(m.get("target") is None for m in sim.attached_modules if "target" in m)
+
+
+# ------------------------------------------------------------------ regressions (bug review)
+
+
+async def _running_run(client, tmp_path) -> str:
+    path = tmp_path / "dilution.py"
+    path.write_text(GOOD_PROTOCOL, encoding="utf-8")
+    fast_sim()
+    pid = (await client.call_tool("upload_protocol", {"path": str(path)})).structured_content["id"]
+    server.driver.backend.command_duration_s = 5.0
+    run = (await client.call_tool("start_run", {"protocol_id": pid, "deck_confirmed": True})).structured_content
+    assert run["status"] == "running"
+    return run["id"]
+
+
+async def test_stop_run_is_sent_even_if_the_status_read_fails(tmp_path):
+    from labmcp import InstrumentTimeout
+
+    async with simulated_client(server) as client:
+        rid = await _running_run(client, tmp_path)
+        drv = server.driver
+        real_run = drv.run
+        calls = {"n": 0}
+
+        def flaky_run(run_id):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise InstrumentTimeout("GET /runs/... timed out")
+            return real_run(run_id)
+
+        drv.run = flaky_run
+        try:
+            stopped = (await client.call_tool("stop_run", {"run_id": rid})).structured_content
+        finally:
+            del drv.run
+        assert stopped["accepted"] is True
+        assert drv.backend.runs[rid].status in {"stop-requested", "stopped"}
+
+
+async def test_stop_run_race_with_a_run_that_just_ended_is_not_an_error(tmp_path):
+    async with simulated_client(server) as client:
+        rid = await _running_run(client, tmp_path)
+        drv = server.driver
+        real_action = drv.run_action
+
+        def ended_meanwhile(run_id, action):
+            drv.backend.runs[run_id].status = "succeeded"  # finished between the status read and the stop
+            return real_action(run_id, action)  # the robot answers 409 RunActionNotAllowed
+
+        drv.run_action = ended_meanwhile
+        try:
+            result = (await client.call_tool("stop_run", {"run_id": rid})).structured_content
+        finally:
+            del drv.run_action
+        assert result["accepted"] is False and result["status"] == "succeeded"
+        assert "already succeeded" in result["message"]
+
+
+async def test_deactivate_modules_reports_unknown_module_ids():
+    async with simulated_client(server) as client:
+        off = (await client.call_tool("deactivate_modules", {"module_ids": ["no-such-module"]})).structured_content
+        assert off["result"] == [{"module_id": "no-such-module", "module_type": "unknown", "commands": [],
+                                  "ok": False, "error": "No attached module has this ID; see list_modules."}]
+        assert server.driver.backend.stateless == []

@@ -7,7 +7,6 @@ import math
 import statistics
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Annotated, Literal
 
 from labmcp import (
@@ -16,9 +15,11 @@ from labmcp import (
     READ,
     SAFETY,
     ConnectContext,
+    InstrumentError,
     InstrumentProtocolError,
     InstrumentServer,
     Limit,
+    prepare_save_path,
 )
 from pydantic import BaseModel, Field
 
@@ -38,7 +39,11 @@ def connect(ctx: ConnectContext) -> TPGController:
         write_termination="\r",
         timeout=2.0,
     )
-    return TPGController(transport, model=model, settle_s=0.0 if ctx.simulate else 0.2)
+    try:
+        return TPGController(transport, model=model, settle_s=0.0 if ctx.simulate else 0.2)
+    except Exception:
+        transport.close()  # don't hold the port open (Windows would refuse the next attempt)
+        raise
 
 
 server = InstrumentServer(
@@ -194,9 +199,16 @@ def get_errors() -> dict[str, object]:
     return {"errors": server.driver.errors(), "timestamp": _now()}
 
 
-@mcp.tool(**READ, timeout=7300)
+#: ``log_pressure_series`` tool timeout; the longest series one call can log is a little shorter.
+_LOG_TIMEOUT_S = 7300
+_LOG_MAX_DURATION_S = 7200
+
+
+@mcp.tool(**READ, timeout=_LOG_TIMEOUT_S)
 def log_pressure_series(
-    duration_s: Annotated[float, Field(gt=0, le=86400, description="How long to log")] = 60,
+    duration_s: Annotated[
+        float, Field(gt=0, le=_LOG_MAX_DURATION_S, description="How long to log (at most 2 h per call)")
+    ] = 60,
     interval_s: Annotated[float, Field(ge=0.2, le=3600, description="Seconds between readings")] = 1.0,
     channels: Annotated[list[int] | None, Field(description="Channels to include (default: all)")] = None,
     max_points: Annotated[int, Field(ge=2, le=2000, description="Points returned per channel")] = 200,
@@ -204,13 +216,16 @@ def log_pressure_series(
 ) -> PressureSeries:
     """Log pressures at a fixed interval (e.g. a pump-down curve, leak-up/rate-of-rise test or
     bake-out). Returns per-channel statistics in log-space plus a downsampled series; the full
-    series can be written to CSV. Bounded by `max_log_duration_s`."""
+    series can be written to a new CSV file (an existing file is never overwritten). Bounded by
+    `max_log_duration_s` and 2 h per call."""
     server.check("max_log_duration_s", duration_s, "logging duration")
     tpg = server.driver
     wanted = channels or list(range(1, tpg.channels + 1))
     for ch in wanted:
         if not 1 <= ch <= tpg.channels:
             raise InstrumentProtocolError(f"The {tpg.spec.model} has channels 1-{tpg.channels}; got {ch}.")
+    # Check the output file first, so a bad path is reported now rather than after the whole log.
+    path = prepare_save_path(save_path, suffixes=(".csv",)) if save_path else None
     started = _now()
     t0 = time.monotonic()
     times: list[float] = []
@@ -253,10 +268,8 @@ def log_pressure_series(
             )
         )
     saved = None
-    if save_path:
-        path = Path(save_path).expanduser()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", newline="") as fh:
+    if path is not None:
+        with path.open("w", newline="", encoding="utf-8") as fh:
             writer = csv.writer(fh)
             writer.writerow(["time_s"] + [f"ch{ch}_{x}" for ch in wanted for x in ("status", "mbar")])
             for t, r in zip(times, rows, strict=True):
@@ -344,7 +357,15 @@ def switch_gauge_off(
     allowed. Note that setpoint relays assigned to this channel may change state."""
     tpg = server.driver
     with tpg.t.lock:
-        if channel > tpg.channels or tpg.sensor_states()[channel - 1] == 0:
+        if channel > tpg.channels:
+            raise InstrumentProtocolError(
+                f"The {tpg.spec.model} has channels 1-{tpg.channels}; got {channel}."
+            )
+        try:
+            switchable = tpg.sensor_states()[channel - 1] != 0
+        except InstrumentError:
+            switchable = True  # the status query failed: still try to switch the gauge off
+        if not switchable:
             raise InstrumentProtocolError(f"Channel {channel} has no gauge that can be switched off.")
         tpg.set_sensor(channel, False)
     return _gauge_info(tpg)

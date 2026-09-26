@@ -7,11 +7,15 @@ import time
 from datetime import datetime, timezone
 from typing import Annotated, Literal
 
-from labmcp import CONTROL, HAZARD, READ, SAFETY, ConnectContext, InstrumentServer, Limit
+from labmcp import CONTROL, HAZARD, READ, SAFETY, ConnectContext, InstrumentServer, Limit, SafetyLimitError
 from pydantic import BaseModel, Field
 
 from labmcp_mettler_toledo.driver import MTSICSBalance, Weight
 from labmcp_mettler_toledo.simulator import MTSICSSimulator
+
+#: A series must finish within its tool timeout, whatever `max_series_duration_s` is raised to.
+HARD_MAX_SERIES_S = 3600.0
+SERIES_TOOL_TIMEOUT_S = 3700.0
 
 
 def connect(ctx: ConnectContext) -> MTSICSBalance:
@@ -86,14 +90,20 @@ def read_weight(
     return _reading(server.driver.weight(stable=stable))
 
 
-@mcp.tool(**READ, timeout=900)
+@mcp.tool(**READ, timeout=SERIES_TOOL_TIMEOUT_S)
 def log_weight_series(
     count: Annotated[int, Field(ge=2, le=1000, description="Number of readings")] = 10,
     interval_s: Annotated[float, Field(ge=0.1, le=600, description="Seconds between readings")] = 1.0,
 ) -> WeightSeries:
     """Record a series of immediate (unfiltered) readings to monitor drift, evaporation,
     moisture uptake or stabilisation. Returns every reading plus summary statistics."""
-    server.check("max_series_duration_s", (count - 1) * interval_s, "series duration")
+    duration = (count - 1) * interval_s
+    server.check("max_series_duration_s", duration, "series duration")
+    if duration > HARD_MAX_SERIES_S:
+        raise SafetyLimitError(
+            f"Refused: a {duration:g} s series cannot run in a single tool call (maximum "
+            f"{HARD_MAX_SERIES_S:g} s). Record several shorter series."
+        )
     readings: list[WeightReading] = []
     t0 = time.monotonic()
     times: list[float] = []

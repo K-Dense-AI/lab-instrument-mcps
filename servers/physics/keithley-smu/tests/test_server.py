@@ -210,6 +210,52 @@ def test_sweep_abort_from_other_thread():
     assert not drv.output_state()
 
 
+def test_abort_before_output_on_keeps_output_off():
+    # output_off can arrive while run_iv_sweep is still configuring; the sweep must not switch
+    # the output on afterwards (the flag used to be cleared inside sweep()).
+    drv, sim = make_driver("2450")
+    drv.configure("voltage", 0.0, 10e-3)
+    turned_on = []
+    original = drv.set_output
+    drv.set_output = lambda on: (turned_on.append(on), original(on))[1]
+    drv.request_abort()
+    data = drv.sweep("voltage", linear_levels(0, 1, 5), clear_abort=False)
+    assert data.aborted and data.readings == []
+    assert True not in turned_on
+    assert not drv.output_state()
+
+
+def test_abort_between_level_and_read_skips_the_read():
+    # 2400: :READ? with the output off sends no reply (error +802). An output_off arriving after
+    # a level change must end the sweep, not leave it waiting 30 s for a reply that never comes.
+    drv, _ = make_driver("2400")
+    drv.configure("voltage", 0.0, 10e-3)
+    calls = {"n": 0}
+    original = drv.set_level
+
+    def level_then_abort(source, level):
+        original(source, level)
+        calls["n"] += 1
+        if calls["n"] == 4:  # first-level set + 3 loop points
+            drv.request_abort()
+
+    drv.set_level = level_then_abort
+    t0 = time.monotonic()
+    data = drv.sweep("voltage", linear_levels(0, 1, 10), delay_s=0)
+    assert time.monotonic() - t0 < 5
+    assert data.aborted and len(data.readings) == 2
+    assert not drv.output_state()
+
+
+def test_sweep_deadline_stops_early_with_output_off():
+    drv, _ = make_driver("2450")
+    drv.configure("voltage", 0.0, 10e-3)
+    data = drv.sweep("voltage", linear_levels(0, 1, 50), delay_s=0.05, deadline=time.monotonic() + 0.3)
+    assert 0 < len(data.readings) < 50
+    assert not data.aborted and "time budget" in data.stop_reason
+    assert not drv.output_state()
+
+
 # ---------------------------------------------------------------- MCP round trip
 
 
@@ -380,3 +426,65 @@ def test_limit_error_type():
     server.configure(simulate=True, limits={"max_voltage_v": 1})
     with pytest.raises(SafetyLimitError):
         server.check("max_voltage_v", 5)
+
+
+async def test_sweep_save_path_is_checked_before_the_output_goes_on(tmp_path):
+    existing = tmp_path / "iv.csv"
+    existing.write_text("keep me", encoding="utf-8")
+    args = {"start": 0, "stop": 1, "points": 5, "compliance": 1e-3, "delay_s": 0}
+    async with simulated_client(server) as client:
+        with pytest.raises(Exception, match="already exists"):
+            await client.call_tool("run_iv_sweep", {**args, "save_path": str(existing)})
+        with pytest.raises(Exception, match=r"must end in \.csv"):
+            await client.call_tool("run_iv_sweep", {**args, "save_path": str(tmp_path / "iv.txt")})
+        log = (await client.call_tool("get_command_log", {"limit": 500})).data
+        assert not any(entry["data"] == ":OUTP ON" for entry in log)  # nothing was energised
+    assert existing.read_text(encoding="utf-8") == "keep me"
+    async with simulated_client(server) as client:
+        nested = tmp_path / "new" / "dir" / "iv.csv"
+        sweep = (
+            await client.call_tool("run_iv_sweep", {**args, "save_path": str(nested)})
+        ).structured_content
+        assert sweep["saved_to"] == str(nested.resolve()) and nested.exists()
+
+
+async def test_sweep_longer_than_the_tool_timeout_is_refused():
+    async with simulated_client(server, limits={"max_sweep_duration_s": 1e6}) as client:
+        with pytest.raises(Exception, match="one call can take"):
+            await client.call_tool(
+                "run_iv_sweep", {"start": 0, "stop": 1, "points": 100, "compliance": 1e-3, "delay_s": 30}
+            )
+        status = (await client.call_tool("get_status", {})).structured_content
+        assert status["output_on"] is False
+
+
+async def test_overflow_readings_are_flagged_not_used():
+    async with simulated_client(server) as client:
+        await client.call_tool("get_connection_info", {})
+        drv = server.driver
+        original = drv.read
+        calls = {"n": 0}
+
+        def sometimes_overflow(source):
+            calls["n"] += 1
+            r = original(source)
+            if calls["n"] == 3:
+                r.current_a = 9.9e37
+            return r
+
+        drv.read = sometimes_overflow
+        sweep = (
+            await client.call_tool(
+                "run_iv_sweep", {"start": 0, "stop": 1, "points": 11, "compliance": 0.01, "delay_s": 0}
+            )
+        ).structured_content
+        assert sweep["overflow_points"] == 1
+        assert sweep["current_a"][2] is None
+        assert sweep["current_max_a"] < 0.01 and sweep["max_abs_power_w"] < 0.01
+        assert sweep["ohmic_fit"]["resistance_ohm"] == pytest.approx(1000, rel=1e-3)
+        await client.call_tool("configure_source", {"source": "voltage", "level": 1.0, "compliance": 0.01})
+        await client.call_tool("output_on", {})
+        drv.read = lambda source: type(original(source))(voltage_v=1.0, current_a=9.9e37, in_compliance=False)
+        with pytest.raises(Exception, match="overflow"):
+            await client.call_tool("measure", {})
+        await client.call_tool("output_off", {})

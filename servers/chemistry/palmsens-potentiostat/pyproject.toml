@@ -1,13 +1,13 @@
 [project]
 name = "labmcp-palmsens"
-version = "0.1.1"
+version = "0.1.2"
 description = "MCP server for PalmSens potentiostats running MethodSCRIPT (EmStat Pico, EmStat4, Sensit, Nexus): CV, LSV, DPV, chronoamperometry, raw scripts."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [{ name = "K-Dense and LabMCP contributors" }]
 keywords = ["mcp", "lab-instrument", "potentiostat", "electrochemistry", "palmsens", "emstat", "methodscript", "cyclic-voltammetry"]
-dependencies = ["labmcp>=0.1,<0.2"]
+dependencies = ["labmcp>=0.1.2,<0.2"]
 
 [project.scripts]
 labmcp-palmsens = "labmcp_palmsens.server:main"

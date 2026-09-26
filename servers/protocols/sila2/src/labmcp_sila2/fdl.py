@@ -27,6 +27,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
+from xml.parsers import expat
 
 NS = "{http://www.sila-standard.org}"
 INT64 = (-(2**63), 2**63 - 1)
@@ -186,9 +187,32 @@ def _parse_constraints(node: ET.Element | None) -> dict[str, Any]:
     return out
 
 
+def _refuse_dtd(data: bytes) -> None:
+    """Refuse XML with a DOCTYPE or entity declarations before ElementTree expands anything.
+
+    The FDL comes from the (possibly misconfigured or hostile) SiLA server. FeatureDefinition.xsd never
+    uses a DTD, so any DOCTYPE is refused: that blocks entity-expansion attacks ("billion laughs",
+    quadratic blow-up) even with an old libexpat that lacks its own amplification limits.
+    """
+
+    def forbid(*_args: Any) -> None:
+        raise ValueError("Feature Definition contains a DOCTYPE/entity declaration, which SiLA FDL never uses; "
+                         "refused (XML entity expansion)")
+
+    parser = expat.ParserCreate()
+    parser.StartDoctypeDeclHandler = forbid
+    parser.EntityDeclHandler = forbid
+    try:
+        parser.Parse(data, True)
+    except expat.ExpatError as exc:
+        raise ValueError(f"Feature Definition is not well-formed XML: {exc}") from exc
+
+
 def parse_feature(xml: str) -> FeatureIR:
     """Parse a Feature Definition (the XML string returned by SiLAService.GetFeatureDefinition)."""
-    root = ET.fromstring(xml.encode("utf-8") if isinstance(xml, str) else xml)
+    data = xml.encode("utf-8") if isinstance(xml, str) else xml
+    _refuse_dtd(data)
+    root = ET.fromstring(data)
     if root.tag != NS + "Feature":
         raise ValueError(f"Not a SiLA Feature Definition (root element {root.tag!r})")
     ident = _t(root, "Identifier")
@@ -457,9 +481,13 @@ class Converter:
         if basic == "Real":
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise FDLValidationError(f"{path}: expected a number, got {value!r}")
-            if not math.isfinite(float(value)):
+            try:
+                real = float(value)
+            except OverflowError as exc:  # an integer too large for a double
+                raise FDLValidationError(f"{path}: {value!r} is too large for a SiLA Real") from exc
+            if not math.isfinite(real):
                 raise FDLValidationError(f"{path}: {value!r} is not a finite number")
-            return float(value)
+            return real
         if basic == "Boolean":
             if not isinstance(value, bool):
                 raise FDLValidationError(f"{path}: expected true or false, got {value!r}")
@@ -578,10 +606,20 @@ class Converter:
             self.warnings.append(f"{path}: Schema/ContentType constraints are checked by the server, not locally.")
 
     def _parse_bound(self, text: str, basic: str | None, path: str) -> Any:
-        if basic == "Integer":
-            return int(text)
-        if basic == "Real":
-            return float(text)
+        """A constraint bound from the FDL. One that can't be parsed refuses the value (fail closed)."""
+        if basic in {"Integer", "Real"}:
+            try:
+                bound: float | int = int(text) if basic == "Integer" else float(text)
+            except ValueError:
+                try:
+                    bound = float(text)  # e.g. "10.0" or "1e3" as an Integer bound
+                except ValueError:
+                    bound = math.nan
+            if isinstance(bound, float) and math.isnan(bound):
+                raise FDLValidationError(
+                    f"{path}: the server's constraint bound {text!r} is not a number, so the value can't be checked"
+                )
+            return bound
         if basic in {"Date", "Time", "Timestamp"}:
             return self._basic(text, basic, path + " (constraint)")
         return text

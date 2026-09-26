@@ -8,10 +8,12 @@ IAPI members used and where each was verified.
 from __future__ import annotations
 
 import csv
+import logging
+import re
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from labmcp import (
@@ -19,18 +21,24 @@ from labmcp import (
     READ,
     SAFETY,
     ConnectContext,
+    InstrumentError,
     InstrumentProtocolError,
     InstrumentServer,
     Limit,
+    prepare_save_path,
 )
 from pydantic import BaseModel, Field
 
 from labmcp_thermo_iapi.backend import OrbitrapBackend, ScanRecord
-from labmcp_thermo_iapi.driver import OrbitrapDriver, parse_selection, summarize_scan
+from labmcp_thermo_iapi.driver import OrbitrapDriver, SlidingWindow, parse_selection, summarize_scan
 from labmcp_thermo_iapi.pythonnet_backend import PythonNetBackend
 from labmcp_thermo_iapi.simulator import MODELS, FakeOrbitrap
 
 _TRUE = {"1", "true", "yes", "on"}
+
+#: Custom scans placed in the last 60 s. Process-wide rather than per connection, so that
+#: `reconnect` does not reset the `max_custom_scans_per_minute` rate limit.
+custom_scan_window = SlidingWindow(60.0)
 
 
 def _float_option(ctx: ConnectContext, name: str, default: float) -> float:
@@ -64,7 +72,9 @@ def connect(ctx: ConnectContext) -> OrbitrapDriver:
             connect_timeout_s=_float_option(ctx, "connect_timeout_s", 10.0),
         )
     try:
-        return OrbitrapDriver(backend, audit=ctx.audit, buffer_size=buffer_size)
+        return OrbitrapDriver(
+            backend, audit=ctx.audit, buffer_size=buffer_size, custom_scan_window=custom_scan_window
+        )
     except Exception:
         try:
             backend.close()
@@ -97,7 +107,7 @@ Ascend, Exploris 240/480, Q Exactive family) through Thermo's licensed Instrumen
     limits=[
         Limit("max_custom_scans_per_minute", 60, "scans/min", "Custom scans an agent may place per minute"),
         Limit("max_injection_time_ms", 1000, "ms", "Largest maximum injection time (MaxIT) in a scan"),
-        Limit("max_acquisition_duration_s", 7200, "s", "Longest time-limited acquisition an agent may start"),
+        Limit("max_acquisition_duration_s", 7200, "s", "Longest acquisition an agent may start (other modes are stopped after it)"),
     ],
     address_help="""\
   (not used)   IAPI talks to the instrument software (Tune) on this Windows PC; select the
@@ -307,7 +317,10 @@ def _build_values(
         )
     lower = {k.lower(): v for k, v in values.items()}
     if "maxit" in lower:
-        server.check("max_injection_time_ms", _as_float(lower["maxit"]), "maximum injection time")
+        # Every element of a multi-valued MaxIT ("50;120") is checked; "-1" means the default.
+        for part in re.split(r"[;,]", lower["maxit"]):
+            if part.strip() != "-1":
+                server.check("max_injection_time_ms", _as_float(part), "maximum injection time")
     validated = driver.validate(values)
     lo, hi = lower.get("firstmass"), lower.get("lastmass")
     if lo is not None and hi is not None and _as_float(lo) >= _as_float(hi):
@@ -390,21 +403,21 @@ def get_recent_scans(
     max_centroids: MaxCentroids = 20,
     include_header_trailer: Annotated[bool, Field(description="Include the raw header and trailer")] = False,
     save_path: Annotated[
-        str | None, Field(description="Optional .csv path: write all kept centroids of the returned scans")
+        str | None,
+        Field(
+            description="Optional .csv path (must not exist yet): write all kept centroids of the returned scans"
+        ),
     ] = None,
 ) -> RecentScans:
     """Return the most recent scans received from the instrument (oldest first), optionally
     only one MS order or one custom scan's access id: scan number, MS order, precursor m/z,
     AGC target, injection time and the most intense centroids. Scans only arrive in On mode."""
+    path = prepare_save_path(save_path, suffixes=(".csv",)) if save_path else None
     driver = server.driver
     recs = driver.recent_scans(count, ms_order=ms_order, access_id=access_id)
     saved = None
-    if save_path:
-        path = Path(save_path).expanduser()
-        if path.suffix.lower() != ".csv":
-            raise InstrumentProtocolError("save_path must end in .csv")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", newline="", encoding="utf-8") as fh:
+    if path is not None:
+        with path.open("x", newline="", encoding="utf-8") as fh:
             w = csv.writer(fh)
             w.writerow(["sequence", "scan_number", "ms_order", "precursor_mz", "mz", "intensity", "charge"])
             for r in recs:
@@ -441,8 +454,9 @@ def wait_for_scan(
     include_header_trailer: Annotated[bool, Field(description="Include the raw header and trailer")] = False,
 ) -> WaitResult:
     """Wait for the next scan that arrives after this call (optionally of one MS order, or the
-    result of a custom scan by its access id) and return it. Returns found=false after
-    timeout_s if nothing matching arrived (e.g. the instrument is in Standby)."""
+    result of a custom scan by its access id) and return it. For a custom scan placed with
+    submit_custom_scan, a result that arrived since it was placed is returned at once. Returns
+    found=false after timeout_s if nothing matching arrived (e.g. the instrument is in Standby)."""
     t0 = time.monotonic()
     rec = server.driver.wait_for_scan(timeout_s, ms_order=ms_order, access_id=access_id)
     waited = round(time.monotonic() - t0, 3)
@@ -457,6 +471,50 @@ def wait_for_scan(
     return WaitResult(
         found=True, waited_s=waited, scan=_summary(rec, max_centroids, include_header_trailer), message="ok"
     )
+
+
+class AcquisitionWatchdog:
+    """Cancels an acquisition that has no time limit of its own (scan_count, until_stopped) once
+    max_acquisition_duration_s of wall-clock time has passed, pauses included. Each start
+    re-arms it and stop_acquisition disarms it; a timer left over from an earlier acquisition
+    never stops a newer one."""
+
+    def __init__(self, stop: Callable[[], None]) -> None:
+        self._stop = stop
+        self._lock = threading.Lock()
+        self._timer: threading.Timer | None = None
+        self._generation = 0
+
+    def arm(self, seconds: float) -> None:
+        with self._lock:
+            self._disarm_locked()
+            timer = threading.Timer(seconds, self._fire, args=(self._generation,))
+            timer.daemon = True
+            self._timer = timer
+            timer.start()
+
+    def disarm(self) -> None:
+        with self._lock:
+            self._disarm_locked()
+
+    def _disarm_locked(self) -> None:
+        self._generation += 1
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+
+    def _fire(self, generation: int) -> None:
+        with self._lock:
+            if generation != self._generation:
+                return
+            self._timer = None
+        try:
+            self._stop()
+        except Exception:  # nothing to report to; the instrument may already have stopped
+            logging.getLogger(__name__).exception("Watchdog could not cancel the acquisition")
+
+
+acquisition_watchdog = AcquisitionWatchdog(lambda: server.driver.cancel_acquisition())
 
 
 @mcp.tool(**HAZARD)
@@ -476,7 +534,8 @@ def start_acquisition(
 ) -> str:
     """Start an acquisition with the instrument's current settings (IAPI StartAcquisition),
     recording to a raw file. This consumes sample. The instrument must be On; an acquisition
-    must not already be running. Stop it with stop_acquisition."""
+    must not already be running. Stop it with stop_acquisition. scan_count and until_stopped
+    acquisitions are cancelled automatically after max_acquisition_duration_s."""
     if mode == "duration":
         if duration_s is None:
             raise InstrumentProtocolError("mode=duration needs duration_s.")
@@ -493,13 +552,25 @@ def start_acquisition(
         sample_name=sample_name,
         comment=comment,
     )
-    what = {
-        "duration": f"for {duration_s:g} s",
-        "scan_count": f"for {scan_count} scans",
-        "until_stopped": "until stopped",
-    }
+    # Built only for the chosen mode: formatting duration_s (None) for another mode raised after
+    # the acquisition had started, so a running acquisition was reported as a failure.
+    if mode == "duration":
+        what = f"for {duration_s:g} s"
+    elif mode == "scan_count":
+        what = f"for {scan_count} scans"
+    else:
+        what = "until stopped"
     target = f" to {raw_file_path}" if raw_file_path else ""
-    return f"Acquisition started {what[mode]}{target}."
+    if mode == "duration":
+        acquisition_watchdog.disarm()
+        return f"Acquisition started {what}{target}."
+    # Only a duration is bounded by the instrument itself: keep the limit meaningful for the rest.
+    limit_s = server.limits["max_acquisition_duration_s"]
+    acquisition_watchdog.arm(limit_s)
+    return (
+        f"Acquisition started {what}{target}. It will be cancelled automatically after {limit_s:g} s "
+        "(max_acquisition_duration_s) if it is still running."
+    )
 
 
 @mcp.tool(**SAFETY)
@@ -525,18 +596,42 @@ def stop_acquisition(
 ) -> str:
     """Stop the running acquisition (IAPI CancelAcquisition), by default also cancelling custom
     and repeating scans, and optionally switch the instrument to Standby (switch back to On in
-    Tune)."""
+    Tune). Every step is attempted even if an earlier one fails; failures are reported."""
     driver = server.driver
-    driver.cancel_acquisition()
-    done = ["Acquisition cancelled"]
+    done: list[str] = []
+    failed: list[str] = []
+
+    def attempt(label: str, step: Any) -> None:
+        try:
+            sent = step()
+        except InstrumentError as exc:
+            failed.append(f"{label}: {exc}")
+            return
+        except Exception as exc:  # a backend error that was not translated
+            failed.append(f"{label}: {type(exc).__name__}: {exc}")
+            return
+        if sent is False:
+            failed.append(f"{label}: IAPI reports the request could not be sent to the instrument")
+        else:
+            done.append(label)
+
+    acquisition_watchdog.disarm()
+    attempt("acquisition cancelled", driver.cancel_acquisition)
     if cancel_scans:
-        driver.cancel_custom_scan()
-        driver.cancel_repeating_scan()
-        done.append("custom and repeating scans cancelled")
+        attempt("custom scans cancelled", driver.cancel_custom_scan)
+        attempt("repeating scan cancelled", driver.cancel_repeating_scan)
     if standby:
-        driver.set_standby()
-        done.append("instrument set to Standby (switch it back to On in Tune)")
-    return "; ".join(done) + "."
+        attempt("instrument set to Standby (switch it back to On in Tune)", driver.set_standby)
+    if failed:
+        raise InstrumentError(
+            "stop_acquisition did not complete: "
+            + " | ".join(failed)
+            + ". Done: "
+            + ("; ".join(done) or "nothing")
+            + ". Stop the acquisition in Tune / Xcalibur if it is still running."
+        )
+    message = "; ".join(done)
+    return message[0].upper() + message[1:] + "."
 
 
 @mcp.tool(**SAFETY)

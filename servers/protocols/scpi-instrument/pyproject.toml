@@ -1,13 +1,13 @@
 [project]
 name = "labmcp-scpi"
-version = "0.1.1"
+version = "0.1.2"
 description = "Generic MCP server for any IEEE 488.2 / SCPI instrument (DMMs, scopes, SMUs, PSUs, generators, analyzers) over VISA, TCP socket or serial, with command allow/deny lists."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [{ name = "K-Dense and LabMCP contributors" }]
 keywords = ["mcp", "lab-instrument", "scpi", "ieee-488.2", "visa", "gpib", "usbtmc", "lxi", "oscilloscope", "multimeter", "power-supply"]
-dependencies = ["labmcp[visa]>=0.1,<0.2"]
+dependencies = ["labmcp[visa]>=0.1.2,<0.2"]
 
 [project.scripts]
 labmcp-scpi = "labmcp_scpi.server:main"

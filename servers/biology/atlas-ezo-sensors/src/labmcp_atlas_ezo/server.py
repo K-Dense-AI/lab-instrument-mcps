@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import csv
+import math
 import statistics
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Annotated
 
 from labmcp import (
@@ -17,6 +17,7 @@ from labmcp import (
     InstrumentProtocolError,
     InstrumentServer,
     Limit,
+    prepare_save_path,
 )
 from pydantic import BaseModel, Field
 
@@ -30,6 +31,10 @@ from labmcp_atlas_ezo.driver import (
     Reading,
 )
 from labmcp_atlas_ezo.simulator import EZOSimulator
+
+#: One `log_series` call must finish inside its tool timeout, whatever `max_series_duration_s` says.
+HARD_MAX_SERIES_S = 3600.0
+SERIES_TOOL_TIMEOUT_S = 3900.0  # series + up to 1000 readings of ~1-3 s that may lag the schedule
 
 
 def connect(ctx: ConnectContext) -> EZOCircuit:
@@ -290,6 +295,8 @@ def _validate_calibration(c: EZOCircuit, point: str, value: float | None) -> Non
         raise InstrumentProtocolError(f"Calibration point {point!r} takes no value; omit `value`.")
     if value is None:
         return
+    if not math.isfinite(value):
+        raise InstrumentProtocolError(f"Refused: calibration value {value!r} is not a finite number.")
     ranges: dict[tuple[str, str], tuple[float, float, str]] = {
         ("PH", "mid"): (6.0, 8.0, "pH (use a pH 7 buffer)"),
         ("PH", "low"): (0.0, 6.5, "pH (use an acidic buffer, e.g. pH 4)"),
@@ -423,16 +430,25 @@ def set_led(on: Annotated[bool, Field(description="True = LED on (default), Fals
     return c.led()
 
 
-@mcp.tool(**READ, timeout=900)
+@mcp.tool(**READ, timeout=SERIES_TOOL_TIMEOUT_S)
 def log_series(
     count: Annotated[int, Field(ge=2, le=1000, description="Number of readings")] = 10,
     interval_s: Annotated[float, Field(ge=1.0, le=600, description="Seconds between readings (>= 1)")] = 2.0,
-    save_path: Annotated[str | None, Field(description="Optional CSV path for the full series")] = None,
+    save_path: Annotated[
+        str | None, Field(description="Optional new .csv file for the full series (never overwritten)")
+    ] = None,
 ) -> SensorSeries:
     """Record a series of readings (e.g. to watch a probe stabilise before calibrating, follow pH
     or DO in a bioreactor, or log temperature). Returns every point plus mean, stdev, min, max
     and drift per minute for each output."""
-    server.check("max_series_duration_s", (count - 1) * interval_s, "series duration")
+    duration = (count - 1) * interval_s
+    server.check("max_series_duration_s", duration, "series duration")
+    if duration > HARD_MAX_SERIES_S:
+        raise InstrumentProtocolError(
+            f"A {duration:g} s series cannot run in a single tool call (maximum {HARD_MAX_SERIES_S:g} s). "
+            "Split it into several log_series calls."
+        )
+    path = prepare_save_path(save_path, suffixes=(".csv",)) if save_path else None  # before any reading
     c = server.driver
     t0 = time.monotonic()
     points: list[SeriesPoint] = []
@@ -458,10 +474,9 @@ def log_series(
         stats.append(SeriesStats(name=name, unit=unit, mean=vbar, stdev=statistics.stdev(vs) if len(vs) > 1 else None,
                                  minimum=min(vs), maximum=max(vs), drift_per_min=slope * 60.0))
     saved = None
-    if save_path:
-        path = Path(save_path).expanduser()
+    if path is not None:
         names = list(units)
-        with path.open("w", newline="") as fh:
+        with path.open("w", newline="", encoding="utf-8") as fh:
             writer = csv.writer(fh)
             writer.writerow(["timestamp", "t_s"] + [f"{n} ({units[n]})" if units[n] else n for n in names])
             for stamp, p in zip(stamps, points, strict=True):

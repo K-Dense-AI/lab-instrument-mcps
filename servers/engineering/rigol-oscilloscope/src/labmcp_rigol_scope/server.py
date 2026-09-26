@@ -12,7 +12,7 @@ from typing import Annotated, Literal
 
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image
-from labmcp import CONTROL, READ, ConnectContext, InstrumentServer, Limit
+from labmcp import CONTROL, READ, ConnectContext, InstrumentServer, Limit, prepare_save_path
 from mcp.types import TextContent
 from pydantic import BaseModel, Field
 
@@ -54,8 +54,8 @@ Controls a Rigol digital oscilloscope (DS1000Z/MSO1000Z, DS1000Z-E, MSO5000, DHO
   (e.g. less than one period on screen, or the trace is clipped).
 - `capture_waveform` mode='screen' reads the displayed points (fast); mode='memory' reads the full
   acquisition memory and needs the scope stopped (`stop` or `single` first).
-- Screen data that sits at the top/bottom of the display is clipped (`clipped_fraction` > 0): adjust
-  the vertical scale/offset before trusting amplitudes.
+- Waveform points at the ADC limits are clipped (`clipped_fraction` > 0, in either mode): adjust the
+  vertical scale/offset before trusting amplitudes.
 - This server never drives the scope's built-in signal generator (if any).
 """,
     limits=[
@@ -165,12 +165,34 @@ class WaveformResult(BaseModel):
     sample_interval_s: float
     start_time_s: float = Field(description="Time of the first point relative to the trigger")
     stats: WaveformStats
-    clipped_fraction: float = Field(description="Fraction of screen points pinned at the top/bottom of the display")
+    clipped_fraction: float = Field(
+        description="Fraction of points at the ADC limits (byte code 0 or 255): the trace is clipped, amplitudes are wrong"
+    )
     time_s: list[float]
-    volts: list[float]
-    downsample_factor: int
+    volts: list[float] = Field(
+        description="Downsampled trace: each block of downsample_factor points keeps its minimum and maximum sample "
+        "(with their exact times), so glitches are not lost"
+    )
+    downsample_factor: int = Field(description="Points per min/max pair (1 = every point returned)")
     saved_to: str | None
     timestamp: str
+
+
+def _downsample(times: list[float], volts: list[float], max_points: int) -> tuple[list[float], list[float], int]:
+    """At most ``max_points`` points that keep each block's minimum and maximum sample (in time order,
+    at their own times). Plain striding would drop a narrow glitch."""
+    n = len(volts)
+    if n <= max_points:
+        return list(times), list(volts), 1
+    size = math.ceil(n / (max_points // 2))
+    idx: list[int] = []
+    for start in range(0, n, size):
+        block = range(start, min(start + size, n))
+        lo, hi = min(block, key=volts.__getitem__), max(block, key=volts.__getitem__)
+        if lo == hi:  # flat block (or a single point): its ends carry the same value
+            lo, hi = block[0], block[-1]
+        idx += sorted({lo, hi})
+    return [times[i] for i in idx], [volts[i] for i in idx], size
 
 
 # ------------------------------------------------------------------ tools
@@ -337,18 +359,24 @@ def capture_waveform(
         Field(description="'screen' = the displayed points (1000-1200); 'memory' = full acquisition memory (scope must be stopped)"),
     ] = "screen",
     max_points: Annotated[int, Field(ge=10, le=20_000, description="Max points returned (the data is downsampled)")] = 500,
-    save_path: Annotated[str | None, Field(description="Write every point (time_s, volts) to this CSV file")] = None,
+    save_path: Annotated[
+        str | None, Field(description="Write every point (time_s, volts) to this new .csv file (never overwritten)")
+    ] = None,
 ) -> WaveformResult:
     """Capture a channel's waveform, scaled to volts and seconds with the scope's waveform preamble,
     and return statistics plus a downsampled trace; optionally save all points to CSV.
 
     'memory' mode reads the whole record (bounded by the `max_memory_points` limit) in batches and
     requires the scope to be stopped; 'screen' works while running."""
+    target = prepare_save_path(save_path, suffixes=(".csv",)) if save_path else None
     d = server.driver
-    pre = d.prepare_capture(channel, mode)
-    if mode == "memory":
-        server.check("max_memory_points", pre.points, "memory capture")
-    w = d.read_capture(channel, pre, mode)
+    # One lock over source selection, preamble and data: a concurrent call must not switch
+    # :WAVeform:SOURce (or RUN the scope) between them, or the data is scaled with another preamble.
+    with d.t.lock:
+        pre = d.prepare_capture(channel, mode)
+        if mode == "memory":
+            server.check("max_memory_points", pre.points, "memory capture")
+        w = d.read_capture(channel, pre, mode)
     v = w.volts
     n = len(v)
     mean = sum(v) / n
@@ -361,15 +389,13 @@ def capture_waveform(
         std_v=math.sqrt(sum((x - mean) ** 2 for x in v) / (n - 1)) if n > 1 else 0.0,
     )
     saved = None
-    if save_path:
-        target = Path(save_path).expanduser().resolve()
-        target.parent.mkdir(parents=True, exist_ok=True)
+    if target is not None:
         with target.open("w", newline="", encoding="utf-8") as fh:
             writer = csv.writer(fh)
             writer.writerow(["time_s", f"ch{channel}_v"])
             writer.writerows(zip(w.time_s, v, strict=True))
         saved = str(target)
-    step = max(1, math.ceil(n / max_points))
+    t_out, v_out, factor = _downsample(w.time_s, v, max_points)
     return WaveformResult(
         channel=channel,
         mode=mode,
@@ -378,9 +404,9 @@ def capture_waveform(
         start_time_s=w.time_s[0],
         stats=stats,
         clipped_fraction=w.clipped_fraction,
-        time_s=w.time_s[::step],
-        volts=v[::step],
-        downsample_factor=step,
+        time_s=t_out,
+        volts=v_out,
+        downsample_factor=factor,
         saved_to=saved,
         timestamp=_now(),
     )
@@ -389,20 +415,22 @@ def capture_waveform(
 @mcp.tool(**READ, timeout=60)
 def screenshot(
     save_path: Annotated[
-        str | None, Field(description="Image file to write; default: a timestamped file in the system temp folder")
+        str | None,
+        Field(description="New image file to write (.png; .bmp on the MSO5000; never overwritten); default: a "
+                          "timestamped file in the system temp folder"),
     ] = None,
     include_image: Annotated[bool, Field(description="Also return the image to the client (PNG only)")] = True,
 ) -> ToolResult:
     """Save a screenshot of the oscilloscope display (PNG; BMP on the MSO5000) and return its path.
     For PNG screenshots the image is also returned so the model can look at the screen."""
-    data, fmt = server.driver.screenshot()
+    d = server.driver
+    fmt = d.profile.screenshot_format
     if save_path:
-        target = Path(save_path).expanduser()
+        target = prepare_save_path(save_path, suffixes=(f".{fmt}",))
     else:
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-        target = Path(tempfile.gettempdir()) / "labmcp-rigol" / f"screenshot-{stamp}.{fmt}"
-    target = target.resolve()
-    target.parent.mkdir(parents=True, exist_ok=True)
+        target = prepare_save_path(Path(tempfile.gettempdir()) / "labmcp-rigol" / f"screenshot-{stamp}.{fmt}", suffixes=(f".{fmt}",))
+    data, fmt = d.screenshot()
     target.write_bytes(data)
     info = {"path": str(target), "format": fmt, "size_bytes": len(data), "timestamp": _now()}
     content: list = [TextContent(type="text", text=json.dumps(info))]

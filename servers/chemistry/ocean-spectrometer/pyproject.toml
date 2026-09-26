@@ -1,13 +1,13 @@
 [project]
 name = "labmcp-ocean-spectrometer"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP server for Ocean Insight / Ocean Optics spectrometers (python-seabreeze): acquire spectra, auto integration time, dark/reference, absorbance and transmittance, peak finding."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [{ name = "K-Dense and LabMCP contributors" }]
 keywords = ["mcp", "lab-instrument", "spectrometer", "ocean-insight", "ocean-optics", "seabreeze", "uv-vis", "absorbance", "spectroscopy"]
-dependencies = ["labmcp>=0.1,<0.2", "numpy>=1.21", "seabreeze[pyseabreeze]>=2.9"]
+dependencies = ["labmcp>=0.1.2,<0.2", "numpy>=1.21", "seabreeze[pyseabreeze]>=2.9"]
 
 [project.scripts]
 labmcp-ocean-spectrometer = "labmcp_ocean_spectrometer.server:main"

@@ -1,13 +1,13 @@
 [project]
 name = "labmcp-keithley-smu"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP server for Keithley SourceMeter SMUs (2400 series SCPI, 2450 family SCPI, 2600B TSP): source V or I with compliance, measure, bounded IV sweeps that always end with the output off."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [{ name = "K-Dense and LabMCP contributors" }]
 keywords = ["mcp", "lab-instrument", "smu", "source-measure-unit", "keithley", "tektronix", "iv-curve", "scpi", "tsp"]
-dependencies = ["labmcp[visa]>=0.1,<0.2"]
+dependencies = ["labmcp[visa]>=0.1.2,<0.2"]
 
 [project.scripts]
 labmcp-keithley-smu = "labmcp_keithley_smu.server:main"

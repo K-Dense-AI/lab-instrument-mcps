@@ -37,6 +37,9 @@ from labmcp_opentrons.driver import (
 from labmcp_opentrons.simulator import FakeOpentronsRobot
 
 MAX_PROTOCOL_BYTES = 10_000_000
+#: Wait per module-deactivate command; the tool timeout covers ~8 modules of 2 commands each even if
+#: every wait (+15 s HTTP margin) runs out.
+DEACTIVATE_WAIT_S = 20.0
 
 
 def connect(ctx: ConnectContext) -> OpentronsRobot:
@@ -458,6 +461,15 @@ def _run_status(run_id: str, recent: int = 5) -> RunStatus:
     )
 
 
+def _run_status_or_none(run_id: str) -> str | None:
+    """The run's status, or None if it cannot be read (used by the SAFETY tools, which must not
+    give up just because a status read failed)."""
+    try:
+        return server.driver.run(run_id).get("status")
+    except InstrumentError:
+        return None
+
+
 def _robot_blockers(check_runs: bool = True) -> list[str]:
     """Reasons the robot cannot start moving right now."""
     drv = server.driver
@@ -577,7 +589,7 @@ def set_lights(on: Annotated[bool, Field(description="True to turn the deck ligh
     return f"Deck lights {'on' if state else 'off'}."
 
 
-@mcp.tool(**HAZARD, timeout=200)
+@mcp.tool(**HAZARD, timeout=240)
 def home_robot() -> str:
     """Home all axes of the robot (the gantry and pipettes move to their home positions). Refused
     while a run is active. Make sure nothing is in the robot's path and the door is closed."""
@@ -588,7 +600,7 @@ def home_robot() -> str:
     return "Robot homed."
 
 
-@mcp.tool(**SAFETY, timeout=120)
+@mcp.tool(**SAFETY, timeout=600)
 def deactivate_modules(
     module_ids: Annotated[
         list[str] | None, Field(description="Module IDs from list_modules; omit to switch off all modules")
@@ -599,8 +611,14 @@ def deactivate_modules(
     no run is in progress: stop the run first."""
     drv = server.driver
     results: list[ModuleDeactivation] = []
-    for mod in drv.modules():
-        if module_ids and mod["id"] not in module_ids:
+    attached = drv.modules()
+    known = {mod.get("id") for mod in attached}
+    for mid in module_ids or []:
+        if mid not in known:  # never report "done" for a module that was not switched off
+            results.append(ModuleDeactivation(module_id=mid, module_type="unknown", commands=[], ok=False,
+                                              error="No attached module has this ID; see list_modules."))
+    for mod in attached:
+        if module_ids and mod.get("id") not in module_ids:
             continue
         mtype = str(mod.get("moduleType"))
         commands = DEACTIVATE_COMMANDS.get(mtype, [])
@@ -612,7 +630,7 @@ def deactivate_modules(
         errors: list[str] = []
         for ctype in commands:
             try:
-                drv.stateless_command(ctype, {"moduleId": mod["id"]}, timeout_s=30)
+                drv.stateless_command(ctype, {"moduleId": mod["id"]}, timeout_s=DEACTIVATE_WAIT_S)
             except RobotHTTPError as exc:
                 msg = f"{ctype}: {exc}"
                 if exc.status == 409:
@@ -649,7 +667,7 @@ def get_protocol(protocol_id: Annotated[str, Field(description="Protocol ID from
     return _protocol_detail(proto, drv.latest_analysis(proto))
 
 
-@mcp.tool(**CONTROL, timeout=420)
+@mcp.tool(**CONTROL, timeout=480)
 def upload_protocol(
     path: Annotated[str, Field(description="Local path of the protocol file (.py Python API or .json)")],
     labware_paths: Annotated[
@@ -713,7 +731,7 @@ def get_run_status(
     return _run_status(_resolve_run(run_id), recent_commands)
 
 
-@mcp.tool(**HAZARD, timeout=180)
+@mcp.tool(**HAZARD, timeout=300)
 def start_run(
     protocol_id: Annotated[str, Field(description="Protocol ID from upload_protocol or list_protocols")],
     deck_confirmed: Annotated[
@@ -757,12 +775,12 @@ def pause_run(run_id: Annotated[str | None, Field(description="Run ID; omit for 
     continues it."""
     drv = server.driver
     rid = _resolve_run(run_id)
-    status = drv.run(rid).get("status")
-    if status != "running":
+    status = _run_status_or_none(rid)  # if it cannot be read, try to pause anyway
+    if status is not None and status != "running":
         return RunActionResult(run_id=rid, action="pause", accepted=False, status=status, timestamp=_now(),
                                message=f"Not paused: the run is {status}, not running.")
     drv.run_action(rid, "pause")
-    return RunActionResult(run_id=rid, action="pause", accepted=True, status=drv.run(rid).get("status"),
+    return RunActionResult(run_id=rid, action="pause", accepted=True, status=_run_status_or_none(rid),
                            timestamp=_now(), message="Pause requested; the robot stops after the current step.")
 
 
@@ -775,12 +793,24 @@ def stop_run(run_id: Annotated[str | None, Field(description="Run ID; omit for t
     if not rid:
         return RunActionResult(run_id=None, action="stop", accepted=False, status=None, timestamp=_now(),
                                message="There is no current run to stop.")
-    status = drv.run(rid).get("status")
+    status = _run_status_or_none(rid)  # if it cannot be read, send the stop anyway
     if status in TERMINAL_STATUSES:
         return RunActionResult(run_id=rid, action="stop", accepted=False, status=status, timestamp=_now(),
                                message=f"The run already ended ({status}).")
-    drv.run_action(rid, "stop")
-    return RunActionResult(run_id=rid, action="stop", accepted=True, status=drv.run(rid).get("status"),
+    if status == "stop-requested":
+        return RunActionResult(run_id=rid, action="stop", accepted=False, status=status, timestamp=_now(),
+                               message="A stop was already requested: the robot is stopping (homing, dropping tips).")
+    try:
+        drv.run_action(rid, "stop")
+    except RobotHTTPError as exc:
+        # 409: the run stopped or ended between our status read and the stop request. That is
+        # what the caller wanted, so report it instead of failing the safety tool.
+        after = _run_status_or_none(rid) if exc.status == 409 else None
+        if after in TERMINAL_STATUSES or after == "stop-requested":
+            return RunActionResult(run_id=rid, action="stop", accepted=False, status=after, timestamp=_now(),
+                                   message=f"The run is already {after}.")
+        raise
+    return RunActionResult(run_id=rid, action="stop", accepted=True, status=_run_status_or_none(rid),
                            timestamp=_now(), message="Stop requested. The robot will home and drop tips.")
 
 

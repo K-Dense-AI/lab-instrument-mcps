@@ -27,6 +27,7 @@ from __future__ import annotations
 import concurrent.futures
 import contextlib
 import logging
+import math
 import re
 import threading
 import time
@@ -53,6 +54,87 @@ from labmcp_sila2.fdl import (
 CANCEL_CONTROLLER = "org.silastandard/core.commands/CancelController/v1"
 SILA_SERVICE = "org.silastandard/core/SiLAService/v1"
 MAX_TRACKED = 200
+MAX_CALL_TIMEOUT_S = 300.0
+_END = object()  # sentinel: a subscription ended without a value
+
+
+def _run_in_thread(fn: Any, name: str = "labmcp-sila2-call") -> concurrent.futures.Future[Any]:
+    """Run ``fn`` in a fresh daemon thread and return a future for its result.
+
+    sila2's gRPC calls have no deadline. A shared pool would let calls that outlive their deadline
+    pile up and starve later calls (including cancel_command), and non-daemon pool threads are joined
+    at interpreter exit, so a hung call would stop the server (or ``--check``) from exiting.
+    """
+    future: concurrent.futures.Future[Any] = concurrent.futures.Future()
+
+    def runner() -> None:
+        if not future.set_running_or_notify_cancel():
+            return
+        try:
+            result = fn()
+        except BaseException as exc:
+            future.set_exception(exc)
+        else:
+            future.set_result(result)
+
+    threading.Thread(target=runner, name=name, daemon=True).start()
+    return future
+
+
+def _deadline_passed(exc: BaseException, future: concurrent.futures.Future[Any]) -> bool:
+    """True if ``future.result(timeout=...)`` gave up waiting, rather than the call raising a TimeoutError
+    of its own (the two are the same class since Python 3.11)."""
+    if not isinstance(exc, concurrent.futures.TimeoutError):
+        return False
+    return not (future.done() and not future.cancelled() and future.exception() is exc)
+
+
+def _when_late(future: concurrent.futures.Future[Any], cleanup: Any) -> None:
+    """After a deadline: pass the result to ``cleanup`` if the call still succeeds later."""
+
+    def done(f: concurrent.futures.Future[Any]) -> None:
+        if f.cancelled() or f.exception() is not None:
+            return
+        with contextlib.suppress(Exception):
+            cleanup(f.result())
+
+    future.add_done_callback(done)
+
+
+def _next_or_end(subscription: Any) -> Any:
+    """The next item of a sila2 subscription, or ``_END`` once it has ended or been cancelled by us.
+
+    Cancelling a subscription can queue the stream's own CANCELLED error ahead of the end marker; that
+    is not a server error."""
+    try:
+        return next(subscription, _END)
+    except Exception as exc:
+        inner = getattr(exc, "exception", exc)  # sila2 wraps non-SiLA gRPC errors in SilaConnectionError
+        code = getattr(inner, "code", None)
+        if callable(code) and getattr(code(), "name", "") == "CANCELLED":
+            return _END
+        raise
+
+
+def _cancel_quietly(subscription: Any) -> None:
+    with contextlib.suppress(Exception):
+        subscription.cancel()
+
+
+def _close_quietly(client: Any) -> None:
+    with contextlib.suppress(Exception):
+        client.close()
+
+
+def seconds_option(value: Any, name: str, maximum: float = MAX_CALL_TIMEOUT_S) -> float:
+    """Validate a timeout option (seconds): a finite number in (0, maximum]."""
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        seconds = math.nan
+    if not (math.isfinite(seconds) and 0 < seconds <= maximum):
+        raise InstrumentConnectionError(f"{name} must be a number of seconds between 0 and {maximum:g}, got {value!r}.")
+    return seconds
 
 
 def parse_address(address: str) -> tuple[str, int]:
@@ -152,7 +234,7 @@ class SilaBridge:
         self.security = security
         self.lock = threading.RLock()
         self.executions: OrderedDict[str, Execution] = OrderedDict()
-        self._pool = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="labmcp-sila2")
+        self._closed = False
         self.features: dict[str, FeatureIR] = {}
         try:
             self._load_features()
@@ -167,10 +249,21 @@ class SilaBridge:
                              f"reading the definition of {fqi}")
             try:
                 ir = parse_feature(xml)
-            except Exception as exc:  # pragma: no cover - malformed vendor FDL
+            except Exception as exc:  # malformed (or hostile) vendor FDL
                 self._event(f"could not parse feature {fqi}: {exc}")
                 continue
+            if not self._client_has(ir.identifier):
+                # sila2 validates FDL against FeatureDefinition.xsd and skips invalid features; listing
+                # them here would only lead to confusing errors when they are used.
+                self._event(f"sila2 could not load feature {fqi} (invalid Feature Definition); it is not offered")
+                continue
             self.features[ir.identifier] = ir
+
+    def _client_has(self, identifier: str) -> bool:
+        loaded = getattr(self.client, "_features", None)
+        if isinstance(loaded, dict):
+            return identifier in loaded
+        return hasattr(self.client, identifier)
 
     # ------------------------------------------------------------ helpers
 
@@ -178,19 +271,26 @@ class SilaBridge:
         if self.audit is not None:
             self.audit.event(message, "sila2")
 
-    def _call(self, fn: Any, doing: str, timeout: float | None = None, feature: FeatureIR | None = None) -> Any:
-        """Run a blocking sila2 call with a deadline (sila2's client calls have none)."""
-        future = self._pool.submit(fn)
+    def _call(self, fn: Any, doing: str, timeout: float | None = None, feature: FeatureIR | None = None,
+              on_late: Any | None = None) -> Any:
+        """Run a blocking sila2 call with a deadline (sila2's client calls have none).
+
+        ``on_late(result)`` is called if the call succeeds after the deadline (to cancel a
+        subscription or track an execution that would otherwise leak)."""
+        limit = self.call_timeout if timeout is None else timeout
+        future = _run_in_thread(fn)
         try:
-            return future.result(timeout=self.call_timeout if timeout is None else timeout)
-        except concurrent.futures.TimeoutError as exc:
-            raise InstrumentTimeout(
-                f"The SiLA server did not answer within {self.call_timeout if timeout is None else timeout:g} s "
-                f"while {doing}. It may still be executing the request - check its state before retrying."
-            ) from exc
+            return future.result(timeout=limit)
         except (InstrumentProtocolError, InstrumentConnectionError, InstrumentTimeout):
             raise
         except Exception as exc:
+            if _deadline_passed(exc, future):
+                if on_late is not None:
+                    _when_late(future, on_late)
+                raise InstrumentTimeout(
+                    f"The SiLA server did not answer within {limit:g} s "
+                    f"while {doing}. It may still be executing the request - check its state before retrying."
+                ) from exc
             msg = sila_error_message(exc, feature)
             if "Connection to the SiLA server failed" in msg or "StatusCode.UNAVAILABLE" in str(exc):
                 raise InstrumentConnectionError(f"{msg} (while {doing}). Check the address and TLS options.") from exc
@@ -207,7 +307,12 @@ class SilaBridge:
         )
 
     def _client_feature(self, ir: FeatureIR) -> Any:
-        return getattr(self.client, ir.identifier)
+        try:
+            return getattr(self.client, ir.identifier)
+        except AttributeError as exc:
+            raise InstrumentProtocolError(
+                f"The sila2 client did not load feature {ir.identifier} (invalid Feature Definition?)."
+            ) from exc
 
     def allowed(self, feature: str, command: str) -> bool:
         if self.allowlist is None:
@@ -307,8 +412,21 @@ class SilaBridge:
         p = self._property(ir, prop)
         handle = getattr(self._client_feature(ir), p.identifier)
         meta = self._metadata(metadata)
-        value = self._call(lambda: handle.get(metadata=meta), f"reading {ir.identifier}.{p.identifier}",
-                           timeout=timeout, feature=ir)
+        doing = f"reading {ir.identifier}.{p.identifier}"
+        if not p.observable:
+            value = self._call(lambda: handle.get(metadata=meta), doing, timeout=timeout, feature=ir)
+            return ir, to_jsonable(value)
+        # sila2's ObservableProperty.get() blocks until the first value with no way to give up, leaving
+        # the stream (and a thread) behind on a timeout. Subscribe, wait for one value, always cancel.
+        sub = self._call(lambda: handle.subscribe(metadata=meta), doing, timeout=timeout, feature=ir,
+                         on_late=_cancel_quietly)
+        try:
+            value = self._call(lambda: _next_or_end(sub), doing, timeout=timeout, feature=ir)
+        finally:
+            _cancel_quietly(sub)  # also unblocks the waiting thread after a timeout
+        if value is _END:
+            raise InstrumentProtocolError(f"The SiLA server ended the subscription to {ir.identifier}.{p.identifier} "
+                                          "without sending a value.")
         return ir, to_jsonable(value)
 
     def _property(self, ir: FeatureIR, prop: str) -> Any:
@@ -328,32 +446,42 @@ class SilaBridge:
         handle = getattr(self._client_feature(ir), p.identifier)
         meta = self._metadata(metadata)
         updates: list[tuple[float, Any]] = []
+        updates_lock = threading.Lock()
         done = threading.Event()
         t0 = time.time()
+        deadline = time.monotonic() + duration_s  # immune to wall-clock steps
         if p.observable:
-            def on_value(value: Any) -> None:
-                if len(updates) < max_updates:
-                    updates.append((time.time(), to_jsonable(value)))
-                if len(updates) >= max_updates:
-                    done.set()
+            def on_value(value: Any) -> None:  # sila2 may run callbacks concurrently
+                with updates_lock:
+                    if len(updates) < max_updates:
+                        updates.append((time.time(), to_jsonable(value)))
+                    if len(updates) >= max_updates:
+                        done.set()
 
-            sub = self._call(lambda: handle.subscribe(metadata=meta, callbacks=[on_value]),
-                             f"subscribing to {ir.identifier}.{p.identifier}", feature=ir)
+            doing = f"subscribing to {ir.identifier}.{p.identifier}"
+            sub = self._call(lambda: handle.subscribe(metadata=meta, callbacks=[on_value]), doing, feature=ir,
+                             on_late=_cancel_quietly)
             try:
-                done.wait(duration_s)
+                done.wait(max(0.0, deadline - time.monotonic()))
             finally:
-                with contextlib.suppress(Exception):
-                    sub.cancel()
+                _cancel_quietly(sub)
+            if not updates and getattr(sub, "is_cancelled", False):
+                # No value at all: the server may have rejected or broken the stream (e.g. missing
+                # metadata). The first queued item tells; after cancel() the queue always ends.
+                item = self._call(lambda: _next_or_end(sub), doing, timeout=2.0, feature=ir)
+                if item is not _END:
+                    updates.append((time.time(), to_jsonable(item)))
             mode = "subscription"
         else:
-            deadline = t0 + duration_s
-            while time.time() < deadline and len(updates) < max_updates:
+            while time.monotonic() < deadline and len(updates) < max_updates:
                 value = self._call(lambda: handle.get(metadata=meta), f"reading {ir.identifier}.{p.identifier}",
                                    feature=ir)
                 updates.append((time.time(), to_jsonable(value)))
-                time.sleep(max(0.0, min(poll_interval_s, deadline - time.time())))
+                time.sleep(max(0.0, min(poll_interval_s, deadline - time.monotonic())))
             mode = "polling"
-        return {"feature": ir, "property": p, "mode": mode, "updates": list(updates), "started": t0}
+        with updates_lock:
+            collected = list(updates)
+        return {"feature": ir, "property": p, "mode": mode, "updates": collected, "started": t0}
 
     # ------------------------------------------------------------ commands
 
@@ -391,9 +519,19 @@ class SilaBridge:
         kwargs = dict(native)
         if meta:
             kwargs["metadata"] = meta
+
+        def late(result: Any) -> None:
+            # The server accepted/answered after the deadline: keep the execution visible (and
+            # cancellable) instead of leaking it, and record late unobservable responses.
+            if cmd.observable:
+                exec_id = self._track(ir, cmd, result, parameters)
+                self._event(f"{ir.identifier}.{cmd.identifier} was accepted after the deadline: execution {exec_id}")
+            elif self.audit is not None:
+                self.audit.record("read", f"{ir.identifier}.{cmd.identifier} -> {to_jsonable(result)} (late)", "sila2")
+
         try:
             result = self._call(lambda: handle(**kwargs), f"calling {ir.identifier}.{cmd.identifier}",
-                                timeout=timeout, feature=ir)
+                                timeout=timeout, feature=ir, on_late=late)
         except InstrumentProtocolError as exc:
             if _undecodable_response(exc):
                 raise InstrumentProtocolError(
@@ -407,6 +545,15 @@ class SilaBridge:
             if self.audit is not None:
                 self.audit.record("read", f"{ir.identifier}.{cmd.identifier} -> {responses}", "sila2")
             return {"feature": ir, "command": cmd, "observable": False, "responses": responses, "warnings": warnings}
+        exec_id = self._track(ir, cmd, result, parameters)
+        self._event(f"started {ir.identifier}.{cmd.identifier} execution {exec_id}")
+        deadline = time.monotonic() + 1.0  # give the execution-info stream a moment to report a status
+        while result.status is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        return {"feature": ir, "command": cmd, "observable": True, "execution_id": exec_id, "warnings": warnings}
+
+    def _track(self, ir: FeatureIR, cmd: Any, result: Any, parameters: dict[str, Any]) -> str:
+        """Remember an observable command execution (and follow its intermediate responses)."""
         exec_id = str(result.execution_uuid)
         execution = Execution(exec_id, ir.identifier, cmd.identifier, result, time.time(), to_jsonable(parameters))
         if cmd.intermediate_responses and hasattr(result, "subscribe_to_intermediate_responses"):
@@ -419,15 +566,14 @@ class SilaBridge:
                 sub.add_callback(on_intermediate)
                 execution.subscription = sub
         with self.lock:
+            if self._closed:  # a late result after reconnect: nothing to track it for
+                self._release(execution)
+                return exec_id
             self.executions[exec_id] = execution
             while len(self.executions) > MAX_TRACKED:
                 _, old = self.executions.popitem(last=False)
                 self._release(old)
-        self._event(f"started {ir.identifier}.{cmd.identifier} execution {exec_id}")
-        deadline = time.monotonic() + 1.0  # give the execution-info stream a moment to report a status
-        while result.status is None and time.monotonic() < deadline:
-            time.sleep(0.02)
-        return {"feature": ir, "command": cmd, "observable": True, "execution_id": exec_id, "warnings": warnings}
+        return exec_id
 
     def execution(self, execution_id: str) -> Execution:
         key = execution_id.strip().lower()
@@ -446,11 +592,12 @@ class SilaBridge:
         status = inst.status.name if inst.status is not None else "unknown (no execution info received yet)"
         remaining = inst.estimated_remaining_time
         lifetime = inst.lifetime_of_execution
+        progress = None if inst.progress is None else float(inst.progress)
         return {
             "execution": ex,
             "status": status,
             "done": bool(inst.done),
-            "progress": None if inst.progress is None else float(inst.progress),
+            "progress": progress if progress is not None and math.isfinite(progress) else None,
             "estimated_remaining_s": None if remaining is None else remaining.total_seconds(),
             "lifetime_of_execution_s": None if lifetime is None else lifetime.total_seconds(),
             "latest_intermediate": ex.intermediate[-1] if ex.intermediate else None,
@@ -499,9 +646,8 @@ class SilaBridge:
             self._event("CancelController.CancelAll")
             self._call(lambda: handle.CancelAll(), "cancelling all commands", feature=cancel)
             return {"supported": True, "message": "CancelAll sent: the server cancels every running command."}
-        ex_id = execution_id.strip().lower()
         try:
-            UUID(ex_id)
+            ex_id = str(UUID(execution_id.strip()))  # canonical form, as the CancelController's UUID type requires
         except ValueError as exc:
             raise InstrumentProtocolError(f"{execution_id!r} is not a command execution UUID.") from exc
         self._event(f"CancelController.CancelCommand {ex_id}")
@@ -519,12 +665,11 @@ class SilaBridge:
 
     def close(self) -> None:
         with self.lock:
+            self._closed = True
             for ex in self.executions.values():
                 self._release(ex)
             self.executions.clear()
-        with contextlib.suppress(Exception):
-            self.client.close()
-        self._pool.shutdown(wait=False, cancel_futures=True)
+        _close_quietly(self.client)  # closing the channel also ends calls still waiting past their deadline
         if self._on_close is not None:
             with contextlib.suppress(Exception):
                 self._on_close()
@@ -556,23 +701,50 @@ def open_client(host: str, port: int, *, insecure: bool, root_certs: bytes | Non
             return SilaClient(host, port, insecure=True)
         return SilaClient(host, port, root_certs=root_certs, private_key=private_key, cert_chain=cert_chain)
 
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = _run_in_thread(make, "labmcp-sila2-connect")
     try:
-        return pool.submit(make).result(timeout=timeout)
-    except concurrent.futures.TimeoutError as exc:
-        raise InstrumentConnectionError(
-            f"No SiLA server answered at {host}:{port} within {timeout:g} s. Check the address, that the server is "
-            "running, and TLS: most servers use TLS with a self-signed certificate (pass --option root_cert=<CA PEM>), "
-            "test servers often run with --insecure (then pass --option insecure=true)."
-        ) from exc
+        return future.result(timeout=timeout)
     except Exception as exc:
+        if _deadline_passed(exc, future):
+            _when_late(future, _close_quietly)  # don't leak a channel that connects after we gave up
+            raise InstrumentConnectionError(
+                f"No SiLA server answered at {host}:{port} within {timeout:g} s. Check the address, that the server "
+                "is running, and TLS: most servers use TLS with a self-signed certificate (pass --option "
+                "root_cert=<CA PEM>), test servers often run with --insecure (then pass --option insecure=true)."
+            ) from exc
         raise InstrumentConnectionError(
             f"Could not connect to the SiLA server at {host}:{port}: {sila_error_message(exc)}. If the server uses "
             "TLS with a self-signed certificate pass --option root_cert=<CA PEM>; for unencrypted test servers pass "
             "--option insecure=true."
         ) from exc
-    finally:
-        pool.shutdown(wait=False)
+
+
+def discover_client(*, server_name: str | None, server_uuid: str | None, discovery_timeout: float,
+                    connect_timeout: float, insecure: bool, root_certs: bytes | None, private_key: bytes | None,
+                    cert_chain: bytes | None) -> Any:
+    """Find a server with SiLA Server Discovery and connect to it, within an overall deadline."""
+    from sila2.client import SilaClient
+
+    def find() -> Any:
+        return SilaClient.discover(server_name=server_name, server_uuid=server_uuid, timeout=discovery_timeout,
+                                   insecure=insecure, root_certs=root_certs, private_key=private_key,
+                                   cert_chain=cert_chain)
+
+    future = _run_in_thread(find, "labmcp-sila2-discover")
+    try:
+        return future.result(timeout=discovery_timeout + connect_timeout)
+    except Exception as exc:
+        if _deadline_passed(exc, future):
+            _when_late(future, _close_quietly)
+            raise InstrumentConnectionError(
+                f"A SiLA server matching name={server_name!r} uuid={server_uuid!r} was not reached within "
+                f"{discovery_timeout + connect_timeout:g} s (discovery + connection)."
+            ) from exc
+        if isinstance(exc, TimeoutError):  # sila2: nothing matching was discovered
+            raise InstrumentConnectionError(
+                f"No SiLA server matching name={server_name!r} uuid={server_uuid!r} was discovered."
+            ) from exc
+        raise InstrumentConnectionError(f"Could not connect to the discovered SiLA server: {sila_error_message(exc)}") from exc
 
 
 def discover(timeout_s: float) -> list[dict[str, Any]]:
@@ -585,9 +757,13 @@ def discover(timeout_s: float) -> list[dict[str, Any]]:
     found: dict[str, dict[str, Any]] = {}
     lock = threading.Lock()
 
+    # Listener callbacks run on the browser thread, which browser.cancel() joins: keep each lookup short
+    # so the scan ends close to timeout_s.
+    info_timeout_ms = int(min(3000, max(200, timeout_s * 500)))
+
     class Listener(ServiceListener):
         def _add(self, zc: Zeroconf, type_: str, name: str) -> None:
-            info = zc.get_service_info(type_, name, timeout=int(max(200, timeout_s * 500)))
+            info = zc.get_service_info(type_, name, timeout=info_timeout_ms)
             if info is None:
                 return
             props = {
@@ -616,11 +792,17 @@ def discover(timeout_s: float) -> list[dict[str, Any]]:
             with lock:
                 found.pop(name, None)
 
-    zc = Zeroconf()
+    try:
+        zc = Zeroconf()
+    except OSError as exc:
+        raise InstrumentConnectionError(f"mDNS discovery could not start on this computer: {exc}") from exc
     try:
         browser = ServiceBrowser(zc, "_sila._tcp.local.", Listener())
-        time.sleep(timeout_s)
-        browser.cancel()
+        try:
+            time.sleep(timeout_s)
+        finally:
+            with contextlib.suppress(Exception):
+                browser.cancel()
     finally:
         with contextlib.suppress(Exception):
             zc.close()

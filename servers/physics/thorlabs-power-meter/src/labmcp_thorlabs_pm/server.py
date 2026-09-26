@@ -6,10 +6,18 @@ import csv
 import statistics
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Annotated, Literal
 
-from labmcp import CONTROL, READ, ConnectContext, InstrumentProtocolError, InstrumentServer, Limit
+from labmcp import (
+    CONTROL,
+    READ,
+    ConnectContext,
+    InstrumentError,
+    InstrumentProtocolError,
+    InstrumentServer,
+    Limit,
+    prepare_save_path,
+)
 from pydantic import BaseModel, Field
 
 from labmcp_thorlabs_pm.driver import ThorlabsPowerMeter, format_power, watts_to_dbm
@@ -114,7 +122,10 @@ class PowerReading(BaseModel):
 
 
 class PowerSeries(BaseModel):
-    count: int
+    count: int = Field(description="Readings actually taken")
+    completed: bool = Field(
+        default=True, description="False if the series stopped early to stay within the tool's time budget"
+    )
     interval_s: float
     duration_s: float = Field(description="Actual elapsed time from first to last reading")
     wavelength_nm: float | None
@@ -217,7 +228,17 @@ def _downsample_indices(n: int, max_points: int) -> list[int]:
     return sorted({round(i * step) for i in range(max_points)})
 
 
-@mcp.tool(**READ, timeout=900)
+#: ``log_power_series`` tool timeout. The series stops a minute before it, so it always returns its
+#: data rather than being cut off, whatever ``max_series_duration_s`` is.
+_SERIES_TIMEOUT_S = 3700
+_SERIES_BUDGET_S = _SERIES_TIMEOUT_S - 60
+#: Worst-case time per sample (PM100 series, PM100D manual 6.4.2.3.5) and per-reading overhead
+#: (two USB queries: unit and power).
+_SAMPLE_S = 0.003
+_READ_OVERHEAD_S = 0.01
+
+
+@mcp.tool(**READ, timeout=_SERIES_TIMEOUT_S)
 def log_power_series(
     count: Annotated[int, Field(ge=2, le=100000, description="Number of readings")] = 60,
     interval_s: Annotated[
@@ -230,16 +251,32 @@ def log_power_series(
 ) -> PowerSeries:
     """Log a series of power readings to characterise laser stability, warm-up or drift. Returns
     mean, stdev, min/max, RMS and peak-to-peak stability (%) and drift (%/min), plus the readings
-    (downsampled to `max_points`; use `save_path` to keep all of them)."""
-    server.check("max_series_duration_s", (count - 1) * interval_s, "series duration")
+    (downsampled to `max_points`; use `save_path`, a new .csv file, to keep all of them)."""
     drv = server.driver
+    # Each reading takes averaging x ~3 ms (PM100) plus the USB round trips, so with a short
+    # interval the series lasts longer than (count - 1) x interval_s: estimate the real duration.
+    per_reading = drv.averaging() * _SAMPLE_S + _READ_OVERHEAD_S
+    estimate = (count - 1) * max(interval_s, per_reading) + per_reading
+    server.check("max_series_duration_s", estimate, "estimated series duration")
+    if estimate > _SERIES_BUDGET_S:
+        raise InstrumentError(
+            f"Refused: the estimated series duration of {estimate:.0f} s exceeds the {_SERIES_BUDGET_S} s one "
+            "call can take. Use fewer readings, a shorter interval or less averaging, and log in several calls."
+        )
+    # Check the output file first, so a bad path is reported now rather than after the whole series.
+    path = prepare_save_path(save_path, suffixes=(".csv",)) if save_path else None
     started = _now()
     wl = drv.wavelength_nm() if drv.sensor(refresh=True).wavelength_settable else None
     times: list[float] = []
     values: list[float] = []
     t0 = time.monotonic()
+    deadline = t0 + _SERIES_BUDGET_S
+    completed = True
     for i in range(count):
         delay = t0 + i * interval_s - time.monotonic()
+        if i >= 2 and time.monotonic() + max(delay, 0.0) + drv.measure_timeout() > deadline:
+            completed = False  # the next reading might not finish before the tool times out
+            break
         if delay > 0:
             time.sleep(delay)
         times.append(time.monotonic() - t0)
@@ -251,17 +288,16 @@ def log_power_series(
     slope = sum((t - tbar) * (v - mean) for t, v in zip(times, values, strict=True)) / denom if denom else 0.0
     rel = 100.0 / mean if mean > 0 else None
     saved = None
-    if save_path:
-        path = Path(save_path).expanduser()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", newline="") as fh:
+    if path is not None:
+        with path.open("w", newline="", encoding="utf-8") as fh:
             writer = csv.writer(fh)
             writer.writerow(["time_s", "power_w"])
             writer.writerows((f"{t:.4f}", f"{v:.6e}") for t, v in zip(times, values, strict=True))
-        saved = str(path.resolve())
-    idx = _downsample_indices(count, max_points)
+        saved = str(path)
+    idx = _downsample_indices(len(values), max_points)
     return PowerSeries(
-        count=count,
+        count=len(values),
+        completed=completed,
         interval_s=interval_s,
         duration_s=times[-1],
         wavelength_nm=wl,

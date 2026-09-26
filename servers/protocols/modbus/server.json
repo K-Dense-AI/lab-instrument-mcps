@@ -3,7 +3,7 @@
   "name": "io.github.K-Dense-AI/labmcp-modbus",
   "title": "Modbus TCP/RTU Device",
   "description": "MCP server for Modbus TCP and Modbus RTU devices (temperature controllers, chillers, PLCs, sensors, ",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "repository": {
     "url": "https://github.com/K-Dense-AI/lab-instrument-mcps",
     "source": "github",
@@ -15,7 +15,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "labmcp-modbus",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "transport": {
         "type": "stdio"
       },

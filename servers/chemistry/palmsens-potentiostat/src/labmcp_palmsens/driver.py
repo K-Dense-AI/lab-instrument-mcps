@@ -158,7 +158,11 @@ def decode_value(text: str) -> float:
         return math.nan
     if len(text) != 8 or text[7] not in SI_PREFIXES:
         raise InstrumentProtocolError(f"Malformed MethodSCRIPT value {text!r}")
-    return (int(text[:7], 16) - (1 << 27)) * SI_PREFIXES[text[7]]
+    try:
+        raw = int(text[:7], 16)
+    except ValueError:
+        raise InstrumentProtocolError(f"Malformed MethodSCRIPT value {text!r}") from None
+    return (raw - (1 << 27)) * SI_PREFIXES[text[7]]
 
 
 _LITERAL_PREFIXES = [
@@ -212,11 +216,14 @@ def parse_package(line: str) -> list[Variable]:
         if len(head) != 10:
             raise InstrumentProtocolError(f"Malformed variable {part!r} in package {line!r}")
         var = Variable(head[:2], decode_value(head[2:10]))
-        for meta in fields[1:]:
-            if meta[:1] == "1" and len(meta) == 2:
-                var.status = int(meta[1], 16)
-            elif meta[:1] == "2" and len(meta) == 3:
-                var.range = int(meta[1:], 16)
+        try:
+            for meta in fields[1:]:
+                if meta[:1] == "1" and len(meta) == 2:
+                    var.status = int(meta[1], 16)
+                elif meta[:1] == "2" and len(meta) == 3:
+                    var.range = int(meta[1:], 16)
+        except ValueError:
+            raise InstrumentProtocolError(f"Malformed metadata in {part!r} of package {line!r}") from None
         out.append(var)
     return out
 
@@ -231,6 +238,7 @@ class ScriptResult:
     timed_out: bool = False
     duration_s: float = 0.0
     cell_off_sent: bool | None = None  # after a runtime error: was a separate cell_off accepted?
+    malformed: list[str] = field(default_factory=list)  # data lines that could not be decoded
 
 
 # ---------------------------------------------------------------- script generation
@@ -338,6 +346,31 @@ def parse_literal(token: str) -> float | None:
     if m:
         return float(int(m[1], 16) if m[1] else int(m[2], 2))
     return None
+
+
+def script_current_ranges(lines: list[str]) -> list[tuple[int, float]]:
+    """Best-effort list of (line number, current in A) of the current ranges a raw script selects:
+    literal (and ``store_var``-assigned) arguments of ``set_range ba`` and ``set_autoranging ba``,
+    the commands the built-in techniques use. Values computed at run time are not seen."""
+    known: dict[str, float] = {}
+    found: list[tuple[int, float]] = []
+    for number, raw in enumerate(lines, start=1):
+        tokens = raw.split("#", 1)[0].split()
+        if not tokens:
+            continue
+        cmd, args = tokens[0], [a.split("(")[0] for a in tokens[1:]]
+        if cmd == "store_var" and len(args) >= 2:
+            value = parse_literal(args[1])
+            if value is not None:
+                known[args[0]] = value
+            continue
+        if cmd in {"set_range", "set_autoranging"} and args[:1] == ["ba"]:
+            for arg in args[1:3]:
+                value = parse_literal(arg)
+                value = known.get(arg) if value is None else value
+                if value is not None:
+                    found.append((number, abs(value)))
+    return found
 
 
 def script_potentials(lines: list[str]) -> list[tuple[int, float]]:
@@ -449,40 +482,87 @@ class MethodScriptDevice:
 
     # ------------------------------------------------------------ scripts
 
-    def execute(self, script: list[str], timeout_s: float, *, cell_off_on_error: bool = True) -> ScriptResult:
+    def execute(
+        self, script: list[str], timeout_s: float, *, cell_off_on_error: bool = True, wait_s: float = 0.0
+    ) -> ScriptResult:
         """Run a script (``e`` + lines + empty line) and collect its output until the final empty line.
 
         If the script is still running after ``timeout_s`` it is aborted with ``Z``. After a runtime
         error the ``on_finished:`` section is NOT executed (MethodSCRIPT manual 10.1), so the cell
-        may still be on: a separate ``cell_off`` script is then run (``cell_off_sent``).
+        may still be on: a separate ``cell_off`` script is then run (``cell_off_sent``). If the
+        output cannot be collected at all (no acknowledgement, the link fails), the script is
+        aborted and the cell switched off before the error is raised. ``wait_s``: how long to wait
+        for another script to finish before refusing.
         """
         lines = [ln.rstrip() for ln in script if ln.strip()]  # empty lines would end the script early
         if any(len(ln) >= 256 for ln in lines):
             raise ValueError("MethodSCRIPT lines are limited to 255 characters")
-        if not self._run_lock.acquire(blocking=False):
+        acquired = self._run_lock.acquire(timeout=wait_s) if wait_s > 0 else self._run_lock.acquire(blocking=False)
+        if not acquired:
             raise InstrumentError(
                 "A measurement is already running. Wait for it to finish or call `abort_measurement`."
             )
         t0 = time.monotonic()
+        failure: Exception | None = None
         try:
             self._running.set()
             with self.t.lock:
+                self.t.flush_input()  # a late reply (e.g. 'Z!0006') would be taken as the acknowledgement
                 self.t.write("e")
                 for ln in lines:
                     self.t.write(ln)
                 self.t.write("")
-            result = self._collect(lines, timeout_s)
+            try:
+                result = self._collect(lines, timeout_s)
+            except Exception as exc:
+                # The script may still be running with the cell on and nobody reading its output.
+                failure = exc
+                self._stop_script()
         finally:
             self._running.clear()
             self._run_lock.release()
+        if failure is not None:
+            note = "The script was aborted"
+            if cell_off_on_error:
+                note += (
+                    " and the cell switched off."
+                    if self.cell_off()
+                    else "; switching the cell off FAILED, call `abort_measurement`."
+                )
+            else:
+                note += "."
+            if isinstance(failure, InstrumentError):
+                raise type(failure)(f"{failure} {note}") from failure
+            raise failure
         result.duration_s = time.monotonic() - t0
         if result.error and cell_off_on_error:
-            try:
-                off = self.execute(["cell_off"], timeout_s=5.0, cell_off_on_error=False)
-                result.cell_off_sent = off.error is None
-            except InstrumentError:
-                result.cell_off_sent = False
+            result.cell_off_sent = self.cell_off()
         return result
+
+    def cell_off(self, wait_s: float = 10.0) -> bool:
+        """Run a one-line ``cell_off`` script (waiting up to ``wait_s`` for another script, e.g. a
+        concurrent abort's ``cell_off``, to finish); True if the instrument accepted it."""
+        try:
+            return self.execute(["cell_off"], timeout_s=5.0, cell_off_on_error=False, wait_s=wait_s).error is None
+        except InstrumentError:
+            return False
+
+    def _stop_script(self) -> None:
+        """Best effort, after the output of a running script could not be collected: abort it with
+        ``Z`` and drain its remaining output."""
+        try:
+            self.t.write("Z")
+            end = time.monotonic() + 5.0
+            while time.monotonic() < end:
+                try:
+                    line = self._readline(0.5)
+                except InstrumentTimeout:
+                    continue
+                if line == "" or line.startswith("Z!"):  # end of script / nothing was running
+                    break
+            self._recover_after_error()
+        except InstrumentError:
+            pass
 
     def _collect(self, script: list[str], timeout_s: float) -> ScriptResult:
         result = ScriptResult()
@@ -535,7 +615,12 @@ class MethodScriptDevice:
                 break
             head = line[0]
             if head == "P":
-                result.packets.append((scan, parse_package(line)))
+                try:
+                    result.packets.append((scan, parse_package(line)))
+                except InstrumentProtocolError:
+                    # One corrupted line (e.g. serial noise) must not end the collection: the
+                    # script would keep running, cell on, with nobody reading it.
+                    result.malformed.append(line)
             elif head == "T":
                 result.texts.append(line[1:])
             elif head == "C" and line[1:].isdigit():
@@ -552,14 +637,27 @@ class MethodScriptDevice:
     # ------------------------------------------------------------ abort
 
     def abort(self) -> dict[str, object]:
-        """Abort a running script (``Z``). Scripts built by this driver switch the cell off in
-        ``on_finished:``; if nothing was running, a one-line ``cell_off`` script is run as well."""
+        """Abort a running script (``Z``), then run a one-line ``cell_off`` script. Scripts built by
+        this driver already switch the cell off in ``on_finished:``; a raw script may not."""
         if self._running.is_set():
             self.t.write("Z")
             end = time.monotonic() + 20.0
             while self._running.is_set() and time.monotonic() < end:
                 time.sleep(0.05)
-            return {"was_running": True, "stopped": not self._running.is_set()}
+            if self._running.is_set():
+                return {
+                    "was_running": True,
+                    "stopped": False,
+                    "note": "the script did not stop within 20 s; switch the cell off at the instrument",
+                }
+            # Scripts built by this server switch the cell off in on_finished:, but a raw script
+            # may have no on_finished: section, so switch it off explicitly as well.
+            ok = self.cell_off()
+            return {
+                "was_running": True,
+                "stopped": True,
+                "note": "cell switched off" if ok else "the script stopped but the cell_off script failed",
+            }
         was_running = False
         with self.t.lock:
             self.t.write("")  # flush a partially received command, as PalmSens' abort_and_sync does
@@ -586,7 +684,7 @@ class MethodScriptDevice:
                 self._recover_after_error()
         note = "cell switched off"
         try:
-            res = self.execute(["cell_off"], timeout_s=5.0, cell_off_on_error=False)
+            res = self.execute(["cell_off"], timeout_s=5.0, cell_off_on_error=False, wait_s=10.0)
             if res.error:
                 note = f"cell_off script reported {res.error}"
         except InstrumentError as exc:

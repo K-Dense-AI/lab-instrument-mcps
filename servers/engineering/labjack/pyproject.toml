@@ -1,13 +1,13 @@
 [project]
 name = "labmcp-labjack"
-version = "0.1.1"
+version = "0.1.2"
 description = "MCP server for LabJack T4, T7/T7-Pro and T8 DAQ devices (LJM): analog inputs, streaming, thermocouples, DACs and digital I/O with safety limits."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [{ name = "K-Dense and LabMCP contributors" }]
 keywords = ["mcp", "lab-instrument", "daq", "labjack", "ljm", "data-acquisition", "t7", "t4", "t8"]
-dependencies = ["labmcp>=0.1,<0.2", "labjack-ljm>=1.21"]
+dependencies = ["labmcp>=0.1.2,<0.2", "labjack-ljm>=1.21"]
 
 [project.scripts]
 labmcp-labjack = "labmcp_labjack.server:main"

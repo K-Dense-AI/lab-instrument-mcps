@@ -278,7 +278,10 @@ class LakeShoreController:
 
     def output_mode(self, out: int) -> tuple[str, str | None, bool]:
         """(mode, control input letter or None, power-up enable) from ``OUTMODE?``."""
-        mode, inp, powerup = self.query_ints(f"OUTMODE? {self._check_output(out)}")[:3]
+        fields = self.query_ints(f"OUTMODE? {self._check_output(out)}")
+        if len(fields) < 3:
+            raise InstrumentProtocolError(f"Unexpected reply to OUTMODE? {out}: {fields}")
+        mode, inp, powerup = fields[:3]
         letters = {1: "A", 2: "B", 3: "C", 4: "D"}
         if mode == 6:
             # 336 Mirroring: the second field is the output being mirrored (1-4), not an input
@@ -328,8 +331,12 @@ class LakeShoreController:
         self.write(f"SETP {self._check_output(out)},{value:.4f}")
 
     def ramp(self, out: int) -> tuple[bool, float]:
-        on, rate = self.query(f"RAMP? {self._check_output(out, loop=True)}").split(",")[:2]
-        return int(float(on)) == 1, float(rate)
+        reply = self.query(f"RAMP? {self._check_output(out, loop=True)}")
+        try:
+            on, rate = reply.split(",")[:2]
+            return int(float(on)) == 1, float(rate)
+        except ValueError as exc:
+            raise InstrumentProtocolError(f"Unexpected reply to RAMP? {out}: {reply!r}") from exc
 
     def set_ramp(self, out: int, on: bool, rate_k_min: float) -> None:
         self.write(f"RAMP {self._check_output(out, loop=True)},{1 if on else 0},{rate_k_min:g}")
@@ -359,15 +366,28 @@ class LakeShoreController:
     # ------------------------------------------------------------ safety
 
     def all_heaters_off(self) -> dict[int, str]:
-        """``RANGE n,0`` on every output; returns the read-back state (or error) per output."""
+        """``RANGE n,0`` on every output; returns the read-back state (or error) per output.
+
+        Best effort: every output is tried, and the range is read back even when the command's
+        ``*ESR?`` check failed (the ``RANGE`` may still have been applied)."""
         self.abort.set()
         result: dict[int, str] = {}
         for out in self.spec.outputs:
+            error: str | None = None
             try:
                 self.write(f"RANGE {out},0")
-                result[out] = "off" if self.heater_range(out) == 0 else "STILL ON - check the instrument"
             except Exception as exc:  # keep going: every output must be tried
-                result[out] = f"error: {exc}"
+                error = str(exc)
+            try:
+                rng = self.heater_range(out)
+            except Exception as exc:
+                result[out] = f"error: {error or exc}"
+                continue
+            result[out] = (
+                "off"
+                if rng == 0
+                else f"STILL ON (range {rng}) - check the instrument" + (f": {error}" if error else "")
+            )
         return result
 
     def close(self) -> None:

@@ -167,6 +167,7 @@ async def test_tools_via_mcp():
 
         off = (await client.call_tool("all_heaters_off", {})).structured_content
         assert set(off["outputs"].values()) == {"off"}
+        assert off["all_off"] is True
 
 
 async def test_wait_for_stable_at_setpoint():
@@ -271,3 +272,86 @@ def test_mirroring_output_has_no_control_input():
     mode, inp, _ = ls.output_mode(3)
     assert mode == "mirroring"
     assert inp is None
+
+
+async def test_heater_range_checks_the_programmed_setpoint():
+    # A setpoint entered on the front panel (or before the limit was lowered) must not be heated to.
+    async with sim_client(limits={"max_setpoint_k": 100}) as client:
+        await client.call_tool("get_connection_info", {})
+        sim = server.driver.t.simulator
+        sim.outputs[1].setpoint_k = sim.outputs[1].ramp_sp_k = 300.0
+        with pytest.raises(Exception, match="max_setpoint_k"):
+            await client.call_tool("set_heater_range", {"output": 1, "heater_range": 1})
+        assert sim.outputs[1].range == 0  # nothing was sent
+        # Turning the heater off is always allowed, whatever the setpoint.
+        s = (await client.call_tool("set_heater_range", {"output": 1, "heater_range": 0})).structured_content
+        assert s["heater_range"] == 0
+        # Sensor units: the setpoint cannot be checked, so heating is refused.
+        sim.outputs[1].setpoint_k = 20.0
+        sim.inputs["A"].units = 3
+        with pytest.raises(Exception, match="sensor units"):
+            await client.call_tool("set_heater_range", {"output": 1, "heater_range": 1})
+        assert sim.outputs[1].range == 0
+        # Open loop: the setpoint does not govern heating, so it is not checked.
+        sim.inputs["A"].units = 1
+        sim.outputs[1].setpoint_k = 300.0
+        sim.outputs[1].mode = 3
+        s = (await client.call_tool("set_heater_range", {"output": 1, "heater_range": 1})).structured_content
+        assert s["heater_range"] == 1
+        await client.call_tool("all_heaters_off", {})
+
+
+def test_all_heaters_off_reads_back_even_if_a_write_check_fails():
+    ls, sim, _ = make_driver()
+    ls.set_heater_range(1, 3)
+    original = ls.write
+
+    def flaky_write(cmd, check=True):
+        original(cmd, check=check)
+        if cmd == "RANGE 1,0":
+            raise InstrumentProtocolError("ESR check failed")
+
+    ls.write = flaky_write
+    result = ls.all_heaters_off()
+    assert result == {1: "off", 2: "off", 3: "off", 4: "off"}  # RANGE was applied; read back says off
+    assert all(o.range == 0 for o in sim.outputs.values())
+
+
+def test_malformed_replies_raise_protocol_errors():
+    ls, sim, _ = make_driver()
+    original = sim._dispatch
+    sim._dispatch = lambda head, args: "1" if head in {"RAMP?", "OUTMODE?"} else original(head, args)
+    with pytest.raises(InstrumentProtocolError, match="RAMP"):
+        ls.ramp(1)
+    with pytest.raises(InstrumentProtocolError, match="OUTMODE"):
+        ls.output_mode(1)
+
+
+def test_connect_closes_the_transport_if_identification_fails(monkeypatch):
+    from labmcp_lakeshore import server as server_module
+
+    closed = []
+
+    class Refusing(LakeShoreSimulator):
+        def _dispatch(self, head, args):
+            return "ACME,THING,1,1" if head == "*IDN?" else super()._dispatch(head, args)
+
+    monkeypatch.setattr(server_module, "LakeShoreSimulator", lambda **kw: Refusing())
+    monkeypatch.setattr(SimulatedTransport, "close", lambda self: closed.append(True))
+    server.configure(simulate=True, options={})
+    with pytest.raises(Exception, match="not a Lake Shore"):
+        server.driver  # noqa: B018
+    assert closed
+    server.disconnect()
+
+
+def test_trace_downsampling_keeps_extremes_and_last_point():
+    from labmcp_lakeshore.server import _downsample_trace
+
+    trace = [(float(i), 4.2) for i in range(1000)]
+    trace[537] = (537.0, 9.9)  # a brief overshoot between sampled points
+    trace[538] = (538.0, 1.1)
+    out = _downsample_trace(trace, 100)
+    assert len(out) <= 104
+    assert (537.0, 9.9) in out and (538.0, 1.1) in out
+    assert out[0] == trace[0] and out[-1] == trace[-1]

@@ -84,10 +84,10 @@ Add `--read-only` to let the agent watch scans and status but not place scans or
 | `reconnect` | 🛑 safety | Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged). |
 | `resume_acquisition` | ⚠️ hazard | Resume a paused acquisition (IAPI Resume). Sample consumption continues. |
 | `set_repeating_scan` | ⚠️ hazard | Define or replace the scan the instrument repeats when no method or custom scan is running (IAPI CreateRepeatingScan/SetRepetitionScan). Values are validated like submit_custom_scan. Cancel with cancel_repeating_scan. |
-| `start_acquisition` | ⚠️ hazard | Start an acquisition with the instrument's current settings (IAPI StartAcquisition), recording to a raw file. This consumes sample. The instrument must be On; an acquisition must not already be running. Stop it with stop_acquisition. |
-| `stop_acquisition` | 🛑 safety | Stop the running acquisition (IAPI CancelAcquisition), by default also cancelling custom and repeating scans, and optionally switch the instrument to Standby (switch back to On in Tune). |
+| `start_acquisition` | ⚠️ hazard | Start an acquisition with the instrument's current settings (IAPI StartAcquisition), recording to a raw file. This consumes sample. The instrument must be On; an acquisition must not already be running. Stop it with stop_acquisition. scan_count and until_stopped acquisitions are cancelled automatically after max_acquisition_duration_s. |
+| `stop_acquisition` | 🛑 safety | Stop the running acquisition (IAPI CancelAcquisition), by default also cancelling custom and repeating scans, and optionally switch the instrument to Standby (switch back to On in Tune). Every step is attempted even if an earlier one fails; failures are reported. |
 | `submit_custom_scan` | ⚠️ hazard | Place one custom scan to run next (IAPI CreateCustomScan/SetCustomScan); unset values fall back to the instrument's defaults. Every value is checked against PossibleParameters and the safety limits, and calls are rate-limited, before anything is sent. Fetch the result with wait_for_scan(access_id=running_number). |
-| `wait_for_scan` | 👁 read | Wait for the next scan that arrives after this call (optionally of one MS order, or the result of a custom scan by its access id) and return it. Returns found=false after timeout_s if nothing matching arrived (e.g. the instrument is in Standby). |
+| `wait_for_scan` | 👁 read | Wait for the next scan that arrives after this call (optionally of one MS order, or the result of a custom scan by its access id) and return it. For a custom scan placed with submit_custom_scan, a result that arrived since it was placed is returned at once. Returns found=false after timeout_s if nothing matching arrived (e.g. the instrument is in Standby). |
 <!-- TOOLS:END -->
 
 `get_connection_info`, `get_command_log` and `reconnect` are built into every LabMCP server. Every IAPI control call (with the exact scan values sent) is recorded in the command log.
@@ -96,13 +96,15 @@ Add `--read-only` to let the agent watch scans and status but not place scans or
 
 | Limit | Default | Meaning |
 |---|---|---|
-| `max_custom_scans_per_minute` | 60 scans/min | Custom scans an agent may place in any 60 s window (server-side rate limit) |
-| `max_injection_time_ms` | 1000 ms | Largest maximum injection time (`MaxIT`) in a custom or repeating scan |
-| `max_acquisition_duration_s` | 7200 s | Longest time-limited acquisition an agent may start |
+| `max_custom_scans_per_minute` | 60 scans/min | Custom scans an agent may place in any 60 s window (server-side rate limit; `reconnect` does not reset it) |
+| `max_injection_time_ms` | 1000 ms | Largest maximum injection time (`MaxIT`) in a custom or repeating scan (every element of a multi-valued `MaxIT`) |
+| `max_acquisition_duration_s` | 7200 s | Longest acquisition an agent may start: a `duration` above it is refused, and `scan_count` / `until_stopped` acquisitions are cancelled automatically when it runs out (wall-clock, pauses included) |
 
 Override at launch: `--limit max_custom_scans_per_minute=600`.
 
-On top of these limits, every custom and repeating scan value is checked against the instrument's own `IScans.PossibleParameters` before anything is sent: the parameter name must exist, numbers must lie inside the instrument's range (for example the m/z range for `FirstMass`/`LastMass`), and choice parameters such as `OrbitrapResolution` must be one of the allowed values. IAPI itself silently ignores illegal values, which is why the server checks first.
+On top of these limits, every custom and repeating scan value is checked against the instrument's own `IScans.PossibleParameters` before anything is sent: the parameter name must exist, numbers must lie inside the instrument's range (for example the m/z range for `FirstMass`/`LastMass`), and choice parameters such as `OrbitrapResolution` must be one of the allowed values. IAPI itself silently ignores illegal values, which is why the server checks first, and why accepted values are sent in the instrument's own spelling (`hcd` goes out as `HCD`, `2.0` for an integer parameter as `2`).
+
+`stop_acquisition` attempts every step (cancel the acquisition, the custom scans, the repeating scan, Standby) even if one fails, and reports what failed.
 
 ## Example prompts
 
@@ -114,13 +116,13 @@ On top of these limits, every custom and repeating scan value is checked against
 ## Notes
 
 - **Instrument mode:** scans only arrive in **On** mode, and custom scans and acquisitions need it too. `stop_acquisition(standby=true)` switches to Standby. This server has no tool to switch back to On (do that in Tune).
-- **Custom scans:** values you leave out come from the instrument's defaults, as Thermo documents for `IScanDefinition.Values`. `running_number` comes back as the scan's `access_id` (trailer item `Access Id:`). The server numbers scans automatically if you don't. IAPI leaves the result undefined when several custom scans are placed before the instrument has processed the earlier ones; the rate limit keeps this under control.
+- **Custom scans:** values you leave out come from the instrument's defaults, as Thermo documents for `IScanDefinition.Values`. `running_number` comes back as the scan's `access_id` (trailer item `Access Id:`). The server numbers scans automatically if you don't. A custom scan usually finishes before the agent's next tool call, so `wait_for_scan(access_id=...)` also returns a result that arrived after the scan was placed but before the wait started. IAPI leaves the result undefined when several custom scans are placed before the instrument has processed the earlier ones; the rate limit keeps this under control.
 - **Parameter names differ by model and Tune version** (e.g. `Analyzer` on Tribrids). Use `get_possible_scan_parameters` and pass anything that has no named argument through `extra_parameters`.
 - **Scan headers:** `scan_number`, `ms_order`, `scan_mode` and `precursor_mz` come from header keys used in Thermo's examples (`Scan`, `MSOrder`, `ScanMode`, `PrecursorMass[0]`). `master_scan_number`, `agc_target` and `injection_time_ms` are read from the trailer names Thermo raw files use (`Master Scan Number:`, `AGC Target:`, `Ion Injection Time (ms):`). The IAPI repository doesn't document these, so they may be `null` on your instrument. Use `include_header_trailer=true` to see exactly what it sends.
 - **Readbacks:** IAPI has no fixed list of readback names (vacuum gauges, voltages). `get_instrument_status` shows the names from `IInstrumentValues.ValueNames` and the latest scan `StatusLog`, where the vacuum readings usually appear.
 - **Licence check:** on Exploris instruments the server reports whether an API licence is present (`IExplorisInstrumentAccess.Licenses`). Tribrid and Exactive instruments enforce the licence in the instrument service, and a refused command reports it.
 - **Verified API surface:** every IAPI member the pythonnet backend touches is listed with its source file in [`iapi_members.py`](src/labmcp_thermo_iapi/iapi_members.py) (checked against [thermofisherlsms/iapi@c246dcc](https://github.com/thermofisherlsms/iapi/tree/c246dcc8772d03c9c32e9b2fde486e97572c8fbf)). A test fails if the backend uses a name that isn't in that list.
-- **Scan data:** each scan's .NET object is copied and disposed at once, as Thermo's examples require (otherwise the instrument's shared memory stays blocked). Up to 5 000 centroids per scan are kept. `max_centroids` limits what a tool returns, and `get_recent_scans(save_path=...)` writes all kept centroids to a CSV file.
+- **Scan data:** each scan's .NET object is copied and disposed at once, as Thermo's examples require (otherwise the instrument's shared memory stays blocked). Up to 5 000 centroids per scan are kept. `max_centroids` limits what a tool returns, and `get_recent_scans(save_path=...)` writes all kept centroids to a new CSV file (the path must end in `.csv` and must not exist yet: existing files are never overwritten).
 
 ## Hardware verification
 

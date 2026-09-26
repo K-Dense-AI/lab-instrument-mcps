@@ -8,11 +8,26 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from labmcp import HAZARD, READ, SAFETY, ConnectContext, InstrumentProtocolError, InstrumentServer, Limit
+from labmcp import (
+    HAZARD,
+    READ,
+    SAFETY,
+    ConnectContext,
+    InstrumentProtocolError,
+    InstrumentServer,
+    Limit,
+    SafetyLimitError,
+    prepare_save_path,
+)
 from pydantic import BaseModel, Field
 
 from labmcp_ni_daqmx.driver import NIDAQ, THERMOCOUPLE_TYPES, Acquisition, load_nidaqmx
 from labmcp_ni_daqmx.simulator import SimulatedNIDAQmx
+
+#: One acquisition must finish inside the tool call (``timeout=`` below), even if `max_acquisition_s`
+#: is raised; the driver's read timeout adds 10 s to samples / rate.
+HARD_MAX_ACQUISITION_S = 600.0
+ACQUISITION_TOOL_TIMEOUT_S = 700.0
 
 
 def connect(ctx: ConnectContext) -> NIDAQ:
@@ -111,8 +126,11 @@ class Acquired(BaseModel):
     sample_rate_hz: float | None = Field(description="Actual sample clock rate (None for one on-demand sample)")
     stats: list[ChannelSummary]
     time_s: list[float] = Field(description="Time of each returned point from the first sample")
-    waveforms: dict[str, list[float]] = Field(description="Downsampled data per channel (all data if small)")
-    downsample_factor: int
+    waveforms: dict[str, list[float]] = Field(
+        description="Data per channel (all data if small). Downsampled data keeps each block's minimum and maximum "
+        "in time order (placed at the block's first and last sample time), so spikes are not lost"
+    )
+    downsample_factor: int = Field(description="Samples per min/max pair (1 = every sample returned)")
     saved_to: str | None
     warnings: list[str] = Field(description="NI-DAQmx warnings raised during the acquisition")
     timestamp: str
@@ -155,9 +173,41 @@ def _check_acquisition(samples: int, rate_hz: float | None) -> None:
             raise InstrumentProtocolError("rate_hz is required when samples > 1.")
         server.check("max_rate_hz", rate_hz, "sample rate")
         server.check("max_acquisition_s", samples / rate_hz, "acquisition time")
+        if samples / rate_hz > HARD_MAX_ACQUISITION_S:
+            raise SafetyLimitError(
+                f"Refused: a {samples / rate_hz:g} s acquisition cannot run in a single tool call (maximum "
+                f"{HARD_MAX_ACQUISITION_S:g} s). Nothing was sent to the instrument."
+            )
 
 
-def _summarise(acq: Acquisition, unit: str, max_points: int, save_path: str | None) -> Acquired:
+def _downsample(
+    times: list[float], columns: list[list[float]], max_points: int
+) -> tuple[list[float], list[list[float]], int]:
+    """Reduce every column to at most ``max_points`` points, keeping each block's minimum and maximum
+    (in time order) so a short spike or glitch survives; plain striding would drop it. Each block
+    contributes two points, at its first and last sample time."""
+    n = len(times)
+    if n <= max_points:
+        return list(times), [list(col) for col in columns], 1
+    size = math.ceil(n / (max_points // 2))
+    t_out: list[float] = []
+    out: list[list[float]] = [[] for _ in columns]
+    for start in range(0, n, size):
+        stop = min(start + size, n)
+        if stop - start == 1:
+            t_out.append(times[start])
+            for col, dst in zip(columns, out, strict=True):
+                dst.append(col[start])
+            continue
+        t_out += [times[start], times[stop - 1]]
+        for col, dst in zip(columns, out, strict=True):
+            idx = range(start, stop)
+            first, second = sorted((min(idx, key=col.__getitem__), max(idx, key=col.__getitem__)))
+            dst += [col[first], col[second]]
+    return t_out, out, size
+
+
+def _summarise(acq: Acquisition, unit: str, max_points: int, target: Path | None) -> Acquired:
     n = len(acq.data[0])
     rate = acq.rate_hz
     times = [i / rate for i in range(n)] if rate else [0.0]
@@ -177,25 +227,23 @@ def _summarise(acq: Acquisition, unit: str, max_points: int, save_path: str | No
                 last=col[-1],
             )
         )
-    step = max(1, math.ceil(n / max_points))
     saved = None
-    if save_path:
-        target = Path(save_path).expanduser().resolve()
-        target.parent.mkdir(parents=True, exist_ok=True)
+    if target is not None:
         with target.open("w", newline="", encoding="utf-8") as fh:
             writer = csv.writer(fh)
             writer.writerow(["time_s"] + [f"{c}_{unit}" for c in acq.channels])
             writer.writerows(zip(times, *acq.data, strict=True))
         saved = str(target)
+    t_out, waves, factor = _downsample(times, acq.data, max_points)
     return Acquired(
         channels=acq.channels,
         unit=unit,
         samples_per_channel=n,
         sample_rate_hz=rate,
         stats=stats,
-        time_s=times[::step],
-        waveforms={c: col[::step] for c, col in zip(acq.channels, acq.data, strict=True)},
-        downsample_factor=step,
+        time_s=t_out,
+        waveforms=dict(zip(acq.channels, waves, strict=True)),
+        downsample_factor=factor,
         saved_to=saved,
         warnings=acq.warnings,
         timestamp=_now(),
@@ -233,7 +281,7 @@ def get_device_info() -> DeviceInfo:
     return DeviceInfo(**info, ao_last_written_v=dict(d.ao_last), do_last_written=dict(d.do_last), timestamp=_now())
 
 
-@mcp.tool(**READ, timeout=700)
+@mcp.tool(**READ, timeout=ACQUISITION_TOOL_TIMEOUT_S)
 def read_analog(
     channels: Annotated[str, Field(description="Analog inputs, e.g. 'ai0', 'ai0:3' or 'Dev1/ai0, Dev1/ai4'")],
     terminal_config: Annotated[
@@ -245,7 +293,7 @@ def read_analog(
     samples: Annotated[int, Field(ge=1, le=10_000_000, description="Samples per channel; 1 = one on-demand reading")] = 1,
     rate_hz: Annotated[float | None, Field(gt=0, le=10_000_000, description="Sample clock rate per channel (required if samples > 1)")] = None,
     max_points: Annotated[int, Field(ge=10, le=20_000, description="Max points per channel in the returned waveform")] = 500,
-    save_path: Annotated[str | None, Field(description="Write all samples to this CSV file")] = None,
+    save_path: Annotated[str | None, Field(description="Write all samples to this new .csv file (never overwritten)")] = None,
 ) -> Acquired:
     """Measure voltage on one or more analog inputs: a single on-demand reading, or a finite
     hardware-timed acquisition of `samples` per channel at `rate_hz`. Returns per-channel
@@ -255,11 +303,12 @@ def read_analog(
     maximum rate (shared by all channels on multiplexed devices) also applies. Blocks for
     samples / rate_hz seconds."""
     _check_acquisition(samples, rate_hz)
+    target = prepare_save_path(save_path, suffixes=(".csv",)) if save_path else None
     acq = server.driver.read_voltage(channels, terminal_config, min_v, max_v, samples, rate_hz)
-    return _summarise(acq, "v", max_points, save_path)
+    return _summarise(acq, "v", max_points, target)
 
 
-@mcp.tool(**READ, timeout=700)
+@mcp.tool(**READ, timeout=ACQUISITION_TOOL_TIMEOUT_S)
 def read_thermocouple(
     channels: Annotated[str, Field(description="Thermocouple inputs, e.g. 'ai0' or 'ai0:3' (on a thermocouple-capable device/module)")],
     thermocouple_type: Literal["B", "E", "J", "K", "N", "R", "S", "T"] = "K",
@@ -273,7 +322,7 @@ def read_thermocouple(
     samples: Annotated[int, Field(ge=1, le=1_000_000, description="Samples per channel; 1 = one reading")] = 1,
     rate_hz: Annotated[float | None, Field(gt=0, le=100_000, description="Sample rate if samples > 1")] = None,
     max_points: Annotated[int, Field(ge=10, le=20_000)] = 500,
-    save_path: Annotated[str | None, Field(description="Write all samples to this CSV file")] = None,
+    save_path: Annotated[str | None, Field(description="Write all samples to this new .csv file (never overwritten)")] = None,
 ) -> Acquired:
     """Measure temperature (°C) with thermocouples (types B, E, J, K, N, R, S, T) on a
     thermocouple-capable device, e.g. an NI 9211/9212/9213/9214 module or USB-TC01.
@@ -284,8 +333,9 @@ def read_thermocouple(
     if thermocouple_type not in THERMOCOUPLE_TYPES:
         raise InstrumentProtocolError(f"thermocouple_type must be one of {', '.join(THERMOCOUPLE_TYPES)}")
     _check_acquisition(samples, rate_hz)
+    target = prepare_save_path(save_path, suffixes=(".csv",)) if save_path else None
     acq = server.driver.read_thermocouple(channels, thermocouple_type, cjc_source, cjc_value_c, min_c, max_c, samples, rate_hz)
-    return _summarise(acq, "c", max_points, save_path)
+    return _summarise(acq, "c", max_points, target)
 
 
 @mcp.tool(**READ)

@@ -3,7 +3,7 @@
   "name": "io.github.K-Dense-AI/labmcp-new-era",
   "title": "New Era Syringe Pump",
   "description": "MCP server for New Era Pump Systems syringe pumps (NE-1000 family, RS-232): set syringe, infuse/with",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "repository": {
     "url": "https://github.com/K-Dense-AI/lab-instrument-mcps",
     "source": "github",
@@ -15,7 +15,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "labmcp-new-era",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "transport": {
         "type": "stdio"
       },

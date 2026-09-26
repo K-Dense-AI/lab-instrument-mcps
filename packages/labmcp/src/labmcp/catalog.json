@@ -25,7 +25,7 @@
       "summary": "Read pH, ORP, dissolved oxygen, conductivity/TDS/salinity, temperature, humidity, CO2 or pressure; calibrate, set temperature compensation, log series.",
       "status": "simulated",
       "package": "labmcp-atlas-ezo",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "MCP server for Atlas Scientific EZO sensor circuits (pH, ORP, DO, EC, RTD, HUM, CO2, PRS) over UART: read, calibrate, compensate, log.",
       "command": "labmcp-atlas-ezo",
       "module": "labmcp_atlas_ezo.server",
@@ -117,7 +117,7 @@
       "summary": "Snap images (stats + preview + TIFF), z-stacks and time-lapses, move XY/Z within step and soft limits, channel/objective presets, exposure, shutter, autofocus.",
       "status": "simulated",
       "package": "labmcp-micro-manager",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "description": "MCP server for microscopes controlled by Micro-Manager (pymmcore-plus): snap images, z-stacks and time-lapses, move stages safely, switch channels and objectives, autofocus.",
       "command": "labmcp-micro-manager",
       "module": "labmcp_micro_manager.server",
@@ -206,7 +206,7 @@
         },
         {
           "name": "set_shutter",
-          "kind": "control",
+          "kind": "hazard",
           "description": "Open or close the current shutter, and optionally switch auto-shutter. An open shutter illuminates (and bleaches) the sample until it is closed again."
         },
         {
@@ -244,7 +244,7 @@
       "summary": "Set the syringe (presets or diameter), infuse or withdraw an exact volume at a set rate, track dispensed volume, stop.",
       "status": "simulated",
       "package": "labmcp-new-era",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "MCP server for New Era Pump Systems syringe pumps (NE-1000 family, RS-232): set syringe, infuse/withdraw volumes, monitor, stop.",
       "command": "labmcp-new-era",
       "module": "labmcp_new_era.server",
@@ -326,7 +326,7 @@
       "summary": "Upload and analyze protocols, review deck layout, start/pause/stop/resume runs, track progress, home, lights, read pipettes and modules, switch modules off.",
       "status": "simulated",
       "package": "labmcp-opentrons",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "description": "MCP server for Opentrons OT-2 and Flex liquid-handling robots (HTTP API): upload and analyze protocols, start, pause and stop runs, monitor progress, modules and pipettes.",
       "command": "labmcp-opentrons",
       "module": "labmcp_opentrons.server",
@@ -444,7 +444,7 @@
       "summary": "Initialize, aspirate and dispense microlitre volumes at set flow rates, switch valve ports, read plunger/valve status, terminate moves.",
       "status": "simulated",
       "package": "labmcp-cavro",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "description": "MCP server for Tecan Cavro syringe pumps (XLP 6000, XMP 6000, XCalibur) over the DT protocol: initialize, aspirate/dispense µL, switch valve ports, terminate.",
       "command": "labmcp-cavro",
       "module": "labmcp_cavro.server",
@@ -615,7 +615,7 @@
       "summary": "Read bath/external temperature and heating power, set setpoint, start/stop tempering, decode status and alarms, wait for temperature.",
       "status": "simulated",
       "package": "labmcp-julabo",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "MCP server for JULABO heating and refrigerated circulators (CORIO, MAGIO, DYNEO): read temperatures, set setpoint, start/stop, alarms.",
       "command": "labmcp-julabo",
       "module": "labmcp_julabo.server",
@@ -696,7 +696,7 @@
       "summary": "Weigh (stable/immediate), tare, zero, log drift series, internal adjustment, draft shield, display messages.",
       "status": "simulated",
       "package": "labmcp-mettler-toledo",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "description": "MCP server for Mettler Toledo laboratory balances (MT-SICS): weigh, tare, zero, log drift, adjust.",
       "command": "labmcp-mettler-toledo",
       "module": "labmcp_mettler_toledo.server",
@@ -1001,7 +1001,7 @@
       "summary": "Acquire averaged/smoothed spectra with saturation checks, auto integration time, dark and reference storage, absorbance and transmittance spectra, peak positions with FWHM, detector TEC (QE Pro).",
       "status": "simulated",
       "package": "labmcp-ocean-spectrometer",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "MCP server for Ocean Insight / Ocean Optics spectrometers (python-seabreeze): acquire spectra, auto integration time, dark/reference, absorbance and transmittance, peak finding.",
       "command": "labmcp-ocean-spectrometer",
       "module": "labmcp_ocean_spectrometer.server",
@@ -1011,7 +1011,7 @@
         {
           "name": "acquire_spectrum",
           "kind": "read",
-          "description": "Acquire an intensity spectrum (raw counts) with optional averaging, boxcar smoothing and corrections. Returns downsampled (wavelength, counts), summary statistics, the most prominent peaks with FWHM, and a saturation check; `save_path` writes the full spectrum."
+          "description": "Acquire an intensity spectrum (raw counts) with optional averaging, boxcar smoothing and corrections. Returns downsampled (wavelength, counts), summary statistics, the most prominent peaks with FWHM, and a saturation check; `save_path` writes the full spectrum to a new .csv file (an existing file is never overwritten)."
         },
         {
           "name": "auto_integration_time",
@@ -1109,7 +1109,7 @@
       "summary": "Cyclic, linear-sweep and differential-pulse voltammetry, chronoamperometry and raw MethodSCRIPT, with peak summaries and CSV export.",
       "status": "simulated",
       "package": "labmcp-palmsens",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "description": "MCP server for PalmSens potentiostats running MethodSCRIPT (EmStat Pico, EmStat4, Sensit, Nexus): CV, LSV, DPV, chronoamperometry, raw scripts.",
       "command": "labmcp-palmsens",
       "module": "labmcp_palmsens.server",
@@ -1164,7 +1164,7 @@
         {
           "name": "run_methodscript",
           "kind": "hazard",
-          "description": "Advanced: run a raw MethodSCRIPT and return its raw output and decoded data packages. Literal potentials of set_e / set_range_minmax da and the CV, LSV, DPV, SWV, NPV, ACV, CA, PAD, EIS and fast CV/CA techniques are checked against `max_potential_v`; values computed at run time are not. Aborted after `timeout_s`; add `on_finished:` + `cell_off` to your script so the cell is switched off after an abort. After a runtime error the server switches the cell off itself."
+          "description": "Advanced: run a raw MethodSCRIPT and return its raw output and decoded data packages. Literal potentials of set_e / set_range_minmax da and the CV, LSV, DPV, SWV, NPV, ACV, CA, PAD, EIS and fast CV/CA techniques are checked against `max_potential_v`, and literal `set_range ba` / `set_autoranging ba` currents against `max_current_range_a`; values computed at run time are not. Aborted after `timeout_s`; add `on_finished:` + `cell_off` to your script so the cell is switched off after an abort. After a runtime error, a timeout or `abort_measurement` the server switches the cell off itself."
         }
       ]
     },
@@ -1191,7 +1191,7 @@
       "summary": "Weigh (stable/immediate), tare, zero, log drift series, internal adjustment, ambient filter, keypad lock.",
       "status": "simulated",
       "package": "labmcp-sartorius",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "MCP server for Sartorius laboratory balances (SBI protocol): weigh, tare, zero, log drift, internal adjustment.",
       "command": "labmcp-sartorius",
       "module": "labmcp_sartorius.server",
@@ -1336,12 +1336,12 @@
         {
           "name": "start_acquisition",
           "kind": "hazard",
-          "description": "Start an acquisition with the instrument's current settings (IAPI StartAcquisition), recording to a raw file. This consumes sample. The instrument must be On; an acquisition must not already be running. Stop it with stop_acquisition."
+          "description": "Start an acquisition with the instrument's current settings (IAPI StartAcquisition), recording to a raw file. This consumes sample. The instrument must be On; an acquisition must not already be running. Stop it with stop_acquisition. scan_count and until_stopped acquisitions are cancelled automatically after max_acquisition_duration_s."
         },
         {
           "name": "stop_acquisition",
           "kind": "safety",
-          "description": "Stop the running acquisition (IAPI CancelAcquisition), by default also cancelling custom and repeating scans, and optionally switch the instrument to Standby (switch back to On in Tune)."
+          "description": "Stop the running acquisition (IAPI CancelAcquisition), by default also cancelling custom and repeating scans, and optionally switch the instrument to Standby (switch back to On in Tune). Every step is attempted even if an earlier one fails; failures are reported."
         },
         {
           "name": "submit_custom_scan",
@@ -1351,7 +1351,7 @@
         {
           "name": "wait_for_scan",
           "kind": "read",
-          "description": "Wait for the next scan that arrives after this call (optionally of one MS order, or the result of a custom scan by its access id) and return it. Returns found=false after timeout_s if nothing matching arrived (e.g. the instrument is in Standby)."
+          "description": "Wait for the next scan that arrives after this call (optionally of one MS order, or the result of a custom scan by its access id) and return it. For a custom scan placed with submit_custom_scan, a result that arrived since it was placed is returned at once. Returns found=false after timeout_s if nothing matching arrived (e.g. the instrument is in Standby)."
         }
       ]
     },
@@ -1377,7 +1377,7 @@
       "summary": "Read mass/volumetric flow, pressure and temperature, set setpoints, select gases, tare, hold or close valves, log flow series.",
       "status": "simulated",
       "package": "labmcp-alicat",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "MCP server for Alicat mass flow and pressure meters/controllers: read flow, set setpoints, select gas, tare, hold/close valves.",
       "command": "labmcp-alicat",
       "module": "labmcp_alicat.server",
@@ -1482,7 +1482,7 @@
       "summary": "Read setpoints and measured V/I/CV-CC per channel, set voltage and current limits, switch outputs on/off, set OVP/OCP, read errors.",
       "status": "simulated",
       "package": "labmcp-bench-psu",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "description": "MCP server for programmable DC bench power supplies (Rigol DP700/DP800/DP900, Siglent SPD3303X/SPD1000X, Aim-TTi CPX/MX/QL/PL-P): set, measure, switch outputs, OVP/OCP.",
       "command": "labmcp-bench-psu",
       "module": "labmcp_bench_psu.server",
@@ -1571,7 +1571,7 @@
       "summary": "Read analog inputs, stream waveforms, read thermocouples and the device temperature, read/set digital I/O and set DACs, with voltage and stream limits.",
       "status": "simulated",
       "package": "labmcp-labjack",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "description": "MCP server for LabJack T4, T7/T7-Pro and T8 DAQ devices (LJM): analog inputs, streaming, thermocouples, DACs and digital I/O with safety limits.",
       "command": "labmcp-labjack",
       "module": "labmcp_labjack.server",
@@ -1663,7 +1663,7 @@
       "summary": "List devices, acquire finite analog voltage and thermocouple data, read/write digital lines and set analog outputs, with voltage, rate and sample limits.",
       "status": "simulated",
       "package": "labmcp-ni-daqmx",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "MCP server for National Instruments DAQ devices (NI-DAQmx): analog/thermocouple acquisition, digital I/O and analog outputs with safety limits.",
       "command": "labmcp-ni-daqmx",
       "module": "labmcp_ni_daqmx.server",
@@ -1747,7 +1747,7 @@
       "summary": "Read settings, autoscale, run/stop/single, set channels, timebase and edge trigger, take measurements, capture scaled waveforms (screen or deep memory) and screenshots.",
       "status": "simulated",
       "package": "labmcp-rigol-scope",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "MCP server for Rigol digital oscilloscopes (DS1000Z/MSO1000Z, DS1000Z-E, MSO5000, DHO800/900/1000/4000): settings, triggering, measurements, waveform capture and screenshots over SCPI.",
       "command": "labmcp-rigol-scope",
       "module": "labmcp_rigol_scope.server",
@@ -1857,7 +1857,7 @@
       "summary": "Receive-only LIS: ACK/NAK frames with checksum validation, reassemble messages, and query results by sample, patient, test or time. Patient name/DOB redacted by default. Research use only.",
       "status": "simulated",
       "package": "labmcp-astm-lis",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "description": "MCP server that receives results from clinical/lab analyzers over ASTM E1381/E1394 (CLSI LIS1/LIS2): serial, TCP client or TCP listener.",
       "command": "labmcp-astm-lis",
       "module": "labmcp_astm_lis.server",
@@ -1925,7 +1925,7 @@
       "summary": "Scan, read device info/battery, record heart rate with RR intervals and HRV, read SpO2, blood pressure, temperature and weight. Research use only, not a medical device.",
       "status": "simulated",
       "package": "labmcp-ble-health",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "description": "MCP server for Bluetooth LE health sensors (standard GATT profiles): heart rate + HRV, SpO2, blood pressure, temperature, weight.",
       "command": "labmcp-ble-health",
       "module": "labmcp_ble_health.server",
@@ -2012,7 +2012,7 @@
       "summary": "List boards, stream, record N seconds (stats + downsampled traces + CSV), EEG band powers, event markers, per-channel signal quality (flat, railed, mains noise). Research use only.",
       "status": "simulated",
       "package": "labmcp-brainflow",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "MCP server for EEG/EMG/ECG/PPG biosensing boards via BrainFlow (OpenBCI, Muse, Neurosity, g.tec Unicorn, BrainBit, ...): stream, record, band powers, markers, signal quality.",
       "command": "labmcp-brainflow",
       "module": "labmcp_brainflow.server",
@@ -2021,8 +2021,8 @@
       "tools": [
         {
           "name": "configure_board",
-          "kind": "control",
-          "description": "Send a board-specific configuration command through BrainFlow's config_board (e.g. OpenBCI channel settings 'x1060110X', test signals, or Muse presets 'p50'/'p61' to enable PPG). Only acquisition settings of the amplifier change. Consult the board's SDK documentation first."
+          "kind": "hazard",
+          "description": "Send a raw board-specific command to the firmware through BrainFlow's config_board (e.g. OpenBCI channel settings 'x1060110X', test signals, or Muse presets 'p50'/'p61' to enable PPG)."
         },
         {
           "name": "get_band_powers",
@@ -2067,7 +2067,7 @@
         {
           "name": "record",
           "kind": "read",
-          "description": "Record `duration_s` seconds and return per-channel statistics, event markers and downsampled traces. Uses the live stream if one is running, otherwise starts a temporary one. The full data (every row, full sampling rate) can be written to `save_path`."
+          "description": "Record `duration_s` seconds and return per-channel statistics, event markers and downsampled traces. Uses the live stream if one is running, otherwise starts a temporary one. The full data (every row, full sampling rate) can be written to `save_path`. `stop_streaming` ends a recording early."
         },
         {
           "name": "start_streaming",
@@ -2076,8 +2076,8 @@
         },
         {
           "name": "stop_streaming",
-          "kind": "control",
-          "description": "Stop acquisition (saves battery). Data already in the buffer is kept until the session is released (`reconnect`) or read."
+          "kind": "safety",
+          "description": "Stop acquisition (saves battery). A `record` in progress ends at once with the data acquired so far. Data already in the buffer is kept until the next stream starts or the session is released (`reconnect`)."
         }
       ]
     },
@@ -2118,7 +2118,7 @@
       "summary": "Configure a voltage or current source with compliance, switch the output on/off, measure V and I, run bounded linear/log/dual IV sweeps with resistance fit and CSV export, 2/4-wire sense.",
       "status": "simulated",
       "package": "labmcp-keithley-smu",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "MCP server for Keithley SourceMeter SMUs (2400 series SCPI, 2450 family SCPI, 2600B TSP): source V or I with compliance, measure, bounded IV sweeps that always end with the output off.",
       "command": "labmcp-keithley-smu",
       "module": "labmcp_keithley_smu.server",
@@ -2173,7 +2173,7 @@
         {
           "name": "run_iv_sweep",
           "kind": "hazard",
-          "description": "Run a stepped IV sweep: configure the source, switch the output ON, step through the levels measuring V and I at each, then ALWAYS switch the output OFF (also on errors or when `output_off` is called). Returns the curve (downsampled), compliance flags, a linear fit and optional full CSV. The output must be off beforehand. Limits are checked first."
+          "description": "Run a stepped IV sweep: configure the source, switch the output ON, step through the levels measuring V and I at each, then ALWAYS switch the output OFF (also on errors or when `output_off` is called). Returns the curve (downsampled), compliance flags, a linear fit and optional full CSV (a new file; an existing file is never overwritten). The output must be off beforehand. Limits are checked first."
         },
         {
           "name": "set_4wire",
@@ -2206,7 +2206,7 @@
       "summary": "Read all sensor inputs with status, heater status, set setpoints/ramps/heater ranges/PID, wait for stable temperature, all heaters off.",
       "status": "simulated",
       "package": "labmcp-lakeshore",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "description": "MCP server for Lake Shore Cryotronics 335/336/350 temperature controllers: read sensors, setpoints, ramps, heater ranges, PID, wait for stability, all heaters off.",
       "command": "labmcp-lakeshore",
       "module": "labmcp_lakeshore.server",
@@ -2216,7 +2216,7 @@
         {
           "name": "all_heaters_off",
           "kind": "safety",
-          "description": "Turn every output off (heater range 0 on outputs 1-4), like the front-panel All Off key, and stop any running wait. Reports the read-back range of each output."
+          "description": "Turn every output off (heater range 0 on outputs 1-4), like the front-panel All Off key, and stop any running wait. Reports the read-back range of each output and `all_off`."
         },
         {
           "name": "get_command_log",
@@ -2246,7 +2246,7 @@
         {
           "name": "set_heater_range",
           "kind": "hazard",
-          "description": "Set an output's heater range (each step is ~10x more power). Anything above 0 lets the output heat: in closed loop as the PID demands, in open loop at the front-panel manual output. Refused above `max_heater_range`. Start with the lowest range that can reach the setpoint."
+          "description": "Set an output's heater range (each step is ~10x more power). Anything above 0 lets the output heat: in closed loop as the PID demands, in open loop at the front-panel manual output. Refused above `max_heater_range`, or if the setpoint already programmed on a closed-loop, zone or warm-up output is above `max_setpoint_k`. Start with the lowest range that can reach the setpoint."
         },
         {
           "name": "set_pid",
@@ -2291,7 +2291,7 @@
       "summary": "Read and log pressures with status per channel, identify gauges, change units, switch ionisation gauges on/off with a pressure interlock, read errors.",
       "status": "simulated",
       "package": "labmcp-pfeiffer-tpg",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "MCP server for Pfeiffer Vacuum TPG 361/362/366 and TPG 261/262 gauge controllers: read and log pressures, gauge types, units, ionisation-gauge power.",
       "command": "labmcp-pfeiffer-tpg",
       "module": "labmcp_pfeiffer_tpg.server",
@@ -2321,7 +2321,7 @@
         {
           "name": "log_pressure_series",
           "kind": "read",
-          "description": "Log pressures at a fixed interval (e.g. a pump-down curve, leak-up/rate-of-rise test or bake-out). Returns per-channel statistics in log-space plus a downsampled series; the full series can be written to CSV. Bounded by `max_log_duration_s`."
+          "description": "Log pressures at a fixed interval (e.g. a pump-down curve, leak-up/rate-of-rise test or bake-out). Returns per-channel statistics in log-space plus a downsampled series; the full series can be written to a new CSV file (an existing file is never overwritten). Bounded by `max_log_duration_s` and 2 h per call."
         },
         {
           "name": "read_all_pressures",
@@ -2376,7 +2376,7 @@
       "summary": "Read X/Y/R/θ snapshots, set reference frequency/harmonic/phase, sine amplitude, sensitivity, time constant, auto phase/gain/range, bounded frequency sweeps.",
       "status": "simulated",
       "package": "labmcp-srs-lockin",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "description": "MCP server for Stanford Research Systems lock-in amplifiers (SR810/SR830, SR860/SR865A): read X/Y/R/θ, set reference, sensitivity and time constant, frequency sweeps.",
       "command": "labmcp-srs-lockin",
       "module": "labmcp_srs_lockin.server",
@@ -2401,7 +2401,7 @@
         {
           "name": "frequency_sweep",
           "kind": "hazard",
-          "description": "Step the internal reference (and SINE OUT drive) from start_hz to stop_hz, waiting for the output filter to settle at each point, and record X/Y/R/θ vs frequency - e.g. a resonance or transfer-function measurement. The drive amplitude stays at its present value. Needs the internal reference. The estimated duration must be within `max_sweep_duration_s`; `set_amplitude_minimum` stops a running sweep."
+          "description": "Step the internal reference (and SINE OUT drive) from start_hz to stop_hz, waiting for the output filter to settle at each point, and record X/Y/R/θ vs frequency - e.g. a resonance or transfer-function measurement. The drive amplitude stays at its present value. Needs the internal reference. The estimated duration must be within `max_sweep_duration_s`; `set_amplitude_minimum` stops a running sweep. `save_path` must be a new .csv file."
         },
         {
           "name": "get_command_log",
@@ -2488,12 +2488,12 @@
         {
           "name": "all_off",
           "kind": "safety",
-          "description": "Put the RGA in a safe state: abort any degas, CDEM off (HV0), filament off (FL0) and quadrupole RF/DC off (MR0). Use when finished, before venting, or if anything looks wrong."
+          "description": "Put the RGA in a safe state: abort any degas, CDEM off (HV0), filament off (FL0) and quadrupole RF/DC off (MR0). Use when finished, before venting, or if anything looks wrong. It interrupts a running scan or leak check, and every step is attempted even if an earlier one fails."
         },
         {
           "name": "analog_scan",
           "kind": "read",
-          "description": "Record an analog mass spectrum (SC1): the quadrupole steps through the mass range and the full peak shapes are returned (downsampled) with a peak list, the total pressure measured at the end of the scan, and optionally the full data as CSV. Use it to check peak positions and to survey unknown gases. Duration depends on the noise floor (e.g. 126 ms/amu at NF4)."
+          "description": "Record an analog mass spectrum (SC1): the quadrupole steps through the mass range and the full peak shapes are returned (downsampled) with a peak list, the total pressure measured at the end of the scan, and optionally the full data as CSV. Use it to check peak positions and to survey unknown gases. Duration depends on the noise floor (e.g. 126 ms/amu at NF4). An existing save_path file is never overwritten."
         },
         {
           "name": "calibrate",
@@ -2503,7 +2503,7 @@
         {
           "name": "cdem_off",
           "kind": "safety",
-          "description": "Switch the electron multiplier off (HV0) and return to Faraday-cup detection. Always allowed."
+          "description": "Switch the electron multiplier off (HV0) and return to Faraday-cup detection. Always allowed, and it interrupts a running scan, mass measurement or leak check."
         },
         {
           "name": "degas",
@@ -2513,7 +2513,7 @@
         {
           "name": "filament_off",
           "kind": "safety",
-          "description": "Switch the filament off (FL0), stopping a degas first if one is running. Always allowed."
+          "description": "Switch the filament off (FL0), stopping a degas first if one is running. Always allowed, and it interrupts a running scan, mass measurement or leak check."
         },
         {
           "name": "get_command_log",
@@ -2597,7 +2597,7 @@
       "summary": "Read optical power (W and dBm), log power stability series, set wavelength correction, averaging and range, dark-zero the sensor, read sensor head temperature.",
       "status": "simulated",
       "package": "labmcp-thorlabs-pm",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "MCP server for Thorlabs optical power meters (PM100D/PM100A/PM100USB/PM400/PM101/PM5020, SCPI over USBTMC/VISA): read power, log stability, set wavelength, averaging, range, zero.",
       "command": "labmcp-thorlabs-pm",
       "module": "labmcp_thorlabs_pm.server",
@@ -2622,7 +2622,7 @@
         {
           "name": "log_power_series",
           "kind": "read",
-          "description": "Log a series of power readings to characterise laser stability, warm-up or drift. Returns mean, stdev, min/max, RMS and peak-to-peak stability (%) and drift (%/min), plus the readings (downsampled to `max_points`; use `save_path` to keep all of them)."
+          "description": "Log a series of power readings to characterise laser stability, warm-up or drift. Returns mean, stdev, min/max, RMS and peak-to-peak stability (%) and drift (%/min), plus the readings (downsampled to `max_points`; use `save_path`, a new .csv file, to keep all of them)."
         },
         {
           "name": "read_power",
@@ -2677,7 +2677,7 @@
       "summary": "Read PVs with units, precision, alarms, timestamps and limits; monitor PVs for a bounded time; guarded writes (allow-list regex, access rights, DRVH/DRVL control limits, put-callback completion); configurable safe-state action.",
       "status": "simulated",
       "package": "labmcp-epics",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "MCP server for EPICS Channel Access (accelerators, synchrotrons, neutron sources, telescopes, physics labs): read, monitor and (guarded) write process variables via caproto.",
       "command": "labmcp-epics",
       "module": "labmcp_epics.server",
@@ -2722,7 +2722,7 @@
         {
           "name": "put_pvs",
           "kind": "hazard",
-          "description": "Write several PVs in order (e.g. set both slit blades). Every write is validated first (allow- list, access rights, type, control limits); if any is invalid nothing is written. Writing stops at the first failure and the rest are reported as not written."
+          "description": "Write several PVs in order (e.g. set both slit blades). Every write is validated first (allow- list, access rights, type, control limits); if any is invalid nothing is written. Writing stops at the first failure and the rest are reported as not written. The whole batch must finish within an hour: writes that would start later are not sent."
         },
         {
           "name": "pv_info",
@@ -2759,7 +2759,7 @@
       "summary": "Read and write named, typed, scaled points from a YAML/JSON register map with per-point min/max, raw register/coil access, and a map-defined safe state.",
       "status": "simulated",
       "package": "labmcp-modbus",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "description": "MCP server for Modbus TCP and Modbus RTU devices (temperature controllers, chillers, PLCs, sensors, VFDs) with typed, scaled register maps, per-point limits and a safe state.",
       "command": "labmcp-modbus",
       "module": "labmcp_modbus.server",
@@ -2769,7 +2769,7 @@
         {
           "name": "apply_safe_state",
           "kind": "safety",
-          "description": "Put the device into the safe state defined in the register map (e.g. heater output off, controller to standby), writing each step in order and reading it back. Every step is attempted even if an earlier one fails. Call it immediately if anything looks wrong."
+          "description": "Put the device into the safe state defined in the register map (e.g. heater output off, controller to standby), writing each step in order and reading it back. Every step is attempted even if an earlier one fails. Call it immediately if anything looks wrong. `all_ok` is true only if every step was written AND read back with the requested value; a step the device acknowledged but ignored (e.g. in local mode) is not ok."
         },
         {
           "name": "get_command_log",
@@ -2819,7 +2819,7 @@
         {
           "name": "write_point",
           "kind": "hazard",
-          "description": "Write a named point from the register map (setpoint, mode, output enable...). The value is checked against the point's writable flag, min/max or enum BEFORE sending, converted to raw registers, written, then read back. Changing setpoints and outputs acts on real equipment."
+          "description": "Write a named point from the register map (setpoint, mode, output enable...). The value is checked against the point's writable flag, min/max or enum BEFORE sending, converted to raw registers, written, then read back. Changing setpoints and outputs acts on real equipment. If the write succeeds but the read-back fails, `read_back_error` says why."
         },
         {
           "name": "write_register",
@@ -2859,7 +2859,7 @@
       "summary": "Identify, query, write and batch raw SCPI with a query-only read path, configurable command allow/deny lists, error-queue checks, binary block transfer and a user-defined safe state.",
       "status": "simulated",
       "package": "labmcp-scpi",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "description": "Generic MCP server for any IEEE 488.2 / SCPI instrument (DMMs, scopes, SMUs, PSUs, generators, analyzers) over VISA, TCP socket or serial, with command allow/deny lists.",
       "command": "labmcp-scpi",
       "module": "labmcp_scpi.server",
@@ -2919,7 +2919,7 @@
         {
           "name": "scpi_batch",
           "kind": "hazard",
-          "description": "Run a short sequence of SCPI commands and queries in order, checking the error queue after every step. Every step is checked against the command policy BEFORE the first one is sent, so a refused step means nothing was sent. Returns per-step replies and errors."
+          "description": "Run a short sequence of SCPI commands and queries in order, checking the error queue after every step. Every step is checked against the command policy BEFORE the first one is sent, so a refused step means nothing was sent. Returns per-step replies and errors. Steps not started within ~14 minutes are not sent (status not_run)."
         },
         {
           "name": "scpi_primer",
@@ -2960,7 +2960,7 @@
       "summary": "Discover SiLA servers, read features/commands/properties with typed schemas from the FDL, read and subscribe to properties, run commands with client-side FDL validation and an allow-list, track observable commands, cancel via CancelController.",
       "status": "simulated",
       "package": "labmcp-sila2",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "MCP bridge to any SiLA 2 server (lab-automation standard): discover servers, read features from their FDL, read/subscribe properties, run validated commands, track and cancel observable commands.",
       "command": "labmcp-sila2",
       "module": "labmcp_sila2.server",

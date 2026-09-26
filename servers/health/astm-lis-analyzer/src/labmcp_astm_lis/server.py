@@ -7,6 +7,7 @@ except link-level ACK / NAK.
 
 from __future__ import annotations
 
+import codecs
 import logging
 from dataclasses import asdict
 from typing import Annotated, Any
@@ -48,14 +49,41 @@ def _flag(value: str | None, default: bool) -> bool:
     raise InstrumentConnectionError(f"Option value {value!r} must be true or false.")
 
 
+#: Received results, per configuration. The analyzer never re-sends a result it got an ACK for,
+#: so the in-memory store must survive `reconnect` (and a failed reconnect) rather than be
+#: replaced by an empty one.
+_STORES: dict[tuple[Any, ...], ResultStore] = {}
+
+
+def _store(ctx: ConnectContext, redact: bool) -> ResultStore:
+    try:
+        max_messages = int(ctx.option("max_messages", "5000") or 5000)
+    except ValueError as exc:
+        raise InstrumentConnectionError(f"max_messages must be a whole number: {exc}") from exc
+    if max_messages < 1:
+        raise InstrumentConnectionError(f"max_messages must be at least 1, got {max_messages}.")
+
+    def make() -> ResultStore:
+        return ResultStore(max_messages=max_messages, store_path=ctx.option("store_path") or None, redacted=redact)
+
+    if ctx.simulate:  # the simulator re-sends its demo messages on every connect
+        return make()
+    key = (ctx.address, tuple(sorted(ctx.settings.options.items())))
+    if key not in _STORES:
+        _STORES[key] = make()
+    return _STORES[key]
+
+
 def connect(ctx: ConnectContext) -> ASTMReceiver:
     redact = _flag(ctx.option("redact_patient_info"), True)
-    store = ResultStore(
-        max_messages=int(ctx.option("max_messages", "5000") or 5000),
-        store_path=ctx.option("store_path") or None,
-        redacted=redact,
-    )
     encoding = ctx.option("encoding", "latin-1") or "latin-1"
+    try:
+        codecs.lookup(encoding)  # an unknown codec would otherwise fail on every received message
+    except LookupError as exc:
+        raise InstrumentConnectionError(
+            f"Unknown encoding {encoding!r} (--option encoding=...). Use e.g. latin-1, cp1252 or utf-8."
+        ) from exc
+    store = _store(ctx, redact)
     common: dict[str, Any] = {"store": store, "audit": ctx.audit, "redact": redact, "encoding": encoding}
 
     if ctx.simulate:
@@ -171,6 +199,8 @@ class ConnectionStatus(BaseModel):
     results: int
     last_message_at: str | None
     last_analyzer: str | None
+    store_write_errors: int = Field(0, description="Messages that could not be appended to store_path (kept in memory)")
+    last_store_error: str | None = None
     link: LinkCounters
     rejected_connections: int | None = None
     allow_from: list[str] | None = None

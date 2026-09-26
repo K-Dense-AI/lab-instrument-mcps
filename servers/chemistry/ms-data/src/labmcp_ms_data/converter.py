@@ -14,7 +14,10 @@ Supported converters (command lines checked against the official documentation):
   ``proteowizard/pwiz-skyline-i-agree-to-the-vendor-licenses`` (by pulling it the user accepts
   the vendor licences; https://hub.docker.com/r/proteowizard/pwiz-skyline-i-agree-to-the-vendor-licenses)::
 
-      docker run --rm -e WINEDEBUG=-all -v <dir>:/data <image> wine msconvert /data/<file> -o /data ...
+      docker run --rm -e WINEDEBUG=-all -v <input dir>:/data:ro -v <output dir>:/out <image> \
+          wine msconvert /data/<file> -o /out ...
+
+  Only the input's folder (read-only) and the output folder are mounted.
 
 * **ThermoRawFileParser** (https://github.com/compomics/ThermoRawFileParser), cross-platform .NET,
   Thermo ``.raw`` only. Options only work in ``-option=value`` form::
@@ -23,7 +26,9 @@ Supported converters (command lines checked against the official documentation):
 
   (``-f=2`` indexed mzML; ``-p`` disables the native Thermo peak picking; ``-g`` gzips the output.)
 
-Argument lists are built as lists and run without a shell, with a timeout.
+Argument lists are built as lists and run without a shell, with a timeout. On timeout the whole
+process tree is killed (converters are often started through wrapper scripts), and a Docker
+container is killed by name.
 """
 
 from __future__ import annotations
@@ -31,6 +36,7 @@ from __future__ import annotations
 import os
 import platform
 import shutil
+import signal
 import subprocess
 import time
 import uuid
@@ -105,6 +111,16 @@ def choose_converter(fmt: str, requested: str, converter_path: str | None) -> tu
                 "thermorawfileparser": _which(_TRFP_NAMES),
             }[requested]
         return requested, exe
+    if converter_path:  # auto, but the user named the program: tell which one it is from its name
+        name = Path(converter_path).name.lower()
+        for conv, key in (("thermorawfileparser", "thermorawfileparser"), ("docker", "docker"),
+                          ("msconvert", "msconvert")):  # fmt: skip
+            if key in name:
+                return choose_converter(fmt, conv, converter_path)
+        raise InstrumentProtocolError(
+            f"Cannot tell which converter {converter_path!r} is. Add --option converter=msconvert, "
+            "docker or thermorawfileparser."
+        )
     order = ["thermorawfileparser", "msconvert", "docker"] if fmt == "thermo_raw" else ["msconvert", "docker"]
     for conv in order:
         exe = {
@@ -172,20 +188,31 @@ def plan_conversion(
     # docker + wine
     image = docker_image or DOCKER_IMAGE
     name = f"labmcp-msconvert-{uuid.uuid4().hex[:12]}"
-    in_dir = input_path.parent
+    in_dir = input_path.parent  # the whole folder: SCIEX .wiff needs its .wiff.scan sidecar
+    for d in (in_dir, out_dir):
+        if not _docker_mountable(d):
+            raise InstrumentProtocolError(
+                f"Docker cannot mount {str(d)!r}: the path contains ':' or ','. Rename the folder, or use "
+                "another converter."
+            )
     argv = [exe, "run", "--rm", "--name", name, "-e", "WINEDEBUG=-all"]
     if platform.machine().lower() in ("arm64", "aarch64"):
         argv += ["--platform", "linux/amd64"]  # the image is x86-64 only (runs under emulation)
         notes.append("Apple Silicon / ARM: the x86-64 image runs under emulation and is slow.")
-    argv += ["-v", f"{in_dir}:/data"]
-    out_mount = "/data"
-    if out_dir != in_dir:
-        argv += ["-v", f"{out_dir}:/out"]
-        out_mount = "/out"
-    argv += [image, "wine", "msconvert", f"/data/{input_path.name}", "-o", out_mount, *flags]
+    # Input folder read-only; only the output folder is writable.
+    argv += ["-v", f"{in_dir}:/data:ro", "-v", f"{out_dir}:/out"]
+    argv += [image, "wine", "msconvert", f"/data/{input_path.name}", "-o", "/out", *flags]
     if os.name == "posix" and platform.system() == "Linux":
         notes.append("On Linux the output file is owned by root (written inside the container).")
     return ConversionPlan(conv, argv, output, notes, container_name=name)
+
+
+def _docker_mountable(path: Path) -> bool:
+    """False if ``docker -v <path>:...`` would split the path (':' separates fields; ',' breaks --mount)."""
+    text = str(path)
+    if os.name == "nt" and len(text) >= 2 and text[1] == ":":
+        text = text[2:]  # the drive letter
+    return ":" not in text and "," not in text
 
 
 def _tail(text: str | bytes | None, n: int = 1500) -> str:
@@ -196,26 +223,55 @@ def _tail(text: str | bytes | None, n: int = 1500) -> str:
     return text[-n:]
 
 
+def _kill_tree(proc: subprocess.Popen[str]) -> None:
+    """Kill the converter and everything it started (wrapper scripts start mono/dotnet/wine)."""
+    try:
+        if os.name == "nt":
+            subprocess.run(  # noqa: S603, S607
+                ["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=30, check=False
+            )
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)  # the child leads its own session / process group
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
 def run_conversion(plan: ConversionPlan, timeout_s: float) -> ConversionResult:
     t0 = time.monotonic()
+    group: dict[str, object] = (
+        {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+    )
     try:
-        proc = subprocess.run(  # noqa: S603 - argv list, no shell
+        proc = subprocess.Popen(  # noqa: S603 - argv list, no shell
             plan.argv,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
             stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
             shell=False,
-            check=False,
+            **group,  # type: ignore[arg-type]
         )
-    except subprocess.TimeoutExpired as exc:
-        if plan.container_name:  # killing the docker client does not stop the container
-            subprocess.run(
-                [plan.argv[0], "kill", plan.container_name], capture_output=True, timeout=30, check=False
-            )
-        return ConversionResult(None, time.monotonic() - t0, _tail(exc.stdout), _tail(exc.stderr), True)
     except OSError as exc:
         raise InstrumentProtocolError(f"Could not start {plan.argv[0]!r}: {exc}. {INSTALL_HELP}") from exc
-    return ConversionResult(
-        proc.returncode, time.monotonic() - t0, _tail(proc.stdout), _tail(proc.stderr), False
-    )
+    try:
+        out, err = proc.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        _kill_tree(proc)
+        if plan.container_name:  # killing the docker client does not stop the container
+            try:
+                subprocess.run(  # noqa: S603
+                    [plan.argv[0], "kill", plan.container_name], capture_output=True, timeout=30, check=False
+                )
+            except (OSError, subprocess.SubprocessError):
+                pass
+        try:
+            out, err = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:  # something still holds the pipes; give up on the log
+            out, err = exc.stdout, exc.stderr
+        return ConversionResult(None, time.monotonic() - t0, _tail(out), _tail(err), True)
+    return ConversionResult(proc.returncode, time.monotonic() - t0, _tail(out), _tail(err), False)

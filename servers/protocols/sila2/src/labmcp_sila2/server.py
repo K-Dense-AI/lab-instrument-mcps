@@ -11,17 +11,24 @@ from pydantic import BaseModel, Field
 
 from labmcp_sila2.driver import (
     CANCEL_CONTROLLER,
+    MAX_CALL_TIMEOUT_S,
     SilaBridge,
     discover,
+    discover_client,
     open_client,
     parse_address,
     parse_allowlist,
     read_file,
+    seconds_option,
 )
 from labmcp_sila2.fdl import to_json_schema
 from labmcp_sila2.simulator import SIM_SERVER_UUID, SimulatedSilaServer
 
 _TRUTHY = {"1", "true", "yes", "on"}
+MAX_WAIT_S = 3600
+# call_command / subscribe_property: the longest wait plus a server call on each side, with margin, so
+# the MCP tool timeout never cuts a call short (which would lose the execution_id).
+LONG_TOOL_TIMEOUT_S = MAX_WAIT_S + 2 * MAX_CALL_TIMEOUT_S + 60
 
 
 def connect(ctx: ConnectContext) -> SilaBridge:
@@ -29,7 +36,7 @@ def connect(ctx: ConnectContext) -> SilaBridge:
         allowlist = parse_allowlist(ctx.option("command_allowlist"))
     except ValueError as exc:
         raise InstrumentConnectionError(str(exc)) from exc
-    call_timeout = float(ctx.option("call_timeout_s", "") or ctx.settings.timeout or 30.0)
+    call_timeout = seconds_option(ctx.option("call_timeout_s", "") or ctx.settings.timeout or 30.0, "call_timeout_s")
     if ctx.simulate:
         sim = SimulatedSilaServer().start()
         try:
@@ -52,7 +59,7 @@ def connect(ctx: ConnectContext) -> SilaBridge:
     if ctx.address:
         host, port = parse_address(ctx.address)
         client = open_client(host, port, insecure=insecure, root_certs=root, private_key=key, cert_chain=chain,
-                             timeout=float(ctx.option("connect_timeout_s", "15") or 15))
+                             timeout=seconds_option(ctx.option("connect_timeout_s", "15") or 15, "connect_timeout_s"))
         address = f"{host}:{port}"
     else:
         # No address: use SiLA Server Discovery (mDNS) to find the server by name or UUID.
@@ -62,15 +69,12 @@ def connect(ctx: ConnectContext) -> SilaBridge:
                 "No SiLA server address. Pass --address host:port, or --option server_name=<name> / "
                 "--option server_uuid=<uuid> to find it with SiLA Server Discovery (see the discover_servers tool)."
             )
-        from sila2.client import SilaClient
-
-        try:
-            client = SilaClient.discover(
-                server_name=name, server_uuid=uuid, timeout=float(ctx.option("discovery_timeout_s", "10") or 10),
-                insecure=insecure, root_certs=root, private_key=key, cert_chain=chain,
-            )
-        except TimeoutError as exc:
-            raise InstrumentConnectionError(f"No SiLA server matching name={name!r} uuid={uuid!r} was discovered.") from exc
+        client = discover_client(
+            server_name=name, server_uuid=uuid,
+            discovery_timeout=seconds_option(ctx.option("discovery_timeout_s", "10") or 10, "discovery_timeout_s"),
+            connect_timeout=seconds_option(ctx.option("connect_timeout_s", "15") or 15, "connect_timeout_s"),
+            insecure=insecure, root_certs=root, private_key=key, cert_chain=chain,
+        )
         address = f"{client.address}:{client.port} (discovered)"
     return SilaBridge(client, address=address, allowlist=allowlist, call_timeout=call_timeout, audit=ctx.audit,
                       security=security)
@@ -108,8 +112,8 @@ robots, scheduling software) that describes itself in SiLA Feature Definitions.
         "client_cert / client_key": "PEM files for mutual TLS, if the server requires client certificates",
         "command_allowlist": "only these commands may be called, e.g. 'Shaker.Shake,Incubator.*'",
         "server_name / server_uuid": "without --address: connect to the discovered server with this name/UUID",
-        "call_timeout_s": "deadline for unobservable commands and property reads (default 30)",
-        "connect_timeout_s / discovery_timeout_s": "connection / discovery deadlines (default 15 / 10)",
+        "call_timeout_s": f"deadline for unobservable commands and property reads (default 30, max {MAX_CALL_TIMEOUT_S:g})",
+        "connect_timeout_s / discovery_timeout_s": f"connection / discovery deadlines (default 15 / 10, max {MAX_CALL_TIMEOUT_S:g})",
     },
 )
 mcp = server.mcp
@@ -125,6 +129,14 @@ def _iso(ts: float) -> str:
 
 def _bridge() -> SilaBridge:
     return server.driver
+
+
+def _address_for(record: dict[str, Any]) -> str:
+    """A --address for a discovery record (IPv6 in brackets, as parse_address expects)."""
+    if not record["addresses"] or record["port"] is None:
+        return ""
+    host = record["addresses"][0]
+    return f"[{host}]:{record['port']}" if ":" in host else f"{host}:{record['port']}"
 
 
 # ------------------------------------------------------------------ models
@@ -270,7 +282,7 @@ Metadata = Annotated[
 # ------------------------------------------------------------------ tools
 
 
-@mcp.tool(**READ, timeout=60)
+@mcp.tool(**READ, timeout=180)  # timeout_s <= 120 plus the last record lookups and shutdown
 def discover_servers(
     timeout_s: Annotated[float, Field(gt=0, le=120, description="How long to listen for mDNS announcements")] = 3.0,
 ) -> DiscoveryResult:
@@ -287,10 +299,7 @@ def discover_servers(
         )
         return DiscoveryResult(servers=[entry], duration_s=0.0, simulated=True, timestamp=_now())
     found = discover(timeout_s)
-    servers = [
-        DiscoveredServer(**d, connect_with=f"{d['addresses'][0]}:{d['port']}" if d["addresses"] else "")
-        for d in found
-    ]
+    servers = [DiscoveredServer(**d, connect_with=_address_for(d)) for d in found]
     return DiscoveryResult(servers=servers, duration_s=timeout_s, simulated=False, timestamp=_now())
 
 
@@ -332,11 +341,11 @@ def get_property(feature: FeatureName, property: Annotated[str, Field(min_length
                          type=to_json_schema(p.type, ir), timestamp=_now())
 
 
-@mcp.tool(**READ, timeout=3700)
+@mcp.tool(**READ, timeout=LONG_TOOL_TIMEOUT_S)
 def subscribe_property(
     feature: FeatureName,
     property: Annotated[str, Field(min_length=1, max_length=255)],
-    duration_s: Annotated[float, Field(gt=0, le=3600, description="How long to collect updates")] = 10.0,
+    duration_s: Annotated[float, Field(gt=0, le=MAX_WAIT_S, description="How long to collect updates")] = 10.0,
     max_updates: Annotated[int, Field(ge=1, le=10000, description="Stop after this many updates")] = 500,
     poll_interval_s: Annotated[float, Field(ge=0.1, le=60, description="Polling interval for unobservable properties")] = 1.0,
     metadata: Metadata = None,
@@ -353,7 +362,7 @@ def subscribe_property(
     )
 
 
-@mcp.tool(**HAZARD, timeout=3700)
+@mcp.tool(**HAZARD, timeout=LONG_TOOL_TIMEOUT_S)
 def call_command(
     feature: FeatureName,
     command: Annotated[str, Field(min_length=1, max_length=255, description="Command identifier")],
@@ -361,7 +370,7 @@ def call_command(
         dict[str, Any], Field(description="Parameter identifier -> value, as described by list_features")
     ] = {},  # noqa: B006 - pydantic copies defaults
     wait_s: Annotated[
-        float, Field(ge=0, le=3600, description="Observable commands: wait up to this long for completion (0 = return at once)")
+        float, Field(ge=0, le=MAX_WAIT_S, description="Observable commands: wait up to this long for completion (0 = return at once)")
     ] = 0.0,
     metadata: Metadata = None,
 ) -> CommandResult:

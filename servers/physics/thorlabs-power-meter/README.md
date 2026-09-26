@@ -68,7 +68,7 @@ Add `--read-only` to allow readings but block wavelength, averaging, range and z
 | `get_command_log` | 👁 read | Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done. |
 | `get_connection_info` | 👁 read | Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first. |
 | `get_device_info` | 👁 read | Identify the meter console and the attached sensor head (model, serial, type, wavelength range, power ranges), and report the present wavelength, averaging, range and zero value. |
-| `log_power_series` | 👁 read | Log a series of power readings to characterise laser stability, warm-up or drift. Returns mean, stdev, min/max, RMS and peak-to-peak stability (%) and drift (%/min), plus the readings (downsampled to `max_points`; use `save_path` to keep all of them). |
+| `log_power_series` | 👁 read | Log a series of power readings to characterise laser stability, warm-up or drift. Returns mean, stdev, min/max, RMS and peak-to-peak stability (%) and drift (%/min), plus the readings (downsampled to `max_points`; use `save_path`, a new .csv file, to keep all of them). |
 | `read_power` | 👁 read | Read the optical power once (in W, plus dBm and a formatted string). The reading uses the configured correction wavelength and averaging; set the wavelength first. |
 | `read_sensor_temperature` | 👁 read | Read the sensor head temperature in °C (thermal sensors and other heads with a built-in temperature sensor only). |
 | `reconnect` | 🛑 safety | Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged). |
@@ -86,9 +86,9 @@ A power meter only measures, so this server has no hazard tools. Your laser is t
 
 | Limit | Default | Meaning |
 |---|---|---|
-| `max_series_duration_s` | 600 s | Longest power-logging series an agent may start |
+| `max_series_duration_s` | 600 s | Longest power-logging series an agent may start, estimated as count × max(interval, reading time), where a reading takes averaging × 3 ms plus ~10 ms |
 
-Override at launch: `--limit max_series_duration_s=3600`.
+Override at launch: `--limit max_series_duration_s=3600`. One call can log at most 3640 s (the tool's timeout minus a margin): longer estimates are refused, and a series that runs slower than estimated stops early and returns what it measured (`completed: false`). `save_path` must end in `.csv` and must not exist yet (an existing file is never overwritten); it is checked before logging starts.
 
 ## Example prompts
 

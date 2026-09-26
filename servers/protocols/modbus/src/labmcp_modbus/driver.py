@@ -25,6 +25,7 @@ No MCP code here.
 from __future__ import annotations
 
 import inspect
+import math
 import re
 import threading
 from dataclasses import dataclass
@@ -34,6 +35,7 @@ from typing import Any, Protocol
 from labmcp import (
     AuditLog,
     InstrumentConnectionError,
+    InstrumentError,
     InstrumentProtocolError,
     InstrumentTimeout,
     SafetyLimitError,
@@ -175,6 +177,12 @@ class PymodbusClient:
             ) from exc
         except modbus_error as exc:
             raise InstrumentProtocolError(f"Modbus error during {name} at address {address}: {exc}") from exc
+        except OSError as exc:  # pyserial SerialException (adapter unplugged), socket reset during send
+            self._client.close()  # so the next request re-opens the port instead of reusing a dead handle
+            raise InstrumentConnectionError(
+                f"Connection to {self.description} failed during {name}: {exc}. Check the cable/adapter; "
+                "the next request reconnects (or call the `reconnect` tool)."
+            ) from exc
         if rr.isError():
             raise ModbusExceptionResponse(name, address, getattr(rr, "exception_code", None))
         return rr
@@ -270,12 +278,12 @@ class ModbusDevice:
     def read_registers(self, table: str, address: int, count: int) -> list[int]:
         _check_span(address, count, MAX_READ_REGISTERS)
         fn = {"holding": "read_holding_registers", "input": "read_input_registers"}[table]
-        return self._request(fn, address, count)
+        return _complete(self._request(fn, address, count), count, fn, address)
 
     def read_bits(self, table: str, address: int, count: int) -> list[bool]:
         _check_span(address, count, MAX_READ_BITS)
         fn = {"coil": "read_coils", "discrete": "read_discrete_inputs"}[table]
-        return self._request(fn, address, count)
+        return _complete(self._request(fn, address, count), count, fn, address)
 
     def _protect_mapped(self, table: str, address: int, count: int) -> None:
         if not self.allow_raw_writes:
@@ -325,10 +333,20 @@ class ModbusDevice:
             return self.read_bits(p.table, p.address, p.count)
         return self.read_registers(p.table, p.address, p.count)
 
-    def read_point(self, name: str) -> PointReading:
-        p = self._point(name)
+    def _reading(self, p: Point) -> PointReading:
         value, raw = p.decode(self._read_raw(p))
+        if isinstance(value, float) and not math.isfinite(value):
+            # float registers often hold NaN as "no value"; NaN/inf are not valid JSON numbers either
+            finite_raw = raw if not isinstance(raw, float) or math.isfinite(raw) else None
+            return PointReading(
+                p.name, None, finite_raw, p.unit, p.table, p.address, _now(),
+                error=f"the device returned {value} (not a finite number): no valid value (e.g. a sensor "
+                "fault), or the point's type/word_order/byte_order is wrong",
+            )  # fmt: skip
         return PointReading(p.name, value, raw, p.unit, p.table, p.address, _now())
+
+    def read_point(self, name: str) -> PointReading:
+        return self._reading(self._point(name))
 
     def read_points(self, names: list[str] | None = None) -> list[PointReading]:
         m = self._require_map()
@@ -336,8 +354,7 @@ class ModbusDevice:
         for name in names or list(m.points):
             p = self._point(name)
             try:
-                value, raw = p.decode(self._read_raw(p))
-                out.append(PointReading(p.name, value, raw, p.unit, p.table, p.address, _now()))
+                out.append(self._reading(p))
             except (InstrumentProtocolError, InstrumentTimeout) as exc:
                 out.append(PointReading(p.name, None, None, p.unit, p.table, p.address, _now(), error=str(exc)))
         return out
@@ -349,7 +366,11 @@ class ModbusDevice:
             raise InstrumentProtocolError(str(exc.args[0])) from None
 
     def write_point(self, name: str, value: float | bool | str) -> tuple[PointReading, float | bool | str]:
-        """Validate against the map, write, then read back. Returns (read-back, value written)."""
+        """Validate against the map, write, then read back. Returns (read-back, value written).
+
+        If the write succeeds but the read-back fails (write-only register, link dropped), the
+        reading carries the ``error`` rather than raising: the value WAS written.
+        """
         p = self._point(name)
         try:
             encoded, stored = p.encode(value)
@@ -362,20 +383,45 @@ class ModbusDevice:
                 self._request("write_register", p.address, encoded[0])
             else:
                 self._request("write_registers", p.address, encoded)
-            return self.read_point(name), stored
+            try:
+                reading = self.read_point(name)
+            except InstrumentError as exc:
+                reading = PointReading(
+                    p.name, None, None, p.unit, p.table, p.address, _now(),
+                    error=f"the value was written, but reading it back failed: {exc}",
+                )  # fmt: skip
+            return reading, stored
 
     def apply_safe_state(self) -> list[dict[str, Any]]:
-        """Write every ``safe_state`` step in order; keep going if one fails."""
+        """Write every ``safe_state`` step in order; keep going if one fails.
+
+        A step is ``ok`` only if the write was accepted AND the value read back matches: many
+        controllers acknowledge writes but ignore them (local/keypad mode), which must not be
+        reported as safe.
+        """
         m = self._require_map()
         if not m.safe_state:
             raise InstrumentProtocolError("The register map defines no safe_state.")
-        results = []
+        results: list[dict[str, Any]] = []
         for step in m.safe_state:
+            entry: dict[str, Any] = {"point": step.point, "requested": step.value}
             try:
                 reading, stored = self.write_point(step.point, step.value)
-                results.append({"point": step.point, "requested": step.value, "read_back": reading.value, "ok": True})
             except Exception as exc:  # report every step, even if one fails
-                results.append({"point": step.point, "requested": step.value, "ok": False, "error": str(exc)})
+                results.append({**entry, "ok": False, "error": str(exc)})
+                continue
+            entry.update(written=stored, read_back=reading.value)
+            if reading.error:
+                entry.update(ok=False, error=f"not confirmed: {reading.error}")
+            elif not values_match(reading.value, stored):
+                entry.update(
+                    ok=False,
+                    error=f"the device accepted the write but reads back {reading.value!r} instead of {stored!r} "
+                    "(it may be in local/keypad mode, or clamp the value)",
+                )
+            else:
+                entry["ok"] = True
+            results.append(entry)
         return results
 
     # ------------------------------------------------------------ identity
@@ -399,6 +445,24 @@ class ModbusDevice:
 
     def close(self) -> None:
         self.client.close()
+
+
+def values_match(read_back: Any, written: Any) -> bool:
+    """True if a read-back equals the value written (floats compared to float32 precision)."""
+    if isinstance(read_back, bool) or isinstance(written, bool):
+        return read_back is written
+    if isinstance(read_back, (int, float)) and isinstance(written, (int, float)):
+        return math.isclose(read_back, written, rel_tol=1e-6, abs_tol=1e-9)
+    return bool(read_back == written)
+
+
+def _complete(values: list[Any], count: int, fn: str, address: int) -> list[Any]:
+    """A reply with fewer registers/bits than requested would decode as garbage (or crash struct)."""
+    if len(values) < count:
+        raise InstrumentProtocolError(
+            f"The device answered {fn} at address {address} with {len(values)} value(s) instead of {count}."
+        )
+    return list(values[:count])
 
 
 def _check_span(address: int, count: int, maximum: int) -> None:

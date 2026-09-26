@@ -9,6 +9,7 @@ from labmcp.errors import (
     ReadOnlyModeError,
     SafetyLimitError,
 )
+from labmcp.files import prepare_save_path
 from labmcp.safety import Limit, SafetyLimits
 from labmcp.server import CONTROL, HAZARD, READ, SAFETY, ConnectContext, InstrumentServer, Settings
 from labmcp.transports import (
@@ -43,4 +44,5 @@ __all__ = [
     "Transport",
     "open_transport",
     "parse_address",
+    "prepare_save_path",
 ]

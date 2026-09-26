@@ -209,3 +209,102 @@ def test_limit_error_type():
         server.check("max_flow_ul_s", 20)
     with pytest.raises(InstrumentProtocolError):
         raise CavroError(11, "test")
+
+
+# ------------------------------------------------------------------ regressions (bug review)
+
+
+def test_move_that_outlasts_its_wait_is_terminated():
+    # Regression: when the wait for a plunger move timed out, the pump kept moving unattended.
+    from labmcp import InstrumentTimeout
+
+    clock = FakeClock()  # frozen: the simulated move never finishes
+    pump, sim = make_pump(clock=clock)
+    pump.command("ZR")
+    clock.now = 3.0
+    pump.wait_ready(1)
+    with pytest.raises(InstrumentTimeout, match=r"terminated \(T\)"):
+        pump.move_plunger("P", 6000, 5, timeout=0.3)  # full stroke at V5 = 20 min
+    assert pump.query_status().ready  # T stopped the plunger
+    clock.now = 2000.0
+    assert pump.plunger_steps() == 0  # and it stayed where it was
+
+
+def test_terminate_tool_retries_a_lost_answer():
+    class LossySim(CavroSimulator):
+        dropped = 0
+
+        def handle(self, command):
+            if command.strip().endswith("T") and self.dropped == 0:
+                self.dropped += 1
+                return None  # lost on the wire
+            return super().handle(command)
+
+    clock = FakeClock()
+    sim = LossySim(clock=clock)
+    pump = CavroPump(SimulatedTransport(sim, read_termination="\x03\r\n", write_termination="\r", timeout=0.1))
+    pump.command("ZR")
+    clock.now = 3.0
+    pump.command("V5P6000R")
+    server.configure(simulate=True, options={})
+    server._driver = pump  # the tool under test uses this pump
+    try:
+        from labmcp_cavro.server import terminate
+
+        status = terminate()
+        assert sim.dropped == 1 and status.ready
+    finally:
+        server._driver = None
+        server.disconnect()
+
+
+async def test_overfill_is_refused_before_the_valve_moves():
+    async with simulated_client(server, options=FAST) as client:
+        await client.call_tool("initialize", {})
+        valve_before = server.driver.valve_position()
+        with pytest.raises(Exception, match="overfill"):
+            await client.call_tool("aspirate_ul", {"volume_ul": 1200, "flow_ul_s": 100, "valve": "output"})
+        assert server.driver.valve_position() == valve_before == "i"
+
+
+def test_failed_connect_closes_the_transport(monkeypatch):
+    # Regression: a bad pump_address / steps_per_stroke was only rejected by CavroPump, after the
+    # serial port had been opened, and the port was never closed (a second connect then fails).
+    import labmcp.server as core_server
+    import labmcp_cavro.server as cavro_server
+
+    opened = []
+
+    class Recording(core_server.SimulatedTransport):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            opened.append(self)
+
+    monkeypatch.setattr(core_server, "SimulatedTransport", Recording)
+    try:
+        server.configure(simulate=True, options={"pump_address": "Z"})
+        assert "pump_address" in server._connection_info()["error"]
+        server.configure(simulate=True, options={"steps_per_stroke": "0"})  # used to be silently ignored
+        assert "steps_per_stroke" in server._connection_info()["error"]
+        assert opened == []  # both refused before the port was opened
+
+        def broken(*args, **kwargs):
+            raise ValueError("driver refused the settings")
+
+        monkeypatch.setattr(cavro_server, "CavroPump", broken)
+        server.configure(simulate=True, options={})
+        assert "driver refused" in server._connection_info()["error"]
+        assert len(opened) == 1 and opened[0].closed
+    finally:
+        monkeypatch.undo()
+        server.configure(simulate=True, options={})
+
+
+async def test_rounded_top_speed_never_exceeds_the_flow_limit():
+    # 50 mL syringe: 1 speed pulse = 8.33 µL/s, so 507 µL/s (V60.84) used to round up to V61 =
+    # 508.3 µL/s, above the 507 µL/s limit.
+    async with simulated_client(server, options={**FAST, "syringe_ul": "50000"},
+                                limits={"max_flow_ul_s": 507, "max_volume_ul": 50000}) as client:
+        await client.call_tool("initialize", {})
+        moved = (await client.call_tool("aspirate_ul", {"volume_ul": 1000, "flow_ul_s": 507})).structured_content
+        assert moved["top_speed_pulses_s"] == 60 and moved["flow_ul_s"] <= 507

@@ -40,7 +40,13 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from labmcp import AuditLog, InstrumentConnectionError, InstrumentProtocolError
+from labmcp import (
+    AuditLog,
+    InstrumentConnectionError,
+    InstrumentError,
+    InstrumentProtocolError,
+    prepare_save_path,
+)
 
 #: Config groups whose presets rotate an objective turret / nosepiece.
 OBJECTIVE_GROUP_RE = re.compile(r"objective|nosepiece|turret|magnification|\blens", re.IGNORECASE)
@@ -270,17 +276,23 @@ class MicroManagerScope:
             self._get("waitForDevice", focus)
         return float(self._get("getPosition"))
 
-    def stop_stages(self) -> list[str]:
-        """Abort any acquisition and halt XY and Z motion. Deliberately does not wait for `lock`."""
+    def stop_stages(self, errors: list[str] | None = None) -> list[str]:
+        """Abort any acquisition and halt XY and Z motion. Deliberately does not wait for `lock`.
+
+        Best effort: every stage is tried even if an earlier one fails; failures are appended to
+        ``errors`` (some stage adapters do not implement stop).
+        """
         self.abort.set()
         stopped = []
-        for label in (self._get("getXYStageDevice"), self._get("getFocusDevice")):
-            if label:
-                try:
+        for getter in ("getXYStageDevice", "getFocusDevice"):
+            try:
+                label = self._get(getter)
+                if label:
                     self._do("stop", label)
                     stopped.append(str(label))
-                except InstrumentProtocolError:
-                    pass  # some stages do not implement stop; nothing else we can do
+            except InstrumentError as exc:
+                if errors is not None:
+                    errors.append(str(exc))
         return stopped
 
     def autofocus(self) -> float:
@@ -381,21 +393,28 @@ def default_data_dir() -> Path:
     return Path(tempfile.gettempdir()) / "labmcp-micro-manager"
 
 
+TIFF_SUFFIXES = (".tif", ".tiff")
+
+
 def resolve_save_path(save_path: str | None, data_dir: str | None, stem: str, stamp: str) -> Path:
-    """Where to write a TIFF. Never overwrites: an existing name gets a numeric suffix."""
+    """Where to write a TIFF (absolute path; parent folders created).
+
+    Never overwrites: an existing name gets a numeric suffix. Refuses folders and other extensions.
+    """
     if save_path:
         path = Path(save_path).expanduser()
-        if path.suffix.lower() not in {".tif", ".tiff"}:
-            raise InstrumentProtocolError(f"save_path must end in .tif or .tiff (got {path.name!r}).")
+        if path.suffix.lower() not in TIFF_SUFFIXES:
+            raise InstrumentProtocolError(f"save_path must end in .tif or .tiff (got {path.name!r}). Nothing was written.")
+        if path.is_dir():
+            raise InstrumentProtocolError(f"save_path {path} is a folder; give a .tif file name. Nothing was written.")
     else:
         base = Path(data_dir).expanduser() if data_dir else default_data_dir()
         path = base / f"{stem}_{stamp}.tif"
-    path.parent.mkdir(parents=True, exist_ok=True)
     candidate, n = path, 2
     while candidate.exists():
         candidate = path.with_name(f"{path.stem}-{n}{path.suffix}")
         n += 1
-    return candidate
+    return prepare_save_path(candidate, suffixes=TIFF_SUFFIXES)
 
 
 def save_tiff(

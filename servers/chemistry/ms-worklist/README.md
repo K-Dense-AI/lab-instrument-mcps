@@ -147,7 +147,8 @@ The table below separates what the vendor documents say (**verified**) from what
 - Duplicate data-file names, compared case-insensitively. For SCIEX OS a shared data file is allowed, but a sample name repeated within one data file is an error.
 - Characters Windows doesn't allow in file names (`< > : " / \ | ? *`, control characters), a trailing dot or space, and reserved names (CON, NUL, COM1…).
 - The position doesn't match the chosen `position_pattern` (`vial_number`, `well`, `agilent_plate_well`, `waters_plate_well`, `tray_well`) or falls outside the `plate_size` (24/48/54/96/384) or `max_vial`.
-- The injection volume is ≤ 0 or above the `max_injection_volume_ul` limit.
+- The injection volume is ≤ 0, not a number, or above the `max_injection_volume_ul` limit. This includes injection-volume columns set through `extra` or `vendor_columns`.
+- A text field or `extra` value contains a line break or another control character, which would break the import file.
 - The method file has the wrong extension, for example an Analyst `.dam` in a SCIEX OS batch, or a MassHunter `.m` in an Xcalibur sequence.
 - Fields the target format has no column for, and non-ASCII text in formats without a BOM.
 
@@ -155,7 +156,7 @@ The table below separates what the vendor documents say (**verified**) from what
 
 | Limit | Default | Meaning |
 |---|---|---|
-| `max_injection_volume_ul` | 100 µL | Largest injection volume allowed in a worklist. Enforced when samples are added and again at export. |
+| `max_injection_volume_ul` | 100 µL | Largest injection volume allowed in a worklist. Enforced when samples are added and again at export, including volume columns set verbatim through `extra` or `vendor_columns`. `import_worklist` warns about larger volumes, and such a draft can't be exported. |
 
 Override at launch, for example `--limit max_injection_volume_ul=20` for a 20 µL loop.
 
@@ -169,7 +170,9 @@ Override at launch, for example `--limit max_injection_volume_ul=20` for a 20 µ
 ## Notes
 
 - Drafts live in memory. `reconnect` (or restarting the server) discards them. In `--simulate` it also deletes the temporary folder. Export files you want to keep.
-- By default, `export_worklist` also writes `<file>.provenance.json` next to the worklist. It contains the operation history, the randomisation seed and the sample order before randomisation, so the run order can be reproduced. Pass `write_provenance=false` to skip it.
+- By default, `export_worklist` also writes `<file>.provenance.json` next to the worklist (for example `Plasma.csv.provenance.json`). Like the worklist itself, it is never overwritten unless `overwrite=true`. It contains the operation history, the randomisation seed and the sample order before randomisation, so the run order can be reproduced. Pass `write_provenance=false` to skip it.
+- `blank_every_n` / `qc_every_n` also add a control after the last sample when the count divides evenly, unless `blank_at_end` / `qc_at_end` already adds one there.
+- When a draft is exported in another vendor's format, values kept verbatim from the original vendor for columns the new vendor maps itself (for example Xcalibur's `Std Clear` sample type) are not copied; the export notes say so.
 - Randomisation shuffles only the types in `randomize_types` (by default unknown samples) among their own slots, using Python's `random.Random(seed)`. Standards, blanks and QCs stay where they are.
 - Method names must match methods that exist on the acquisition PC. The server can't check that.
 

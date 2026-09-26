@@ -319,7 +319,7 @@ def test_export_template_and_convert(tmp_path):
     assert text == ("Sample Name\tSample Type\tAcquisition Method\tVial Position\tInjection Volume (µL)\tData File\t"
                     "Barcode ID\r\na\tUnknown\tm.msm\t1\t3\tT\t\r\n")
     assert out["acquisition_started"] is False
-    assert out["provenance_file"] == "T.provenance.json"
+    assert out["provenance_file"] == "T.txt.provenance.json"
     # import it back and convert to Xcalibur
     wl, _ = store.import_file("T.txt", name="T2")
     assert store.samples(wl)[0].ms_method == "m.msm"
@@ -354,7 +354,7 @@ async def test_tools_via_mcp():
             "name": "Plasma", "blank_every_n": 2, "blank_position": "P2-A1", "qc_at_start": 1,
             "qc_position": "P2-A2", "randomize": True, "seed": 7,
         })).structured_content
-        assert wl["randomisation_seed"] == 7 and wl["sample_count"] == 6
+        assert wl["randomisation_seed"] == 7 and wl["sample_count"] == 7  # QC + 4 samples + blanks after 2 and 4
 
         await client.call_tool("add_samples", {"name": "Plasma", "samples": ["P05"]})
 
@@ -422,3 +422,177 @@ def test_simulated_folder_removed_on_close():
     store.write_file("x.csv", b"1", overwrite=False)
     store.close()
     assert not root.exists()
+
+
+# ------------------------------------------------------------------ regression tests (review 2026-09)
+
+
+def _agilent(name="s1", **kw) -> Sample:
+    base = dict(sample_name=name, data_file=f"r_{name}", position="P1-A1", ms_method="x.m")
+    return Sample(**{**base, **kw})
+
+
+def test_extra_volume_column_cannot_bypass_the_limit(tmp_path):
+    store = make_store(tmp_path)
+    store.create("A", "agilent_masshunter", [_agilent(injection_volume_ul=2, extra={"Inj Vol (µL)": "500"})],
+                 Defaults())
+    report = store.validate("A", max_injection_volume_ul=100)
+    assert not report.valid and "max_injection_volume_ul" in report.errors[0].message
+    with pytest.raises(WorklistError, match="Not exported"):
+        store.export("A", max_injection_volume_ul=100)
+    # the same through vendor_columns, under another vendor's alias of the volume column
+    store.create("X", "thermo_xcalibur", [Sample(sample_name="a", data_file="f", position="1", ms_method="m.meth")],
+                 Defaults(vendor_columns={"Injection Volume": "250"}))
+    assert not store.validate("X", max_injection_volume_ul=100).valid
+    # MassHunter's "-1" (as method) stays allowed; a non-number is refused (the limit can't be checked)
+    store.create("M", "agilent_masshunter", [_agilent(extra={"Inj Vol (µL)": "-1"}),
+                                             _agilent("s2", extra={"Inj Vol (µL)": "lots"})], Defaults())
+    errors = store.validate("M", max_injection_volume_ul=100).errors
+    assert [e.row for e in errors] == [2] and "not a number" in errors[0].message
+    assert store.list_files() == []
+
+
+async def test_extra_volume_column_refused_via_mcp():
+    async with simulated_client(server, limits={"max_injection_volume_ul": 10}) as client:
+        r = await client.call_tool("create_worklist", {
+            "name": "E", "format": "sciex_os", "samples": [{"sample_name": "a", "extra": {"Injection Volume": "50"}}],
+        }, raise_on_error=False)
+        assert r.is_error and "max_injection_volume_ul" in r.content[0].text
+        r = await client.call_tool("create_worklist", {
+            "name": "V", "format": "sciex_os", "samples": ["a"], "vendor_columns": {"Injection Volume": "50"},
+        }, raise_on_error=False)
+        assert r.is_error and "max_injection_volume_ul" in r.content[0].text
+
+
+def test_non_finite_volumes_are_invalid(tmp_path):
+    store = make_store(tmp_path)
+    store.create("N", "sciex_os", [Sample(sample_name="s", data_file="f", ms_method="m.msm",
+                                          injection_volume_ul=float("nan"))], Defaults())
+    assert not store.validate("N", max_injection_volume_ul=100).valid
+    p = parse("Sample Name,MS Method,Data File,Injection Volume\r\na,m.msm,f,NaN\r\n")
+    assert p.samples[0].injection_volume_ul is None and p.samples[0].extra["Injection Volume"] == "NaN"
+    assert p.warnings
+
+
+def test_line_breaks_in_text_block_export(tmp_path):
+    store = make_store(tmp_path)
+    store.create("L", "thermo_xcalibur", [Sample(sample_name="a", data_file="f1", position="1", ms_method="m.meth",
+                                                 comment="line1\nline2")], Defaults())
+    errors = store.validate("L", max_injection_volume_ul=100).errors
+    assert errors and errors[0].field == "comment" and "line break" in errors[0].message
+    store.create("K", "sciex_os", [Sample(sample_name="a", data_file="f", ms_method="m.msm",
+                                          extra={"Rack Type": "x\r\ny"})], Defaults())
+    assert not store.validate("K", max_injection_volume_ul=100).valid
+
+
+def test_provenance_is_never_overwritten_silently(tmp_path):
+    store = make_store(tmp_path)
+    store.create("P", "sciex_os", [Sample(sample_name="a", data_file="f", ms_method="m.msm")], Defaults())
+    first = store.export("P", max_injection_volume_ul=100, filename="P.csv")
+    second = store.export("P", max_injection_volume_ul=100, filename="P.txt")  # its own provenance file
+    assert (first["provenance_file"], second["provenance_file"]) == ("P.csv.provenance.json", "P.txt.provenance.json")
+    (store.root / "Q.csv.provenance.json").write_text("precious")
+    with pytest.raises(WorklistError, match="provenance.json' already exists"):
+        store.export("P", max_injection_volume_ul=100, filename="Q.csv")
+    assert not (store.root / "Q.csv").exists()  # checked before anything was written
+    assert (store.root / "Q.csv.provenance.json").read_text() == "precious"
+    store.export("P", max_injection_volume_ul=100, filename="Q.csv", overwrite=True)
+    assert (store.root / "Q.csv.provenance.json").read_text() != "precious"
+
+
+def test_first_position_must_be_on_the_plate(tmp_path):
+    with pytest.raises(ValueError, match="outside"):
+        generate_positions("well", 96, 0, "A13", 2)  # used to become B1, B2
+    with pytest.raises(ValueError, match="outside"):
+        generate_positions("agilent_plate_well", 96, 0, "P1-P1", 1)  # used to become P2-A1
+    store = make_store(tmp_path)
+    with pytest.raises(WorklistError, match="first_position"):
+        store.create("W", "sciex_os", [Sample(sample_name="a")], Defaults(position_pattern="well", first_position="A13"))
+
+
+def test_position_with_trailing_newline_is_rejected():
+    assert check_position("12\n", "vial_number", 96, 100) is not None
+    assert check_position("A1\n", "well", 96, 100) is not None
+
+
+def test_periodic_blank_after_the_last_sample(tmp_path):
+    store = make_store(tmp_path)
+    store.create("B", "sciex_os", [Sample(sample_name=f"S{i}") for i in range(1, 7)], Defaults(ms_method="m.msm"))
+    store.set_plan("B", ControlPlan(blank_every_n=3))
+    names = [s.sample_name for s in store.samples(store.get("B"))]
+    assert names == ["S1", "S2", "S3", "Blank", "S4", "S5", "S6", "Blank"]
+    store.set_plan("B", ControlPlan(blank_every_n=3, blank_at_end=True, qc_every_n=3, qc_at_end=1))
+    names = [s.sample_name for s in store.samples(store.get("B"))]
+    assert names == ["S1", "S2", "S3", "QC", "Blank", "S4", "S5", "S6", "QC", "Blank"]  # no doubled controls
+
+
+def test_conversion_does_not_copy_vendor_sample_type_text(tmp_path):
+    store = make_store(tmp_path)
+    (store.root / "x.csv").write_text(
+        "Bracket Type=4\r\nSample Type,File Name,Position,Instrument Method\r\nStd Clear,f1,P1-A1,Panel\r\n"
+    )
+    wl, _ = store.import_file("x.csv", name="X")
+    assert "Std Clear" in store.export("X", max_injection_volume_ul=100, fmt="thermo_xcalibur", filename="same.csv",
+                                       write_provenance=False)["preview"][2]  # kept for the same vendor
+    res = store.export("X", max_injection_volume_ul=100, fmt="agilent_masshunter", write_provenance=False)
+    assert res["preview"][1].split(",")[6] == "Calibration"  # not Xcalibur's 'Std Clear'
+    assert any("Sample Type" in n for n in res["notes"])
+
+
+def test_duplicate_data_file_with_and_without_vendor_suffix(tmp_path):
+    store = make_store(tmp_path)
+    store.create("D", "agilent_masshunter", [_agilent("a", data_file="Run1"), _agilent("b", data_file="Run1.d")],
+                 Defaults())
+    errors = store.validate("D", max_injection_volume_ul=100).errors
+    assert [(e.row, e.field) for e in errors] == [(2, "data_file")]
+
+
+@pytest.mark.parametrize(
+    "pattern", ["{sample_name.__class__}", "{index:>999999999}", "{0}", "{sample_name!r}", "{index:{index}}"]
+)
+def test_data_file_pattern_only_plain_placeholders(tmp_path, pattern):
+    store = make_store(tmp_path)
+    with pytest.raises(WorklistError, match="Invalid data_file_pattern"):
+        store.create("F", "sciex_os", [Sample(sample_name="a")], Defaults(data_file_pattern=pattern))
+    store.create("G", "sciex_os", [Sample(sample_name="a")], Defaults(data_file_pattern="{date}_{index:03d}_{type}"))
+
+
+def test_import_name_is_validated(tmp_path):
+    store = make_store(tmp_path)
+    (store.root / "x.csv").write_text("Sample Name,MS Method,Data File\r\na,m.msm,f\r\n")
+    with pytest.raises(WorklistError, match="Worklist names"):
+        store.import_file("x.csv", name="sub/../weird name")
+
+
+def test_utf16_import_and_binary_refusal(tmp_path):
+    store = make_store(tmp_path)
+    (store.root / "u16.txt").write_bytes("Sample Name\tMS Method\tData File\r\nµ-a\tm.msm\tf\r\n".encode("utf-16"))
+    wl, _ = store.import_file("u16.txt", name="U16")
+    s = store.samples(wl)[0]
+    assert (s.sample_name, s.ms_method, s.data_file) == ("µ-a", "m.msm", "f")
+    (store.root / "bin.csv").write_bytes("Sample Name,MS Method\r\n".encode("utf-16-le"))  # no BOM
+    with pytest.raises(WorklistError, match="NUL bytes"):
+        store.import_file("bin.csv", name="B")
+
+
+def test_more_reserved_windows_names():
+    for name in ("COM0", "LPT¹", "CONIN$", "conout$.d"):
+        assert "reserved" in filename_problem(name)
+
+
+def test_sciex_template_warning_when_converting_an_imported_draft(tmp_path):
+    store = make_store(tmp_path)
+    (store.root / "w.csv").write_text("FILE_NAME,MS_FILE,INLET_FILE,SAMPLE_LOCATION,INJ_VOL\r\nf1,m,l,1,5\r\n")
+    store.import_file("w.csv", name="W")  # non-default Waters header, stored as the draft's template
+    report = store.validate("W", max_injection_volume_ul=100, fmt="sciex_os")
+    assert any(w.field == "template" for w in report.warnings)  # a Waters header is no SCIEX template
+
+
+async def test_import_warns_about_volumes_over_the_limit():
+    async with simulated_client(server, limits={"max_injection_volume_ul": 10}) as client:
+        outdir = Path((await client.call_tool("get_connection_info", {})).data["instrument"]["output_dir"])
+        (outdir / "big.csv").write_text("Sample Name,MS Method,Data File,Injection Volume\r\na,m.msm,f,50\r\n")
+        imp = (await client.call_tool("import_worklist", {"path": "big.csv"})).structured_content
+        assert any("exceeds max_injection_volume_ul" in w for w in imp["import_warnings"])
+        r = await client.call_tool("export_worklist", {"name": "big"}, raise_on_error=False)
+        assert r.is_error and "max_injection_volume_ul" in r.content[0].text

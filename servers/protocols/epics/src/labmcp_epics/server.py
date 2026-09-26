@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 import time
 from datetime import datetime, timezone
@@ -16,6 +17,7 @@ from labmcp import (
     InstrumentConnectionError,
     InstrumentError,
     InstrumentServer,
+    InstrumentTimeout,
     Limit,
 )
 from pydantic import BaseModel, Field
@@ -25,6 +27,12 @@ from labmcp_epics.simulator import SimulatedIOC
 
 _TRUTHY = {"1", "true", "yes", "on"}
 SIM_SAFE_STATE = "{p}MTR:STOP=1;{p}HEATER=Off"
+#: put_pv / put_pvs tool timeout. FastMCP can't stop the worker thread when it fires, so every
+#: put-callback wait of one call must end within _PUT_BUDGET_S, leaving time for the read-backs:
+#: otherwise a batch would keep writing PVs after the agent was told the call timed out.
+_PUT_TOOL_TIMEOUT_S = 3700
+_PUT_BUDGET_S = 3600.0
+_MIN_PUT_WAIT_S = 0.5
 
 
 def connect(ctx: ConnectContext) -> EpicsClient:
@@ -36,6 +44,7 @@ def connect(ctx: ConnectContext) -> EpicsClient:
         except re.error as exc:
             raise InstrumentConnectionError(f"--option put_allowlist is not a valid regex: {exc}") from exc
     require = (ctx.option("require_ctrl_limits", "false") or "").lower() in _TRUTHY
+    limit_writes = (ctx.option("allow_limit_field_writes", "false") or "").lower() in _TRUTHY
     try:
         parse_safe_state(ctx.option("safe_state"))
     except ValueError as exc:
@@ -45,12 +54,14 @@ def connect(ctx: ConnectContext) -> EpicsClient:
         ioc = SimulatedIOC(prefix).start()
         return EpicsClient(
             env=ioc.client_env, timeout=timeout, put_allowlist=allow, require_ctrl_limits=require,
-            audit=ctx.audit, on_close=ioc.stop, check_pv=ctx.option("check_pv", f"{prefix}TEMP"),
+            allow_limit_field_writes=limit_writes, audit=ctx.audit, on_close=ioc.stop,
+            check_pv=ctx.option("check_pv", f"{prefix}TEMP"),
             description=f"simulated IOC on 127.0.0.1:{ioc.port}, PV prefix {prefix!r} (localhost only)",
         )
     return EpicsClient(
         env=ca_environment(ctx.address, ctx.settings.options), timeout=timeout, put_allowlist=allow,
-        require_ctrl_limits=require, audit=ctx.audit, check_pv=ctx.option("check_pv"),
+        require_ctrl_limits=require, allow_limit_field_writes=limit_writes, audit=ctx.audit,
+        check_pv=ctx.option("check_pv"),
     )
 
 
@@ -86,8 +97,9 @@ system of most accelerators, synchrotron/neutron beamlines, telescopes and many 
         "ca_addr_list": "EPICS_CA_ADDR_LIST (space/comma separated host[:port]); disables the auto list",
         "auto_addr_list": "EPICS_CA_AUTO_ADDR_LIST yes/no",
         "server_port": "EPICS_CA_SERVER_PORT (default 5064)",
-        "put_allowlist": "regex a PV name must fully match to be written, e.g. 'BL7:(SLIT|FILTER):.*'",
+        "put_allowlist": "regex a PV name must fully match to be written, e.g. 'BL7:(SLIT|FILTER):[^.]*'",
         "require_ctrl_limits": "true: refuse numeric writes to PVs without control limits (DRVL/DRVH)",
+        "allow_limit_field_writes": "true: allow writing limit fields (.DRVH/.DRVL/.HOPR/.LOPR/.HLM/.LLM/.DHLM/.DLLM)",
         "safe_state": "writes for apply_safe_state, e.g. 'BL7:MTR1.STOP=1;BL7:SHUTTER=Close'",
         "check_pv": "PV that --check / get_connection_info reads to prove connectivity",
         "sim_prefix": "PV prefix of the simulated IOC (default SIM:)",
@@ -104,21 +116,43 @@ def _iso(ts: float | None) -> str | None:
     return None if ts is None else datetime.fromtimestamp(ts, timezone.utc).isoformat(timespec="milliseconds")
 
 
+def _finite(v: float) -> float | None:
+    """JSON has no NaN/inf: pydantic writes them as null, which fails a `number` output schema."""
+    return v if math.isfinite(v) else None
+
+
+def _is_numeric(v: Any) -> bool:
+    return isinstance(v, (int, float, np.ndarray)) and not isinstance(v, bool)
+
+
+def _as_number(v: Any) -> float:
+    """A monitor update as one number (arrays: their mean; an empty array: NaN)."""
+    if isinstance(v, np.ndarray):
+        return float(v.astype(float).mean()) if v.size else math.nan
+    return float(v)
+
+
+def _scalar(v: Any) -> Any:
+    """A NaN/inf scalar reading as text ('nan', 'inf', '-inf') rather than an ambiguous null."""
+    return str(v) if isinstance(v, float) and not math.isfinite(v) else v
+
+
 # ------------------------------------------------------------------ models
 
 
 class Range(BaseModel):
-    low: float
-    high: float
+    low: float | None = Field(description="None: no limit on this side")
+    high: float | None = Field(description="None: no limit on this side")
 
 
 class ArraySummary(BaseModel):
     length: int
-    minimum: float
-    maximum: float
-    mean: float
-    std: float
-    index_of_max: int
+    non_finite: int = Field(0, description="Elements that are NaN or infinite (left out of the statistics)")
+    minimum: float | None
+    maximum: float | None
+    mean: float | None
+    std: float | None
+    index_of_max: int | None
 
 
 class PVValue(BaseModel):
@@ -185,8 +219,9 @@ class MonitorResult(BaseModel):
     name: str
     duration_s: float
     n_updates: int
+    non_finite_updates: int = Field(0, description="Numeric updates that were NaN or infinite (not in stats)")
     updates: list[MonitorUpdate] = Field(description="Updates (arrays summarised by their mean), at most max_points")
-    stats: MonitorStats | None = Field(description="For numeric PVs (arrays: per-update mean)")
+    stats: MonitorStats | None = Field(description="For numeric PVs (arrays: per-update mean), finite values only")
     severities_seen: list[str]
     timestamp: str
 
@@ -232,19 +267,34 @@ def _client() -> EpicsClient:
 
 
 def _range(r: tuple[float, float] | None) -> Range | None:
-    return None if r is None else Range(low=r[0], high=r[1])
+    if r is None:
+        return None
+    low, high = _finite(r[0]), _finite(r[1])
+    return None if low is None and high is None else Range(low=low, high=high)
+
+
+def _summary(arr: np.ndarray) -> ArraySummary:
+    ok = np.isfinite(arr)
+    fin = arr[ok]
+    if not fin.size:
+        return ArraySummary(
+            length=int(arr.size), non_finite=int(arr.size), minimum=None, maximum=None, mean=None, std=None,
+            index_of_max=None,
+        )
+    return ArraySummary(
+        length=int(arr.size), non_finite=int(arr.size - fin.size), minimum=float(fin.min()),
+        maximum=float(fin.max()), mean=float(fin.mean()), std=float(fin.std()),
+        index_of_max=int(np.argmax(np.where(ok, arr, -np.inf))),
+    )
 
 
 def _to_model(r: PVReading, max_elements: int) -> PVValue:
-    value = r.value
+    value = _scalar(r.value)
     summary = None
     downsampled = False
     if r.array is not None and r.array.size > 1:
         arr = r.array.astype(float)
-        summary = ArraySummary(
-            length=int(arr.size), minimum=float(arr.min()), maximum=float(arr.max()), mean=float(arr.mean()),
-            std=float(arr.std()), index_of_max=int(arr.argmax()),
-        )
+        summary = _summary(arr)
         if arr.size > max_elements:
             edges = np.linspace(0, arr.size, max_elements + 1).astype(int)
             value = [float(arr[a:b].mean()) for a, b in zip(edges[:-1], edges[1:], strict=True)]
@@ -263,7 +313,7 @@ def _to_model(r: PVReading, max_elements: int) -> PVValue:
 def _put_result(prep: Any, outcome: dict[str, Any]) -> PutResult:
     after: PVReading = outcome["reading"]
     return PutResult(
-        name=prep.name, requested=prep.requested, previous_value=prep.before, value=after.value,
+        name=prep.name, requested=prep.requested, previous_value=_scalar(prep.before), value=_scalar(after.value),
         severity=after.severity, status=after.status, completed=outcome["completed"],
         elapsed_s=round(outcome["elapsed_s"], 4), warnings=prep.warnings, timestamp=_now(),
     )
@@ -272,8 +322,22 @@ def _put_result(prep: Any, outcome: dict[str, Any]) -> PutResult:
 def _safe_state_spec() -> list[tuple[str, Any]]:
     spec = server.settings.options.get("safe_state")
     if not spec and server.settings.simulate:
-        spec = SIM_SAFE_STATE.format(p=server.settings.options.get("sim_prefix", "SIM:"))
-    return parse_safe_state(spec)
+        spec = SIM_SAFE_STATE.format(p=server.settings.options.get("sim_prefix") or "SIM:")  # as connect()
+    try:
+        return parse_safe_state(spec)
+    except ValueError as exc:
+        raise InstrumentError(f"--option safe_state is malformed: {exc}. Nothing was written.") from exc
+
+
+def _put_timeout(deadline: float, timeout_s: float) -> float:
+    """The put-callback wait allowed now: ``timeout_s``, cut to what is left of the call's budget."""
+    remaining = deadline - time.monotonic()
+    if remaining < _MIN_PUT_WAIT_S:
+        raise InstrumentTimeout(
+            f"Stopped: this call used up its {_PUT_BUDGET_S:g} s time budget before the write was sent. "
+            "Nothing was written."
+        )
+    return min(timeout_s, remaining)
 
 
 PVName = Annotated[str, Field(min_length=1, max_length=255, description="PV name, e.g. 'BL7:MTR1.RBV'")]
@@ -295,7 +359,7 @@ def get_pv(
 
 @mcp.tool(**READ)
 def get_pvs(
-    names: Annotated[list[str], Field(min_length=1, max_length=200, description="PV names")],
+    names: Annotated[list[PVName], Field(min_length=1, max_length=200, description="PV names")],
     max_elements: Annotated[int, Field(ge=1, le=10000, description="Arrays longer than this are downsampled")] = 20,
 ) -> PVsResult:
     """Read many PVs at once (e.g. all motors or vacuum gauges of a beamline). PVs that cannot be
@@ -335,11 +399,8 @@ def monitor_pv(
         value = c.update_value(first.native_type, resp, first.enum_strings)
         severity = c.AlarmSeverity(int(resp.metadata.severity)).name
         rows.append((ts, value, severity))
-    numeric = [
-        (ts, float(np.mean(v)) if isinstance(v, np.ndarray) else float(v))
-        for ts, v, _ in rows
-        if isinstance(v, (int, float, np.ndarray)) and not isinstance(v, bool)
-    ]
+    numeric_all = [(ts, _as_number(v)) for ts, v, _ in rows if _is_numeric(v)]
+    numeric = [(ts, y) for ts, y in numeric_all if math.isfinite(y)]
     stats = None
     if numeric:
         t = np.array([n[0] for n in numeric]) - numeric[0][0]
@@ -355,19 +416,16 @@ def monitor_pv(
     else:
         shown = rows if max_points else []
     return MonitorResult(
-        name=name, duration_s=duration_s, n_updates=len(rows),
+        name=name, duration_s=duration_s, n_updates=len(rows), non_finite_updates=len(numeric_all) - len(numeric),
         updates=[
-            MonitorUpdate(
-                timestamp=_iso(ts) or "", severity=sev,
-                value=float(np.mean(v)) if isinstance(v, np.ndarray) else v,
-            )
+            MonitorUpdate(timestamp=_iso(ts) or "", severity=sev, value=_scalar(_as_number(v) if _is_numeric(v) else v))
             for ts, v, sev in shown
         ],
         stats=stats, severities_seen=sorted({sev for _, _, sev in rows}), timestamp=_now(),
     )
 
 
-@mcp.tool(**HAZARD, timeout=3700)
+@mcp.tool(**HAZARD, timeout=_PUT_TOOL_TIMEOUT_S)
 def put_pv(
     name: PVName,
     value: Annotated[
@@ -383,12 +441,13 @@ def put_pv(
     type and lies within the PV's control limits (DRVL/DRVH). Returns the read-back value."""
     if wait:
         server.check("max_put_wait_s", timeout_s, "put-completion wait")
+    deadline = time.monotonic() + _PUT_BUDGET_S
     c = _client()
     prep = c.prepare_put(name, value)
-    return _put_result(prep, c.put(prep, wait=wait, timeout=timeout_s))
+    return _put_result(prep, c.put(prep, wait=wait, timeout=_put_timeout(deadline, timeout_s)))
 
 
-@mcp.tool(**HAZARD, timeout=3700)
+@mcp.tool(**HAZARD, timeout=_PUT_TOOL_TIMEOUT_S)
 def put_pvs(
     writes: Annotated[list[PVWrite], Field(min_length=1, max_length=100, description="PV writes, applied in order")],
     wait: Annotated[bool, Field(description="Wait for each put-completion before the next write")] = True,
@@ -396,16 +455,26 @@ def put_pvs(
 ) -> PutsResult:
     """Write several PVs in order (e.g. set both slit blades). Every write is validated first (allow-
     list, access rights, type, control limits); if any is invalid nothing is written. Writing stops
-    at the first failure and the rest are reported as not written."""
+    at the first failure and the rest are reported as not written. The whole batch must finish within
+    an hour: writes that would start later are not sent."""
     server.check("max_put_batch", len(writes), "number of PVs in one batch")
     if wait:
         server.check("max_put_wait_s", timeout_s, "put-completion wait")
+    deadline = time.monotonic() + _PUT_BUDGET_S
     c = _client()
     prepared = [c.prepare_put(w.name, w.value) for w in writes]  # validate everything before writing
     results: list[PutResult] = []
     for i, prep in enumerate(prepared):
+        remaining = deadline - time.monotonic()
+        if remaining < _MIN_PUT_WAIT_S:
+            return PutsResult(
+                results=results, not_written=[p.name for p in prepared[i:]],
+                error=f"Stopped: the batch used up its {_PUT_BUDGET_S:g} s time budget; the remaining PVs were "
+                "not written.",
+                timestamp=_now(),
+            )
         try:
-            results.append(_put_result(prep, c.put(prep, wait=wait, timeout=timeout_s)))
+            results.append(_put_result(prep, c.put(prep, wait=wait, timeout=min(timeout_s, remaining))))
         except InstrumentError as exc:
             return PutsResult(
                 results=results, not_written=[p.name for p in prepared[i + 1 :]],

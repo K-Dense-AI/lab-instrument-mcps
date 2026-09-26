@@ -3,7 +3,7 @@
   "name": "io.github.K-Dense-AI/labmcp-mettler-toledo",
   "title": "Mettler Toledo Balance",
   "description": "MCP server for Mettler Toledo laboratory balances (MT-SICS): weigh, tare, zero, log drift, adjust.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "repository": {
     "url": "https://github.com/K-Dense-AI/lab-instrument-mcps",
     "source": "github",
@@ -15,7 +15,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "labmcp-mettler-toledo",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "transport": {
         "type": "stdio"
       },

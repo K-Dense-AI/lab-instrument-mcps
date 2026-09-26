@@ -9,6 +9,7 @@ is configured, appended to a JSON Lines file for long-term records.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from collections import deque
 from datetime import datetime, timezone
@@ -16,6 +17,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 Direction = Literal["write", "read", "event"]
+
+log = logging.getLogger("labmcp")
 
 #: Entries longer than this are truncated so bulk data doesn't bloat memory or the log file.
 MAX_ENTRY_CHARS = 2048
@@ -27,6 +30,8 @@ class AuditLog:
         self.path = Path(path).expanduser() if path else None
         self._entries: deque[dict[str, Any]] = deque(maxlen=maxlen)
         self._lock = threading.Lock()
+        #: Last error writing the log file, or ``None``. Shown by ``get_connection_info``.
+        self.write_error: str | None = None
         if self.path:
             self.path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -48,8 +53,19 @@ class AuditLog:
         with self._lock:
             self._entries.append(entry)
             if self.path:
-                with self.path.open("a", encoding="utf-8") as fh:
-                    fh.write(json.dumps(entry) + "\n")
+                # A full disk or an unplugged network share must not make instrument I/O fail:
+                # that would block stop commands, and lose replies already read from the wire.
+                try:
+                    with self.path.open("a", encoding="utf-8") as fh:
+                        fh.write(json.dumps(entry) + "\n")
+                except OSError as exc:
+                    if self.write_error is None:
+                        log.error("Cannot write the audit log %s: %s (keeping entries in memory)", self.path, exc)
+                    self.write_error = f"{type(exc).__name__}: {exc}"
+                else:
+                    if self.write_error is not None:
+                        log.warning("Audit log %s is writable again", self.path)
+                    self.write_error = None
 
     def event(self, message: str, source: str = "") -> None:
         """Record a high-level action for drivers that don't speak a byte protocol."""

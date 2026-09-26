@@ -423,3 +423,181 @@ def test_binary_block_late_terminator_is_consumed():
     t._push = real_push
     time.sleep(0.3)
     assert d.checked_query("*IDN?").response.startswith("LabMCP")
+
+
+# ------------------------------------------------------------------ regression tests (code review)
+
+
+def test_denylist_not_hidden_by_a_quote_inside_block_data():
+    # '#11"' is a 1-byte definite-length block holding a '"'. The instrument's parser skips it,
+    # so it runs OUTP ON; a quote-aware split alone saw a single DATA unit with a string in it.
+    command = 'DATA #11";OUTP ON;DISP:TEXT "x'
+    policy = CommandPolicy.from_options({"write_denylist": r"^OUTP\d*(:STAT)? (ON|1)$"})
+    with pytest.raises(CommandRefused, match="denylist"):
+        policy.check_command(command)
+    policy = CommandPolicy.from_options({"write_allowlist": r"(DATA|DISP)(:\S+)*( .*)?"})
+    with pytest.raises(CommandRefused, match="compound"):
+        policy.check_command(command)
+    with pytest.raises(CommandRefused, match="compound"):  # any ';' at all under an allowlist
+        policy.check_command('DISP:TEXT "a;b"')
+    assert policy.check_command('DISP:TEXT "ab"') == ['DISP:TEXT "ab"']
+
+
+def test_denylist_alias_conflict_fails_closed():
+    with pytest.raises(ValueError, match="both set"):
+        CommandPolicy.from_options({"write_denylist": "^OUTP", "denylist": r"^\*RST"})
+    same = CommandPolicy.from_options({"write_denylist": "^OUTP", "denylist": "^OUTP"})
+    assert same.write_denylist is not None and same.write_denylist.pattern == "^OUTP"
+    alias_only = CommandPolicy.from_options({"denylist": "^OUTP"})
+    assert alias_only.write_denylist is not None
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["OUTP ON", "OUTP 2", "OUTP 1.0", "OUTP +1", "OUTP #H1", "outp:stat 0.7", "OUTPut2:STATe 5",
+     "VOLT 5;:OUTP 1", "OUTP:POL NORM;STAT 3"],
+)
+def test_recommended_output_denylist_catches_numeric_booleans(command):
+    # SCPI booleans take any number (non-zero = ON), so '(ON|1)$' is not enough.
+    policy = CommandPolicy.from_options({"write_denylist": r"^OUTP\d*(:STAT)? (?!OFF\b)"})
+    with pytest.raises(CommandRefused, match="denylist"):
+        policy.check_command(command)
+
+
+@pytest.mark.parametrize("command", ["OUTP OFF", "OUTPut:STATe OFF", "OUTP?", "OUTP:POL NORM", "OUTP:PROT:CLE"])
+def test_recommended_output_denylist_allows_off(command):
+    policy = CommandPolicy.from_options({"write_denylist": r"^OUTP\d*(:STAT)? (?!OFF\b)"})
+    assert policy.check_command(command)
+
+
+class _BadBlockSimulator(DMMPowerSupplySimulator):
+    def command(self, key: str, arg: str) -> str | None:
+        if key == "BAD:BLOCK?":
+            return "#2xy0123"
+        return super().command(key, arg)
+
+
+def test_read_block_malformed_length_field_is_a_protocol_error():
+    sim = _BadBlockSimulator()
+    t = SimulatedTransport(sim, read_termination="\n", write_termination="\n", encoding="latin-1")
+    d = SCPIInstrument(t, CommandPolicy())
+    with pytest.raises(InstrumentProtocolError, match="length field"):
+        d.read_block("BAD:BLOCK?", max_bytes=1000)
+    assert d.checked_query("*IDN?").response.startswith("LabMCP")  # resynchronised
+
+
+def test_read_block_timeout_bounds_the_whole_transfer():
+    # Each piece of the block arrives 0.3 s after it is asked for. With a 0.5 s timeout for
+    # the whole transfer, the second read must already fail (it used to get a fresh 0.5 s).
+    d, _ = make_driver()
+    d.checked_write("FORM REAL,64")
+    real = d.t.read_bytes
+
+    def slow(size, timeout=None):
+        if timeout is not None and timeout < 0.3:
+            time.sleep(timeout)
+            raise InstrumentTimeout("slow instrument")
+        time.sleep(0.3)
+        return real(size, timeout)
+
+    d.t.read_bytes = slow
+    t0 = time.monotonic()
+    with pytest.raises(InstrumentTimeout):
+        d.read_block("READ?", max_bytes=1000, timeout=0.5)
+    d.t.read_bytes = real
+    assert time.monotonic() - t0 < 1.0
+
+
+def test_decode_non_finite_values_become_null():
+    from labmcp_scpi.server import _decode
+
+    data = struct.pack(">4f", 1.0, float("nan"), float("inf"), 3.0)
+    decoded, values = _decode(data, "float32", "big", 10)
+    assert decoded.values == [1.0, None, None, 3.0]
+    assert decoded.non_finite == 2 and decoded.mean == 2.0
+    assert len(values) == 4
+
+
+async def test_query_binary_block_with_nan_values_via_mcp():
+    async with simulated_client(server) as client:
+        await client.call_tool("scpi_write", {"command": "FORM REAL,32;TRIG:COUN 3"})
+        server.driver.t.simulator._reading = lambda: float("nan")
+        block = (
+            await client.call_tool("query_binary_block", {"command": "READ?", "decode_as": "float32"})
+        ).structured_content
+        assert block["decoded"]["values"] == [None, None, None]
+        assert block["decoded"]["non_finite"] == 3 and block["decoded"]["mean"] is None
+
+
+async def test_query_binary_block_save_path_checks(tmp_path):
+    async with simulated_client(server) as client:
+        await client.call_tool("scpi_write", {"command": "FORM REAL,32;TRIG:COUN 2"})
+        marker = _mark()
+        with pytest.raises(Exception, match="must end in"):
+            await client.call_tool("query_binary_block", {"command": "READ?", "save_path": str(tmp_path / "x.sh")})
+        existing = tmp_path / "old.bin"
+        existing.write_bytes(b"keep")
+        with pytest.raises(Exception, match="already exists"):
+            await client.call_tool("query_binary_block", {"command": "READ?", "save_path": str(existing)})
+        assert _writes_since(marker) == []  # refused before the query was sent
+        assert existing.read_bytes() == b"keep"
+        r = (
+            await client.call_tool(
+                "query_binary_block", {"command": "READ?", "save_path": str(existing), "overwrite": True}
+            )
+        ).structured_content
+        assert existing.read_bytes() != b"keep" and len(existing.read_bytes()) == 8
+        nested = tmp_path / "new" / "dir" / "trace.csv"
+        r = (
+            await client.call_tool(
+                "query_binary_block", {"command": "READ?", "decode_as": "float32", "save_path": str(nested)}
+            )
+        ).structured_content
+        assert r["saved_to"] == str(nested.resolve())
+        assert nested.read_text(encoding="utf-8").splitlines()[0] == "index,value"
+
+
+async def test_scpi_batch_stops_sending_when_its_time_budget_is_used(monkeypatch):
+    import labmcp_scpi.server as scpi_server
+
+    # Pretend the 900 s tool timeout is 0.2 s away: FastMCP would report a timeout but could not
+    # stop the thread, so the batch itself must not send anything after that point.
+    monkeypatch.setattr(scpi_server, "BATCH_MARGIN_S", scpi_server.BATCH_TIMEOUT_S - 0.2)
+    async with simulated_client(server) as client:
+        await client.call_tool("identify", {})
+        marker = _mark()
+        batch = (
+            await client.call_tool(
+                "scpi_batch",
+                {"steps": ["VOLT 1", "VOLT 2", "OUTP ON"], "delay_between_s": 0.3, "stop_on_error": False},
+            )
+        ).structured_content
+        assert [s["status"] for s in batch["steps"]] == ["ok", "not_run", "not_run"]
+        assert "time budget" in batch["steps"][1]["detail"]
+        assert batch["stopped_early"] is True and batch["completed"] == 1
+        sent = _writes_since(marker)
+        assert not any("VOLT 2" in w or "OUTP ON" in w for w in sent)
+        assert not server.driver.t.simulator.output_on
+
+
+def test_oversized_block_still_arriving_is_drained_not_left_for_the_next_reply():
+    # On a socket the payload is still arriving when the header has been read, so a flush
+    # right after the header left most of it to be read as the reply to the next query.
+    d, _ = make_driver()
+    t = d.t
+    d.checked_write("FORM REAL,64;TRIG:COUN 100")
+    real_push = t._push
+
+    def trickle(data: bytes) -> None:
+        if data.startswith(b"#"):
+            real_push(data[:6])  # '#3800' + first payload byte
+            threading.Timer(0.2, real_push, args=(data[6:],)).start()
+        else:
+            real_push(data)
+
+    t._push = trickle
+    with pytest.raises(InstrumentProtocolError, match="max_block_bytes"):
+        d.read_block("READ?", max_bytes=100, timeout=2.0)
+    t._push = real_push
+    time.sleep(0.3)
+    assert d.checked_query("*IDN?").response.startswith("LabMCP")

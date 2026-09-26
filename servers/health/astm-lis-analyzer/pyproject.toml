@@ -1,6 +1,6 @@
 [project]
 name = "labmcp-astm-lis"
-version = "0.1.1"
+version = "0.1.2"
 description = "MCP server that receives results from clinical/lab analyzers over ASTM E1381/E1394 (CLSI LIS1/LIS2): serial, TCP client or TCP listener."
 readme = "README.md"
 license = "Apache-2.0"

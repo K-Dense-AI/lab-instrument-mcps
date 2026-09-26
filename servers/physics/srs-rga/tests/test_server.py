@@ -1,12 +1,15 @@
+import asyncio
 import csv
 import struct
+import threading
 import time
 
 import pytest
-from labmcp import InstrumentProtocolError, SafetyLimitError, SimulatedTransport
+from fastmcp.exceptions import ToolError
+from labmcp import InstrumentProtocolError, InstrumentTimeout, SafetyLimitError, SimulatedTransport
 from labmcp.testing import simulated_client, tool_names
 from labmcp_srs_rga.analysis import identify_gases
-from labmcp_srs_rga.driver import RGAError, SrsRga, decode_bits, decode_current
+from labmcp_srs_rga.driver import OperationAborted, RGAError, SrsRga, decode_bits, decode_current
 from labmcp_srs_rga.server import server
 from labmcp_srs_rga.simulator import RGASimulator
 
@@ -413,3 +416,177 @@ def test_limit_error_type():
     with pytest.raises(SafetyLimitError):
         server.check("max_cdem_voltage_v", 1600)
     server.configure(simulate=True, limits={})
+
+
+# ---------------------------------------------------------------- regression tests (review)
+
+
+class StallingScanSim(RGASimulator):
+    """SC/HS scans stall after a partial reply; IN0 answers its STATUS byte a moment later."""
+
+    def __init__(self, partial: bytes = b"", **kwargs):
+        super().__init__(**kwargs)
+        self.partial = partial
+        self.in0_due: float | None = None
+
+    def execute(self, name: str, p: str) -> bytes:
+        if name in ("SC", "HS"):
+            return self.partial
+        if name == "IN":
+            self.in0_due = time.monotonic() + 0.2  # the hardware check takes a moment
+            return b""
+        return super().execute(name, p)
+
+    def _late_status(self) -> bytes:
+        if self.in0_due is not None and time.monotonic() >= self.in0_due:
+            self.in0_due = None
+            return self._status_bytes()
+        return b""
+
+    def poll(self) -> bytes | None:
+        return ((super().poll() or b"") + self._late_status()) or None
+
+    def handle_bytes(self, data: bytes) -> bytes:
+        early = self._late_status()  # on the wire before the reply to the next command
+        return early + super().handle_bytes(data)
+
+
+def make_stalling_driver(partial: bytes = b"") -> tuple[SrsRga, StallingScanSim]:
+    sim = StallingScanSim(partial=partial)
+    t = SimulatedTransport(sim, read_termination="\r", write_termination="\r", timeout=0.5)
+    rga = SrsRga(t)
+    rga.identify()
+    return rga, sim
+
+
+def test_scan_timeout_resynchronises_the_link():
+    # The partial binary scan contains CR bytes: reading "up to CR" for the IN0 reply returned at
+    # once, and the late STATUS byte was then read as the answer to the next query.
+    rga, _ = make_stalling_driver(partial=b"\x0d\x00\x00\x00" * 5)
+    rga.estimate_scan_s = lambda *a: -7.0  # read timeout = -7 * 2 + 15 = 1 s
+    with pytest.raises(InstrumentTimeout, match="reset with IN0"):
+        rga.histogram_scan(1, 50)
+    time.sleep(0.3)
+    assert rga.identify()["model"] == "RGA200"
+    assert rga.noise_floor() == 4
+
+
+def test_safety_priority_interrupts_a_running_scan():
+    rga, _ = make_stalling_driver()  # the scan never completes (read timeout ~30 s)
+    outcome: list[BaseException] = []
+
+    def scan():
+        try:
+            rga.histogram_scan(1, 50)
+        except BaseException as exc:  # noqa: BLE001 - recorded for the assertion
+            outcome.append(exc)
+
+    worker = threading.Thread(target=scan)
+    worker.start()
+    time.sleep(0.3)
+    t0 = time.monotonic()
+    with rga.safety_priority():
+        assert rga.status_command("FL0", check=False) == 0  # the link is in sync again
+    assert time.monotonic() - t0 < 3.0
+    worker.join(5.0)
+    assert not worker.is_alive()
+    assert isinstance(outcome[0], OperationAborted)
+    assert not rga._abort.is_set()  # cleared once the safety tool is done
+    assert rga.noise_floor() == 4
+
+
+async def test_all_off_interrupts_a_running_leak_check():
+    async with simulated_client(server) as client:
+        await client.call_tool("set_filament", {"external_pressure_torr": 3e-8})
+
+        async def leak():
+            with pytest.raises(ToolError, match="interrupted by a safety tool"):
+                await client.call_tool("leak_check", {"duration_s": 20, "interval_s": 0.2})
+
+        async def off():
+            await asyncio.sleep(0.5)
+            t0 = time.monotonic()
+            res = (await client.call_tool("all_off", {})).structured_content
+            return res, time.monotonic() - t0
+
+        _, (res, elapsed) = await asyncio.gather(leak(), off())
+        assert elapsed < 3.0
+        assert not res["filament_on"] and sim_of().emission_ma == 0
+
+
+async def test_all_off_attempts_every_step_when_one_fails(monkeypatch):
+    async with simulated_client(server) as client:
+        await client.call_tool("set_filament", {"external_pressure_torr": 3e-8})
+        await client.call_tool("set_cdem", {"voltage_v": 1400})
+        rga, sim = server.driver, sim_of()
+        original = rga.status_command
+
+        def hv0_fails(cmd, *args, **kwargs):
+            if cmd == "HV0":
+                raise InstrumentTimeout("no reply to HV0")
+            return original(cmd, *args, **kwargs)
+
+        monkeypatch.setattr(rga, "status_command", hv0_fails)
+        with pytest.raises(ToolError, match="HV0") as exc:
+            await client.call_tool("all_off", {})
+        assert "filament off (FL0)" in str(exc.value)
+        assert sim.emission_ma == 0 and sim.log[-1] == "MR0"  # FL0 and MR0 were still sent
+
+
+async def test_cached_rga_reading_not_trusted_once_the_filament_is_off():
+    async with simulated_client(server) as client:
+        await client.call_tool("set_filament", {"external_pressure_torr": 3e-8})
+        await client.call_tool("read_total_pressure", {})  # cached as evidence
+        await client.call_tool("filament_off", {})
+        # The chamber could have been vented since: the reading taken before is no evidence.
+        with pytest.raises(ToolError, match="no trustworthy pressure reading"):
+            await client.call_tool("set_filament", {"emission_current_ma": 1.0})
+        with pytest.raises(ToolError, match="no trustworthy pressure reading"):
+            await client.call_tool("set_cdem", {"voltage_v": 1400})
+        assert sim_of().log.count("FL1.00") == 1 and sim_of().hv == 0
+
+
+async def test_external_reading_does_not_override_a_high_rga_reading():
+    async with simulated_client(server) as client:
+        await client.call_tool("set_filament", {"external_pressure_torr": 3e-8})
+        sim_of().set_pressure_scale(100)  # the RGA now reads ~9e-6 Torr
+        with pytest.raises(ToolError, match="max_cdem_pressure_torr") as exc:
+            await client.call_tool("set_cdem", {"voltage_v": 1400, "external_pressure_torr": 1e-8})
+        assert "RGA total pressure" in str(exc.value)
+        assert sim_of().hv == 0
+
+
+async def test_low_emission_reading_is_scaled_for_the_interlock():
+    async with simulated_client(server) as client:
+        await client.call_tool("set_filament", {"emission_current_ma": 0.1, "external_pressure_torr": 3e-8})
+        sim_of().set_pressure_scale(100)  # ~9e-6 Torr, but the ion current at 0.1 mA reads ~9e-7
+        tp = (await client.call_tool("read_total_pressure", {})).structured_content
+        assert tp["pressure_torr"] < 5e-6 and any("applies at 1 mA" in n for n in tp["notes"])
+        with pytest.raises(ToolError, match="max_cdem_pressure_torr"):
+            await client.call_tool("set_cdem", {"voltage_v": 1400})
+        assert sim_of().hv == 0
+
+
+async def test_save_path_is_checked_before_measuring(tmp_path):
+    existing = tmp_path / "scan.csv"
+    existing.write_text("keep me")
+    async with simulated_client(server) as client:
+        await client.call_tool("set_filament", {"external_pressure_torr": 3e-8})
+        with pytest.raises(ToolError, match="already exists"):
+            await client.call_tool("histogram_scan", {"save_path": str(existing)})
+        with pytest.raises(ToolError, match="must end in .csv"):
+            await client.call_tool("leak_check", {"duration_s": 1, "save_path": str(tmp_path / "x.txt")})
+        assert existing.read_text() == "keep me"
+        assert not any(c.startswith(("HS", "MR")) and c != "MR0" for c in sim_of().log)
+        out = tmp_path / "new" / "leak.csv"
+        res = (
+            await client.call_tool(
+                "leak_check", {"duration_s": 0.5, "interval_s": 0.25, "save_path": str(out)}
+            )
+        ).structured_content
+        assert res["saved_to"] == str(out.resolve()) and out.exists()
+
+
+async def test_long_tools_outlast_their_longest_allowed_run():
+    tool = await server.mcp.get_tool("leak_check")
+    assert tool.timeout > 7200  # the Field allows 7200 s of monitoring

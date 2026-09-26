@@ -35,6 +35,14 @@ class Limit:
     description: str = ""
     kind: str = "max"
 
+    def __post_init__(self) -> None:
+        # Anything but "max" used to be treated as "min", so a typo ("Max", "maximum") silently
+        # inverted the limit: it refused safe values and let dangerous ones through.
+        if self.kind not in ("max", "min"):
+            raise ValueError(f"Limit {self.name!r}: kind must be 'max' or 'min', got {self.kind!r}")
+        if not math.isfinite(float(self.default)):
+            raise ValueError(f"Limit {self.name!r}: default must be a finite number, got {self.default!r}")
+
 
 class SafetyLimits:
     def __init__(self, limits: list[Limit] | tuple[Limit, ...] = ()) -> None:
@@ -49,6 +57,11 @@ class SafetyLimits:
             value = float(value)
             if math.isnan(value):  # NaN compares False with everything and would disable the limit
                 raise ValueError(f"Safety limit {name!r} must be a number, got NaN")
+            if math.isinf(value):  # also not representable in JSON (get_connection_info would show null)
+                raise ValueError(
+                    f"Safety limit {name!r} must be a finite number, got {value}. "
+                    "To relax it, give the largest value you are prepared to allow."
+                )
             self._values[name] = value
 
     def __getitem__(self, name: str) -> float:
@@ -62,6 +75,11 @@ class SafetyLimits:
             raise SafetyLimitError(
                 f"Refused: {what or lim.description or name} is not a number (NaN) (safety limit `{name}`). "
                 "Nothing was sent to the instrument."
+            )
+        if math.isinf(value):  # -inf passes a max check (and +inf a min check), but is never a real setpoint
+            raise SafetyLimitError(
+                f"Refused: {what or lim.description or name} of {value} is not a finite number "
+                f"(safety limit `{name}`). Nothing was sent to the instrument."
             )
         bad = value > bound if lim.kind == "max" else value < bound
         if bad:
@@ -98,5 +116,11 @@ def parse_limit_args(items: list[str] | None) -> dict[str, float]:
             name, sep, value = part.partition("=")
             if not sep:
                 raise ValueError(f"Limit must look like name=value, got {part!r}")
-            out[name.strip()] = float(value)
+            try:
+                out[name.strip()] = float(value)
+            except ValueError:
+                raise ValueError(
+                    f"Limit {name.strip()!r} must be a plain number in the limit's unit (e.g. 80, not 80C), "
+                    f"got {value.strip()!r}"
+                ) from None
     return out

@@ -29,7 +29,7 @@ import threading
 import time
 from dataclasses import dataclass
 
-from labmcp import InstrumentProtocolError, InstrumentTimeout, Transport
+from labmcp import InstrumentError, InstrumentProtocolError, InstrumentTimeout, Transport
 
 #: DT address characters for address-switch positions 0..E (manual table 3-1/3-2).
 ADDRESSES = "123456789:;<=>?"
@@ -188,6 +188,21 @@ class CavroPump:
                 )
             time.sleep(poll)
 
+    def _wait_or_stop(self, timeout: float, context: str) -> None:
+        """``wait_ready``; if the wait fails for any reason other than an error the pump reported
+        (which already stopped it), send ``T`` so the plunger does not keep moving unattended."""
+        try:
+            self.wait_ready(timeout, context=context)
+        except CavroError:
+            raise
+        except InstrumentError as exc:
+            try:
+                self.terminate()
+                note = "The move was terminated (T); re-initialize before the next move."
+            except InstrumentError as stop_exc:
+                note = f"Sending terminate (T) also failed ({stop_exc}): stop the pump by hand."
+            raise type(exc)(f"{exc} {note}") from exc
+
     # ------------------------------------------------------------ reports
 
     def plunger_steps(self) -> int:
@@ -241,7 +256,7 @@ class CavroPump:
         # from Q afterwards (manual 3.6.3 "Initialization Errors").
         if reply.error and reply.error not in {1, 7, 9, 10}:
             raise CavroError(reply.error, f"in reply to {cmd!r}")
-        self.wait_ready(timeout, context="during initialization")
+        self._wait_or_stop(timeout, context="during initialization")
         self.command(f"N{self.resolution_mode}R")
         self.wait_ready(5.0, context="after setting the resolution mode")
 
@@ -259,14 +274,14 @@ class CavroPump:
         self._require_ready("move the plunger")
         self._terminate.clear()
         self.command(f"V{top_speed}{kind}{steps}R")
-        self.wait_ready(timeout, context=f"during the plunger move {kind}{steps}")
+        self._wait_or_stop(timeout, context=f"during the plunger move {kind}{steps}")
         return MoveResult(steps, top_speed, self.plunger_steps(), self._terminate.is_set())
 
     def move_valve(self, code: str, timeout: float = 10.0) -> str:
         """Valve command: ``I``/``O``/``B``/``E`` (non-distribution) or ``I<n>``/``O<n>`` (distribution)."""
         self._require_ready("move the valve")
         self.command(f"{code}R")
-        self.wait_ready(timeout, context=f"during the valve move {code}")
+        self._wait_or_stop(timeout, context=f"during the valve move {code}")
         return self.valve_position()
 
     def terminate(self) -> Reply:

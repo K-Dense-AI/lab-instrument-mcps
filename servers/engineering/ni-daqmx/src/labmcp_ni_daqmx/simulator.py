@@ -118,7 +118,9 @@ class _SimHardware:
         self.ao_value = {n.lower(): 0.0 for n in self.ao}
         self.line_output: dict[str, bool] = {}  # lines currently driven (lower-case name -> level)
         self.external = {f"{name}/port1/line0".lower(): True}
-        self.reserved = False
+        #: Subsystems ("ai", "ao", "dio") held by an open task. Like DAQmx, two tasks cannot share a
+        #: subsystem, but an AI acquisition and an AO/DIO write can run at the same time.
+        self.reserved: set[str] = set()
 
     def now(self) -> float:
         return time.monotonic() - self.t0
@@ -220,7 +222,7 @@ class _ChannelGroup:
         items = _split(names)
         if not items:
             raise SimDaqError("Physical channel name is empty.", -200170, self._task.name)
-        hw = self._task.bind(items[0].split("/", 1)[0])
+        hw = self._task.bind(items[0].split("/", 1)[0], "dio" if self._kind in ("di", "do") else self._kind)
         lookup = {v.lower(): v for v in getattr(hw, attr)}
         out = []
         for n in items:
@@ -314,6 +316,7 @@ class _SimTask:
     def __init__(self, sim: SimulatedNIDAQmx, name: str = "") -> None:
         self.sim = sim
         self.hw: _SimHardware = None  # type: ignore[assignment] - bound by the first channel
+        self.subsystem = ""
         self.name = name or f"_unnamedTask<{id(self):x}>"
         self.channels: list[str] = []
         self.kind: str | None = None
@@ -325,19 +328,20 @@ class _SimTask:
         self.do_channels = _ChannelGroup(self, "do")
         self.closed = False
 
-    def bind(self, device: str) -> _SimHardware:
-        """Attach the task to a device (like DAQmx, one task uses one device here) and reserve it."""
+    def bind(self, device: str, subsystem: str) -> _SimHardware:
+        """Attach the task to a device (like DAQmx, one task uses one device here) and reserve the subsystem."""
         hw = next((h for n, h in self.sim.hardware.items() if n.lower() == device.lower()), None)
         if hw is None:
             raise SimDaqError(f"Device identifier is invalid.\nDevice Specified: {device}", -200220, self.name)
         if self.hw is None:
             with hw.lock:
-                if hw.reserved:
+                if subsystem in hw.reserved:
                     raise SimDaqError(
                         "The specified resource is reserved. The operation could not be completed as specified.", -50103, self.name
                     )
-                hw.reserved = True
+                hw.reserved.add(subsystem)
             self.hw = hw
+            self.subsystem = subsystem
         elif hw is not self.hw:
             raise SimDaqError("This simulator does not combine channels from several devices in one task.", -200559, self.name)
         return hw
@@ -360,7 +364,7 @@ class _SimTask:
             self.closed = True
             if self.hw is not None:
                 with self.hw.lock:
-                    self.hw.reserved = False
+                    self.hw.reserved.discard(self.subsystem)
 
     def read(self, number_of_samples_per_channel: Any = _UNSET, timeout: float = 10.0) -> Any:
         hw = self.hw

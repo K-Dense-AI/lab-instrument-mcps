@@ -99,7 +99,7 @@ safe_state:             # optional: run in order by apply_safe_state
 | `min`, `max` | none | Engineering-unit limits. **Required** for writable numeric points (unless `enum` is used) |
 | `enum` | none | `{number: label}` for integer points. Writes accept the label or the number |
 
-The server validates the map when it starts. Unknown fields (e.g. a misspelt `maximum`) are errors rather than being silently ignored, so a typo can't remove a limit. If the map is invalid, `list_points` shows the error and the device tools refuse to run. The server fails closed.
+The server validates the map when it starts. Unknown fields (e.g. a misspelt `maximum`) and repeated keys (a second `max`, or a point defined twice) are errors rather than being silently ignored, so a typo can't remove a limit. Two writable points may not share a register (writing one would bypass the other's limits); read-only views of a writable register are fine. If the map is invalid, `list_points` shows the error and the device tools refuse to run. The server fails closed.
 
 ## Add to your MCP client
 
@@ -134,7 +134,7 @@ Useful flags:
 <!-- TOOLS:START -->
 | Tool | Kind | Description |
 |---|---|---|
-| `apply_safe_state` | 🛑 safety | Put the device into the safe state defined in the register map (e.g. heater output off, controller to standby), writing each step in order and reading it back. Every step is attempted even if an earlier one fails. Call it immediately if anything looks wrong. |
+| `apply_safe_state` | 🛑 safety | Put the device into the safe state defined in the register map (e.g. heater output off, controller to standby), writing each step in order and reading it back. Every step is attempted even if an earlier one fails. Call it immediately if anything looks wrong. `all_ok` is true only if every step was written AND read back with the requested value; a step the device acknowledged but ignored (e.g. in local mode) is not ok. |
 | `get_command_log` | 👁 read | Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done. |
 | `get_connection_info` | 👁 read | Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first. |
 | `list_points` | 👁 read | Describe the loaded register map: device, every named point (table, 0-based address, type, scaling, unit, writable, min/max, enum) and the safe-state steps. Works without a connection. |
@@ -144,7 +144,7 @@ Useful flags:
 | `read_registers` | 👁 read | Read raw holding or input registers (unsigned 16-bit), optionally decoded as int16, 32-bit or 64-bit values. For exploring a device; prefer read_points when a register map describes it. |
 | `reconnect` | 🛑 safety | Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged). |
 | `write_coil` | ⚠️ hazard | Switch one raw coil (FC05). Coils often start or stop equipment (heaters, pumps, motors); mapped coils are refused here (use write_point). |
-| `write_point` | ⚠️ hazard | Write a named point from the register map (setpoint, mode, output enable...). The value is checked against the point's writable flag, min/max or enum BEFORE sending, converted to raw registers, written, then read back. Changing setpoints and outputs acts on real equipment. |
+| `write_point` | ⚠️ hazard | Write a named point from the register map (setpoint, mode, output enable...). The value is checked against the point's writable flag, min/max or enum BEFORE sending, converted to raw registers, written, then read back. Changing setpoints and outputs acts on real equipment. If the write succeeds but the read-back fails, `read_back_error` says why. |
 | `write_register` | ⚠️ hazard | Write one raw holding register (FC06). No scaling or limits are applied, so only use it for addresses the register map does not describe (mapped addresses are refused: use write_point). Returns a read-back if the register is readable. |
 | `write_registers` | ⚠️ hazard | Write consecutive raw holding registers (FC16), e.g. both halves of a 32-bit value. No scaling or limits are applied; mapped addresses are refused (use write_point). |
 <!-- TOOLS:END -->
@@ -158,11 +158,11 @@ This server has no global `--limit` values: a generic Modbus client can't know w
 | Protection | Where |
 |---|---|
 | `writable: false` (default) | `write_point` refuses the point |
-| `min` / `max` / `enum` per point | `write_point` refuses out-of-range values **before sending**, and again after rounding to the register resolution |
+| `min` / `max` / `enum` per point | `write_point` refuses out-of-range values **before sending**, and again after rounding to the register resolution (integer or float32) |
 | Mapped-address protection | `write_register(s)` / `write_coil` refuse any address that overlaps a mapped point |
 | `--option raw_writes=false` | Removes the raw write tools entirely |
 | `--read-only` | Removes every write tool. `apply_safe_state` remains |
-| `safe_state` in the map | `apply_safe_state` writes each step in order and reads it back. Every step is attempted even if one fails |
+| `safe_state` in the map | `apply_safe_state` writes each step in order and reads it back. Every step is attempted even if one fails. A step is `ok` only if the read-back matches, so a device that acknowledges but ignores writes (local/keypad mode) is reported, not trusted |
 | Request bounds | 1–125 registers (FC03/04), 1–2000 bits (FC01/02), 1–123 registers (FC16) per request, as in the spec |
 | No broadcast | Unit id 0 is refused on serial lines: it would write to every device, and devices do not reply to broadcasts |
 
@@ -178,6 +178,7 @@ This server has no global `--limit` values: a generic Modbus client can't know w
 
 - **Addresses are 0-based on the wire.** Manuals often use 1-based "Modicon" numbers (40001 = holding 0). If every read is off by one register, the map uses the wrong convention.
 - **Word order is not standardised** for 32-bit values: the Modbus spec only defines byte order within a register. If a float or 32-bit value looks absurd, try `word_order: little`. `read_registers` with `decode_as` helps you find the right order.
+- A float point that reads NaN or infinity (many devices use NaN as "no value", e.g. a sensor fault) comes back with `value: null` and an `error`; `read_registers` with `decode_as` shows it as `"nan"`/`"inf"`.
 - `write_point` uses FC06 for single-register points, FC16 for multi-register points and FC05 for coils. A few devices accept only FC16 even for single registers. For those, map the value as part of a multi-register point or report it so we can add an option.
 - Some controllers save written parameters to non-volatile memory, which survives only a limited number of write cycles. Don't have the agent rewrite setpoints in a tight loop. Check whether the manual offers a RAM-only or remote setpoint register.
 - Reading is normally side-effect free, but a few devices clear counters or alarms when they are read. Leave such registers out of the map or mark them in `description`.

@@ -8,11 +8,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Literal
 
-from labmcp import HAZARD, READ, SAFETY, ConnectContext, InstrumentConnectionError, InstrumentServer, Limit
+from labmcp import (
+    HAZARD,
+    READ,
+    SAFETY,
+    ConnectContext,
+    InstrumentConnectionError,
+    InstrumentError,
+    InstrumentServer,
+    Limit,
+    prepare_save_path,
+)
 from pydantic import BaseModel, Field
 
 from labmcp_labjack.driver import LabJackT, dio_index, dio_name, load_ljm, open_device
 from labmcp_labjack.simulator import SimulatedLJM
+
+#: `stream_analog` runs at most 600 s (``duration_s`` bound, >= 1 scan/s) plus set-up.
+STREAM_TOOL_TIMEOUT_S = 700.0
 
 _DEVICE_TYPES = {"ANY", "T4", "T7", "T8"}
 _CONNECTION_TYPES = {"ANY", "USB", "ETHERNET", "WIFI", "TCP"}
@@ -28,14 +41,26 @@ def connect(ctx: ConnectContext) -> LabJackT:
             f"connection_type must be one of {sorted(_CONNECTION_TYPES)}, got {connection_type!r}"
         )
     identifier = ctx.address or "ANY"
+    safe = ctx.option("safe_dio", "") or ""
+    try:
+        safe_lines = {dio_index(item) for item in safe.replace(";", ",").split(",") if item.strip()}
+    except InstrumentError as exc:
+        raise InstrumentConnectionError(f"--option safe_dio: {exc}") from exc
     if ctx.simulate:
         model = ctx.option("sim_model") or ("T7-Pro" if device_type == "ANY" else device_type)
         ljm = SimulatedLJM(model=model)
     else:
         ljm = load_ljm()
     driver = open_device(ljm, device_type, connection_type, identifier, audit=ctx.audit)
-    safe = ctx.option("safe_dio", "") or ""
-    driver.safe_lines = {dio_index(item) for item in safe.replace(";", ",").split(",") if item.strip()}
+    # A safe_dio line the device lacks would only fail later, in the middle of set_outputs_safe.
+    missing = sorted(line for line in safe_lines if line not in driver.spec.dio_lines)
+    if missing:
+        driver.close()
+        raise InstrumentConnectionError(
+            f"--option safe_dio lists DIO{missing[0]}, which the {driver.spec.model} does not have (lines "
+            f"{dio_name(driver.spec.dio_lines[0])}-{dio_name(driver.spec.dio_lines[-1])})."
+        )
+    driver.safe_lines = safe_lines
     return driver
 
 
@@ -168,10 +193,14 @@ class StreamResult(BaseModel):
     scans: int
     duration_s: float
     skipped_scans: int = Field(description="Scans lost to buffer overflow (null in the waveform, empty in the CSV)")
+    aborted: bool = Field(description="True if set_outputs_safe stopped the stream early (the data covers the scans read)")
     stats: list[ChannelStats]
     time_s: list[float] = Field(description="Time of each returned (downsampled) point from the first scan")
-    waveforms_v: dict[str, list[float | None]] = Field(description="Downsampled waveform per channel")
-    downsample_factor: int
+    waveforms_v: dict[str, list[float | None]] = Field(
+        description="Downsampled waveform per channel. Each block of downsample_factor scans contributes its minimum "
+        "and maximum in time order (placed at the block's first and last scan time), so spikes are kept"
+    )
+    downsample_factor: int = Field(description="Scans per min/max pair (1 = every scan returned)")
     saved_to: str | None = Field(description="Absolute path of the full-resolution CSV, if requested")
     timestamp: str
 
@@ -216,14 +245,40 @@ def _stats(name: str, values: list[float]) -> ChannelStats:
     )
 
 
-def _write_csv(path: str, header: list[str], columns: list[list[float]]) -> str:
-    target = Path(path).expanduser().resolve()
-    target.parent.mkdir(parents=True, exist_ok=True)
+def _write_csv(target: Path, header: list[str], columns: list[list[float]]) -> str:
     with target.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
         writer.writerow(header)
         writer.writerows([("" if math.isnan(v) else v) for v in row] for row in zip(*columns, strict=True))
     return str(target)
+
+
+def _downsample(
+    times: list[float], columns: list[list[float]], max_points: int
+) -> tuple[list[float], list[list[float | None]], int]:
+    """Reduce every column to at most ``max_points`` points, keeping each block's minimum and maximum
+    (in time order) so a short spike or glitch survives; plain striding would drop it. Each block
+    contributes two points, at its first and last sample time. NaN (skipped scans) becomes None."""
+    n = len(times)
+    if n <= max_points:
+        return list(times), [[None if math.isnan(v) else v for v in col] for col in columns], 1
+    size = math.ceil(n / (max_points // 2))
+    t_out: list[float] = []
+    out: list[list[float | None]] = [[] for _ in columns]
+    for start in range(0, n, size):
+        stop = min(start + size, n)
+        pair = stop - start > 1
+        t_out += [times[start], times[stop - 1]] if pair else [times[start]]
+        for col, dst in zip(columns, out, strict=True):
+            good = [i for i in range(start, stop) if not math.isnan(col[i])]
+            if not good:
+                dst += [None, None] if pair else [None]
+            elif pair:
+                first, second = sorted((min(good, key=col.__getitem__), max(good, key=col.__getitem__)))
+                dst += [col[first], col[second]]
+            else:
+                dst.append(col[good[0]])
+    return t_out, out, size
 
 
 # ------------------------------------------------------------------ tools
@@ -385,43 +440,55 @@ def read_thermocouple(
     )
 
 
-@mcp.tool(**READ, timeout=700)
+@mcp.tool(**READ, timeout=STREAM_TOOL_TIMEOUT_S)
 def stream_analog(
     channels: Annotated[list[int], Field(min_length=1, max_length=14, description="AIN numbers, e.g. [0, 1]")],
-    scan_rate_hz: Annotated[float, Field(gt=0, le=100_000, description="Scans per second (one sample of every channel per scan)")] = 1000.0,
+    scan_rate_hz: Annotated[
+        float,
+        Field(ge=1, le=100_000, description="Scans per second (one sample of every channel per scan). At least 1, so "
+              "set_outputs_safe can stop the stream within a second; use read_analog_inputs for slower logging"),
+    ] = 1000.0,
     duration_s: Annotated[float, Field(gt=0, le=600, description="Acquisition time in seconds")] = 1.0,
     range_v: Annotated[float | None, Field(gt=0, le=11, description="± range in V for all channels (T7/T8); omit to keep")] = None,
     resolution_index: Annotated[int | None, Field(ge=0, le=16, description="Stream resolution index; omit for default")] = None,
     max_points: Annotated[int, Field(ge=10, le=20_000, description="Max points per channel in the returned waveform")] = 500,
-    save_path: Annotated[str | None, Field(description="Write the full-resolution data to this CSV file")] = None,
+    save_path: Annotated[
+        str | None, Field(description="Write the full-resolution data to this new .csv file (never overwritten)")
+    ] = None,
 ) -> StreamResult:
     """Acquire a hardware-timed waveform on one or more analog inputs (LJM stream mode) and return
     per-channel statistics plus a downsampled waveform; optionally save everything to CSV.
 
     Bounded by the `max_stream_duration_s` and `max_scan_rate_hz` limits and the device maximum
     (T4 50 kS/s, T7 100 kS/s aggregate, T8 40 kscans/s). On the T8, list adjacent channels in
-    order; on the T7 the streamed inputs are set to single-ended. Blocks for `duration_s`."""
+    order; on the T7 the streamed inputs are set to single-ended. Blocks for `duration_s`;
+    `set_outputs_safe` stops a running stream early."""
     server.check("max_scan_rate_hz", scan_rate_hz, "stream scan rate")
-    server.check("max_stream_duration_s", duration_s, "stream duration")
     num_scans = max(2, round(scan_rate_hz * duration_s))
+    # At least 2 scans are taken, so at very low scan rates the stream lasts longer than duration_s.
+    actual_duration = num_scans / scan_rate_hz
+    server.check("max_stream_duration_s", actual_duration, "stream duration")
+    target = prepare_save_path(save_path, suffixes=(".csv",)) if save_path else None
     s = server.driver.stream_ain(channels, scan_rate_hz, num_scans, range_v, resolution_index)
     names = [f"AIN{c}" for c in s.channels]
-    times = [i / s.scan_rate_hz for i in range(num_scans)]
-    step = max(1, math.ceil(num_scans / max_points))
+    scans = len(s.data[0])
+    times = [i / s.scan_rate_hz for i in range(scans)]
     saved = None
-    if save_path:
-        saved = _write_csv(save_path, ["time_s"] + [f"{n}_v" for n in names], [times, *s.data])
+    if target is not None:
+        saved = _write_csv(target, ["time_s"] + [f"{n}_v" for n in names], [times, *s.data])
+    t_out, waves, factor = _downsample(times, s.data, max_points)
     return StreamResult(
         channels=names,
         requested_scan_rate_hz=scan_rate_hz,
         scan_rate_hz=s.scan_rate_hz,
-        scans=num_scans,
-        duration_s=num_scans / s.scan_rate_hz,
+        scans=scans,
+        duration_s=scans / s.scan_rate_hz,
         skipped_scans=s.skipped_scans,
+        aborted=s.aborted,
         stats=[_stats(n, col) for n, col in zip(names, s.data, strict=True)],
-        time_s=times[::step],
-        waveforms_v={n: [None if math.isnan(v) else v for v in col[::step]] for n, col in zip(names, s.data, strict=True)},
-        downsample_factor=step,
+        time_s=t_out,
+        waveforms_v=dict(zip(names, waves, strict=True)),
+        downsample_factor=factor,
         saved_to=saved,
         timestamp=_now(),
     )

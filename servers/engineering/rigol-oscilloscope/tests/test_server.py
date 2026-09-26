@@ -1,5 +1,7 @@
+import asyncio
 import csv
 import dataclasses
+import time
 
 import pytest
 from labmcp import InstrumentConnectionError, InstrumentProtocolError, SafetyLimitError, SimulatedTransport
@@ -13,7 +15,7 @@ from labmcp_rigol_scope.driver import (
     channel_count,
     detect_profile,
 )
-from labmcp_rigol_scope.server import server
+from labmcp_rigol_scope.server import _downsample, server
 from labmcp_rigol_scope.simulator import RigolScopeSimulator
 
 
@@ -230,7 +232,7 @@ async def test_tools_via_mcp(tmp_path):
         wave = (
             await client.call_tool("capture_waveform", {"channel": 1, "max_points": 100, "save_path": str(path)})
         ).structured_content
-        assert wave["points"] == 1200 and wave["downsample_factor"] == 12 and len(wave["volts"]) == 100
+        assert wave["points"] == 1200 and wave["downsample_factor"] == 24 and len(wave["volts"]) == 100
         assert wave["stats"]["peak_to_peak_v"] == pytest.approx(3.0, abs=0.1)
         rows = list(csv.reader(path.open()))
         assert rows[0] == ["time_s", "ch1_v"] and len(rows) == 1201
@@ -292,3 +294,79 @@ def test_limit_error_type():
     server.configure(simulate=True, limits={"max_memory_points": 10})
     with pytest.raises(SafetyLimitError):
         server.check("max_memory_points", 100)
+
+
+def test_downsample_keeps_glitches_at_their_times():
+    n = 12_000
+    times = [i * 1e-6 for i in range(n)]
+    volts = [0.0] * n
+    volts[6789] = 2.5  # a one-sample glitch
+    t_out, v_out, factor = _downsample(times, volts, 500)
+    assert len(v_out) == len(t_out) <= 500 and factor == 48
+    assert max(v_out) == 2.5 and t_out[v_out.index(2.5)] == times[6789]
+    assert t_out == sorted(t_out) and t_out[0] == times[0] and t_out[-1] == times[-1]
+
+
+def test_memory_capture_reports_clipping():
+    scope, _ = make_scope()
+    scope.set_channel(1, scale_v_per_div=0.2)
+    scope.stop()
+    w = scope.read_capture(1, scope.prepare_capture(1, "memory"), "memory")
+    assert w.clipped_fraction > 0.3  # was always 0.0 in memory mode
+
+
+def test_settings_change_during_read_is_refused():
+    scope, sim = make_scope()
+    pre = scope.prepare_capture(1)
+    original = scope.query_block
+
+    def turn_the_knob(*args, **kwargs):
+        data = original(*args, **kwargs)
+        sim.ch[1]["scale"] = 2.0  # V/div changed on the front panel while the data was in flight
+        return data
+
+    scope.query_block = turn_the_knob
+    with pytest.raises(InstrumentProtocolError, match="changed while the waveform was being read"):
+        scope.read_capture(1, pre)
+
+
+def test_preamble_with_non_finite_values_is_rejected():
+    with pytest.raises(InstrumentProtocolError, match="Non-finite"):
+        Preamble.parse("0,0,1200,1,nan,-0.0012,0,0.04,0,127")
+
+
+async def test_concurrent_captures_do_not_mix_channels():
+    async with simulated_client(server) as client:
+        await client.call_tool("get_connection_info", {})
+        scope = server.driver
+        original = scope.prepare_capture
+
+        def slow_prepare(*args, **kwargs):
+            pre = original(*args, **kwargs)
+            time.sleep(0.1)  # widen the window between selecting the source and reading the data
+            return pre
+
+        scope.prepare_capture = slow_prepare
+        ch1, ch2 = await asyncio.gather(
+            client.call_tool("capture_waveform", {"channel": 1}),
+            client.call_tool("capture_waveform", {"channel": 2}),
+        )
+        assert ch1.structured_content["stats"]["peak_to_peak_v"] == pytest.approx(3.0, abs=0.1)  # CH1 square
+        assert ch2.structured_content["stats"]["rms_v"] == pytest.approx(0.707, abs=0.05)  # CH2 sine
+
+
+async def test_save_paths_are_validated_before_reading(tmp_path):
+    async with simulated_client(server) as client:
+        with pytest.raises(Exception, match=r"\.png"):
+            await client.call_tool("screenshot", {"save_path": str(tmp_path / "screen.jpg")})
+        existing = tmp_path / "screen.png"
+        existing.write_bytes(b"keep")
+        with pytest.raises(Exception, match="already exists"):
+            await client.call_tool("screenshot", {"save_path": str(existing)})
+        existing_csv = tmp_path / "wave.csv"
+        existing_csv.write_text("keep", encoding="utf-8")
+        with pytest.raises(Exception, match="already exists"):
+            await client.call_tool("capture_waveform", {"channel": 1, "save_path": str(existing_csv)})
+        log = (await client.call_tool("get_command_log", {"limit": 300})).data
+        assert not any("DISPlay:DATA?" in e["data"] or "WAVeform" in e["data"] for e in log)
+    assert existing.read_bytes() == b"keep" and existing_csv.read_text(encoding="utf-8") == "keep"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from datetime import datetime, timezone
 from typing import Annotated, Literal
@@ -12,6 +13,7 @@ from labmcp import (
     SAFETY,
     ConnectContext,
     InstrumentConnectionError,
+    InstrumentError,
     InstrumentProtocolError,
     InstrumentServer,
     Limit,
@@ -54,7 +56,14 @@ def connect(ctx: ConnectContext) -> CavroPump:
     if resolution not in {"standard", "fine"}:
         raise InstrumentConnectionError("--option resolution must be 'standard' (N0) or 'fine' (N1)")
     address = ctx.option("pump_address", "1") or "1"
-    standard_steps = int(steps) if steps else MODELS[str(model)][1]
+    if len(address) != 1 or address not in ADDRESSES:  # checked before the port is opened
+        raise InstrumentConnectionError(f"--option pump_address must be one of {ADDRESSES!r}, got {address!r}.")
+    try:
+        standard_steps = int(steps) if steps else MODELS[str(model)][1]
+    except ValueError:
+        standard_steps = 0
+    if standard_steps <= 0:
+        raise InstrumentConnectionError(f"--option steps_per_stroke must be a positive whole number, got {steps!r}.")
     speed = float(ctx.option("sim_speed", "1") or 1)
     # DT protocol defaults (XLP 6000 manual table 3-4): 9600 baud 8N1, CR-terminated commands,
     # answers end with ETX CR LF.
@@ -65,14 +74,18 @@ def connect(ctx: ConnectContext) -> CavroPump:
         write_termination="\r",
         timeout=2.0,
     )
-    return CavroPump(
-        transport,
-        address=address,
-        syringe_ul=syringe_ul,
-        model=model or "custom",
-        standard_steps=standard_steps,
-        resolution_mode=0 if resolution == "standard" else 1,
-    )
+    try:
+        return CavroPump(
+            transport,
+            address=address,
+            syringe_ul=syringe_ul,
+            model=model or "custom",
+            standard_steps=standard_steps,
+            resolution_mode=0 if resolution == "standard" else 1,
+        )
+    except Exception:
+        transport.close()  # do not leave the serial port open (and locked) after a failed connect
+        raise
 
 
 server = InstrumentServer(
@@ -245,6 +258,11 @@ def set_valve(
     return _status(server.driver)
 
 
+#: The slowest move (a full stroke at V5 = 1200 s) is waited for up to 1.5x + 10 s = 1810 s before the
+#: server terminates it; the tool timeout must be longer than that plus the valve move and queries.
+MOVE_TOOL_TIMEOUT_S = 1900
+
+
 def _move(action: str, volume_ul: float, flow_ul_s: float, valve: str | None, port: int | None) -> MoveResult:
     server.check("max_volume_ul", volume_ul, "volume")
     server.check("max_flow_ul_s", flow_ul_s, "flow rate")
@@ -261,6 +279,8 @@ def _move(action: str, volume_ul: float, flow_ul_s: float, valve: str | None, po
     if steps <= 0:
         raise ValueError(f"{volume_ul:g} µL is below the pump resolution ({syringe / spp:.3g} µL per step).")
     speed = round(flow_ul_s * SPEED_PULSES_PER_STROKE / syringe)
+    if speed * syringe / SPEED_PULSES_PER_STROKE > server.limits["max_flow_ul_s"]:
+        speed = math.floor(flow_ul_s * SPEED_PULSES_PER_STROKE / syringe)  # never round up past the limit
     lo, hi = (s * syringe / SPEED_PULSES_PER_STROKE for s in (TOP_SPEED_MIN, TOP_SPEED_MAX))
     if not TOP_SPEED_MIN <= speed <= TOP_SPEED_MAX:
         raise ValueError(
@@ -268,9 +288,7 @@ def _move(action: str, volume_ul: float, flow_ul_s: float, valve: str | None, po
             f"({lo:.3g}-{hi:.4g} µL/s)."
         )
     code = _valve_code(valve, port, "cw")
-    if code is not None:
-        pump.move_valve(code)
-    position = pump.plunger_steps()
+    position = pump.plunger_steps()  # syringe capacity is checked before the valve moves
     if action == "aspirate" and position + steps > spp:
         raise ValueError(
             f"Aspirating {volume_ul:g} µL would overfill the syringe: it holds {position * syringe / spp:.4g} "
@@ -280,6 +298,8 @@ def _move(action: str, volume_ul: float, flow_ul_s: float, valve: str | None, po
         raise ValueError(
             f"Only {position * syringe / spp:.4g} µL is in the syringe; cannot dispense {volume_ul:g} µL."
         )
+    if code is not None:
+        pump.move_valve(code)
     expected = steps * (SPEED_PULSES_PER_STROKE / spp) / speed
     t0 = time.monotonic()
     result = pump.move_plunger(
@@ -300,7 +320,7 @@ def _move(action: str, volume_ul: float, flow_ul_s: float, valve: str | None, po
     )
 
 
-@mcp.tool(**HAZARD, timeout=1300)
+@mcp.tool(**HAZARD, timeout=MOVE_TOOL_TIMEOUT_S)
 def aspirate_ul(
     volume_ul: Annotated[float, Field(gt=0, le=50_000, description="Volume to draw into the syringe, µL")],
     flow_ul_s: Annotated[float, Field(gt=0, le=50_000, description="Plunger flow rate, µL/s")] = 100.0,
@@ -316,7 +336,7 @@ def aspirate_ul(
     return _move("aspirate", volume_ul, flow_ul_s, valve, port)
 
 
-@mcp.tool(**HAZARD, timeout=1300)
+@mcp.tool(**HAZARD, timeout=MOVE_TOOL_TIMEOUT_S)
 def dispense_ul(
     volume_ul: Annotated[float, Field(gt=0, le=50_000, description="Volume to push out of the syringe, µL")],
     flow_ul_s: Annotated[float, Field(gt=0, le=50_000, description="Plunger flow rate, µL/s")] = 100.0,
@@ -337,12 +357,25 @@ def terminate() -> PumpStatus:
     """Stop any plunger move, loop or delay immediately (DT command T). A valve move in progress
     still completes. Re-initialize afterwards: the plunger may have lost steps."""
     pump = server.driver
-    pump.terminate()
-    deadline = time.monotonic() + 2.0
-    status = _status(pump)
-    while not status.ready and time.monotonic() < deadline:
-        time.sleep(0.1)
+    errors: list[str] = []
+    for _ in range(2):  # a lost or garbled answer must not leave the plunger moving
+        try:
+            pump.terminate()
+            break
+        except InstrumentError as exc:
+            errors.append(str(exc))
+    else:
+        raise InstrumentProtocolError(
+            "The pump did not acknowledge terminate (T): " + "; ".join(errors) + ". Switch the pump off if it is moving."
+        )
+    try:
+        deadline = time.monotonic() + 2.0
         status = _status(pump)
+        while not status.ready and time.monotonic() < deadline:
+            time.sleep(0.1)
+            status = _status(pump)
+    except InstrumentError as exc:
+        raise InstrumentProtocolError(f"Terminate (T) was acknowledged, but reading the status failed: {exc}") from exc
     return status
 
 

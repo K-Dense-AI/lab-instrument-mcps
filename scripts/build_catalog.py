@@ -52,7 +52,7 @@ REQUIRED = ["name", "domain", "category", "vendor", "models", "interfaces", "pro
 def load_servers() -> list[dict]:
     servers = []
     for pyproject in sorted(ROOT.glob("servers/*/*/pyproject.toml")):
-        data = tomllib.loads(pyproject.read_text())
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
         meta = data.get("tool", {}).get("labmcp")
         project = data["project"]
         where = pyproject.parent.relative_to(ROOT).as_posix()
@@ -147,9 +147,10 @@ def readme_tables(servers: list[dict]) -> str:
         lines += [f"### {emoji} {title}", "", "| Server | Instruments | Interface | Tools | Status | Install |", "|---|---|---|---|---|---|"]
         for s in sorted(group, key=lambda s: s["name"].lower()):
             models = ", ".join(s["models"][:4]) + (" …" if len(s["models"]) > 4 else "")
-            link = f"[**{s['name']}**]({s['path']})"
+            link = f"[**{cell(s['name'])}**]({s['path']})"
             lines.append(
-                f"| {link}<br><sub>{s['summary']}</sub> | {s['vendor']}: {models} | {', '.join(s['interfaces'])} "
+                f"| {link}<br><sub>{cell(s['summary'])}</sub> | {cell(s['vendor'])}: {cell(models)} "
+                f"| {cell(', '.join(s['interfaces']))} "
                 f"| {len(s['tools'])} | {STATUS[s['status']]} | `uvx {s['package']}` |"
             )
         lines.append("")
@@ -164,16 +165,32 @@ KIND_LABEL = {
 }
 
 
+def cell(text: str) -> str:
+    """Escape text for a Markdown table cell (a bare ``|`` would start a new column)."""
+    return text.replace("|", "\\|")
+
+
 def tools_table(s: dict) -> str:
     lines = ["| Tool | Kind | Description |", "|---|---|---|"]
     for t in s["tools"]:
-        lines.append(f"| `{t['name']}` | {KIND_LABEL[t['kind']]} | {t['description']} |")
+        lines.append(f"| `{t['name']}` | {KIND_LABEL[t['kind']]} | {cell(t['description'])} |")
     return "\n".join(lines) + "\n"
 
 
-def replace_block(text: str, start: str, end: str, body: str) -> str:
+def replace_block(text: str, start: str, end: str, body: str, where: str = "README.md") -> str:
+    if text.count(start) != 1 or text.count(end) != 1 or text.index(start) > text.index(end):
+        sys.exit(f"{where}: needs exactly one {start} followed by one {end}")
     a, b = text.index(start) + len(start), text.index(end)
     return text[:a] + "\n" + body + text[b:]
+
+
+def read(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def write(path: Path, text: str) -> None:
+    with path.open("w", encoding="utf-8", newline="\n") as fh:  # LF on every OS, like the repo
+        fh.write(text)
 
 
 def main() -> None:
@@ -190,15 +207,17 @@ def main() -> None:
     for s in servers:
         outputs[ROOT / s["path"] / "server.json"] = json.dumps(server_json(s), indent=2, ensure_ascii=False) + "\n"
         server_readme = ROOT / s["path"] / "README.md"
-        body = server_readme.read_text()
+        body = read(server_readme)
         if "<!-- TOOLS:START -->" not in body:
             sys.exit(f"{s['path']}/README.md: missing <!-- TOOLS:START --> / <!-- TOOLS:END --> markers")
         if f"mcp-name: {REGISTRY_NAMESPACE}/{s['package']}" not in body:
             sys.exit(f"{s['path']}/README.md: missing '<!-- mcp-name: {REGISTRY_NAMESPACE}/{s['package']} -->'")
-        outputs[server_readme] = replace_block(body, "<!-- TOOLS:START -->", "<!-- TOOLS:END -->", tools_table(s))
+        outputs[server_readme] = replace_block(
+            body, "<!-- TOOLS:START -->", "<!-- TOOLS:END -->", tools_table(s), f"{s['path']}/README.md"
+        )
 
     readme = ROOT / "README.md"
-    text = readme.read_text()
+    text = read(readme)
     text = replace_block(text, "<!-- CATALOG:START -->", "<!-- CATALOG:END -->", readme_tables(servers))
     n_tools = sum(len(s["tools"]) for s in servers)
     text = replace_block(
@@ -210,14 +229,14 @@ def main() -> None:
     )
     outputs[readme] = text
 
-    stale = [p for p, content in outputs.items() if not p.exists() or p.read_text() != content]
+    stale = [p for p, content in outputs.items() if not p.exists() or read(p) != content]
     if args.check:
         if stale:
             sys.exit("Out of date (run `uv run python scripts/build_catalog.py`):\n  " + "\n  ".join(str(p.relative_to(ROOT)) for p in stale))
         print(f"Catalog up to date: {len(servers)} servers, {n_tools} tools.")
         return
     for path in stale:
-        path.write_text(outputs[path])
+        write(path, outputs[path])
     print(f"Wrote catalog: {len(servers)} servers, {n_tools} tools ({len(stale)} files updated).")
 
 

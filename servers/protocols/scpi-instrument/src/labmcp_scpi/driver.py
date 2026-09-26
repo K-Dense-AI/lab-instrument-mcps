@@ -27,9 +27,10 @@ from __future__ import annotations
 import contextlib
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
-from labmcp import InstrumentProtocolError, InstrumentTimeout, Transport
+from labmcp import InstrumentError, InstrumentProtocolError, InstrumentTimeout, Transport
 from labmcp.scpi import SCPIDriver, consume_block_terminator
 
 from labmcp_scpi.policy import CommandPolicy, CommandRefused
@@ -175,13 +176,19 @@ class SCPIInstrument(SCPIDriver):
         """Send a query that answers with a definite-length block and return its payload.
 
         The block's declared length is checked against ``max_bytes`` before the
-        payload is read; oversized blocks are discarded (input flushed).
+        payload is read; an oversized payload is thrown away unkept. ``timeout``
+        bounds the whole transfer (header and payload), not each read.
         """
         command = self.policy.check_query(command)
+        deadline = time.monotonic() + (self.t.timeout if timeout is None else timeout)
+
+        def left() -> float:
+            return max(0.001, deadline - time.monotonic())
+
         with self.t.lock:
             self.t.write(command)
             try:
-                first = self.t.read_bytes(1, timeout)
+                first = self.t.read_bytes(1, left())
                 if first != b"#":
                     rest = self.t.read_until(self.t.read_termination.encode(self.t.encoding), 1.0)
                     text = (first + rest).decode(self.t.encoding, "replace")
@@ -190,7 +197,7 @@ class SCPIInstrument(SCPIDriver):
                         f"{text[:80]!r}. Use `scpi_query` for text replies, or select a binary data "
                         "format first (e.g. FORMat:DATA REAL,32 with scpi_write)."
                     )
-                digits = self.t.read_bytes(1, timeout)
+                digits = self.t.read_bytes(1, left())
                 if not digits.isdigit():
                     self._resync()
                     raise InstrumentProtocolError(f"Malformed block header from {command!r}: #{digits!r}")
@@ -200,21 +207,47 @@ class SCPIInstrument(SCPIDriver):
                         f"{command!r} returned an indefinite-length block (#0). Only definite-length "
                         "blocks are supported; configure the instrument for definite-length output."
                     )
-                length = int(self.t.read_bytes(int(digits), timeout))
-                if length > max_bytes:
+                size_field = self.t.read_bytes(int(digits), left())
+                if not size_field.isdigit():
                     self._resync()
+                    raise InstrumentProtocolError(
+                        f"Malformed block header from {command!r}: #{digits.decode()}{size_field!r} "
+                        "(the length field must be decimal digits)."
+                    )
+                length = int(size_field)
+                if length > max_bytes:
+                    self._discard_block(length, left)
                     raise InstrumentProtocolError(
                         f"{command!r} announced a {length}-byte block, above the {max_bytes}-byte limit "
                         "(safety limit `max_block_bytes`). The data was discarded. Request less data "
                         "(fewer points) or restart with a higher --limit max_block_bytes."
                     )
-                data = self.t.read_bytes(length, timeout)
+                data = self.t.read_bytes(length, left())
             except InstrumentTimeout as exc:
                 raise self._timeout_error(command, exc) from exc
             # The block is followed by the response terminator (IEEE 488.2 NL^END);
             # leaving it unread would shift every later reply by one.
             consume_block_terminator(self.t, timeout)
         return data
+
+    def _discard_block(self, length: int, left: Callable[[], float]) -> None:
+        """Throw away a block payload we will not keep, so it cannot be read as the next reply.
+
+        Flushing alone is not enough on a raw socket or serial link: most of the payload
+        is still on its way when the header has been read. VISA's device clear does
+        discard it, so there the flush suffices.
+        """
+        from labmcp.transports.visa import VisaTransport
+
+        if not isinstance(self.t, VisaTransport):
+            with contextlib.suppress(InstrumentError):  # out of time: fall back to a flush
+                remaining = length
+                while remaining > 0:
+                    chunk = min(remaining, 65536)
+                    self.t.read_bytes(chunk, left())
+                    remaining -= chunk
+                consume_block_terminator(self.t, 1.0)
+        self._resync()
 
     # ------------------------------------------------------------ common commands
 

@@ -1,13 +1,13 @@
 [project]
 name = "labmcp-alicat"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP server for Alicat mass flow and pressure meters/controllers: read flow, set setpoints, select gas, tare, hold/close valves."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [{ name = "K-Dense and LabMCP contributors" }]
 keywords = ["mcp", "lab-instrument", "alicat", "mass-flow-controller", "mfc", "pressure-controller", "gas-flow"]
-dependencies = ["labmcp>=0.1,<0.2"]
+dependencies = ["labmcp>=0.1.2,<0.2"]
 
 [project.scripts]
 labmcp-alicat = "labmcp_alicat.server:main"

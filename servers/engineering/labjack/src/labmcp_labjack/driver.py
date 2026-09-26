@@ -163,6 +163,8 @@ class StreamData:
     skipped_scans: int
     max_device_backlog: int
     max_ljm_backlog: int
+    #: True if `safe_state` / `close` stopped the stream early (``data`` holds the scans read so far).
+    aborted: bool = False
 
 
 @dataclass
@@ -180,6 +182,9 @@ class LabJackT:
         self.handle = handle
         self.audit = audit
         self.lock = threading.RLock()
+        #: Set by `safe_state` / `close` (from another thread) to end a running stream early, so the
+        #: safety action does not wait for the whole stream while it holds ``lock``.
+        self.abort = threading.Event()
         #: DIO lines this server has driven as outputs (released/driven low by `safe_state`).
         self.driven_lines: set[int] = set()
         #: Extra lines to include in `safe_state` (the ``safe_dio`` option).
@@ -550,6 +555,8 @@ class LabJackT:
             )
         res = 0 if resolution_index is None else resolution_index
         r = None if range_v is None else self._match_range(range_v)  # T4: explains fixed ranges
+        # Cleared before waiting for the lock, so a safe_state requested from now on stops this stream.
+        self.abort.clear()
         with self.lock:
             self._check_t4_flexible(channels)
             if spec is T4:
@@ -575,18 +582,23 @@ class LabJackT:
             )
             raw: list[float] = []
             max_dev = max_ljm = 0
+            aborted = False
             try:
                 while len(raw) < num_scans * n:
+                    if self.abort.is_set():  # safe_state / close is waiting for the lock
+                        aborted = True
+                        break
                     data, dev_backlog, ljm_backlog = self._call("eStreamRead", self.ljm.eStreamRead, self.handle)
                     raw.extend(data)
                     max_dev, max_ljm = max(max_dev, dev_backlog), max(max_ljm, ljm_backlog)
             finally:
                 self._stop_stream()
-        raw = raw[: num_scans * n]
+        scans = min(num_scans, len(raw) // n)
+        raw = raw[: scans * n]
         skipped = sum(1 for v in raw[::n] if v == DUMMY_VALUE)
         per_channel = [[math.nan if v == DUMMY_VALUE else v for v in raw[i::n]] for i in range(n)]
-        self._log(f"stream done: {num_scans} scans at {actual:g} Hz, {skipped} skipped")
-        return StreamData(channels, float(actual), per_channel, skipped, max_dev, max_ljm)
+        self._log(f"stream {'aborted' if aborted else 'done'}: {scans} scans at {actual:g} Hz, {skipped} skipped")
+        return StreamData(channels, float(actual), per_channel, skipped, max_dev, max_ljm, aborted)
 
     def _stop_stream(self) -> None:
         try:
@@ -602,6 +614,7 @@ class LabJackT:
         this server drove plus the configured ``safe_dio`` lines. Tries every step."""
         done: list[str] = []
         errors: list[str] = []
+        self.abort.set()  # end a running stream now instead of waiting for it to finish
         with self.lock:
             self._stop_stream()
             try:
@@ -628,8 +641,12 @@ class LabJackT:
         return done
 
     def close(self) -> None:
-        with contextlib.suppress(Exception):
-            self.ljm.close(self.handle)
+        self.abort.set()
+        with self.lock:  # a running stream ends at its next read (abort) and is stopped before closing
+            with contextlib.suppress(Exception):
+                self._stop_stream()
+            with contextlib.suppress(Exception):
+                self.ljm.close(self.handle)
 
 
 def open_device(
@@ -652,4 +669,9 @@ def open_device(
         ) from exc
     if audit is not None:
         audit.event(f"openS({device_type}, {connection_type}, {identifier}) -> handle {handle}", "ljm")
-    return LabJackT(ljm, handle, audit)
+    try:
+        return LabJackT(ljm, handle, audit)
+    except Exception:
+        with contextlib.suppress(Exception):
+            ljm.close(handle)  # don't leave the device claimed (error 1230 on the next attempt)
+        raise

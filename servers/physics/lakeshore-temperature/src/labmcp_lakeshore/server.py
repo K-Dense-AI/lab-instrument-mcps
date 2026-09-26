@@ -42,8 +42,12 @@ def connect(ctx: ConnectContext) -> LakeShoreController:
         write_termination="\r\n",
         timeout=3.0,
     )
-    interval = float(ctx.option("min_interval_s", "0" if ctx.simulate else "0.05") or 0)
-    return LakeShoreController(transport, min_interval_s=interval)
+    try:
+        interval = float(ctx.option("min_interval_s", "0" if ctx.simulate else "0.05") or 0)
+        return LakeShoreController(transport, min_interval_s=interval)
+    except Exception:
+        transport.close()  # don't hold the port open (Windows would refuse the next attempt)
+        raise
 
 
 server = InstrumentServer(
@@ -139,6 +143,10 @@ class StabilityResult(BaseModel):
     aborted: bool = Field(description="True if all_heaters_off stopped the wait")
     trace: list[tuple[float, float]] = Field(description="(seconds since start, K), downsampled")
     message: str
+
+
+#: Output modes whose heating is governed by the loop setpoint.
+_SETPOINT_MODES = {"closed_loop_pid", "zone", "warmup_supply"}
 
 
 def _to_kelvin(value: float, units: str) -> float | None:
@@ -276,12 +284,34 @@ def set_heater_range(
 ) -> OutputStatus:
     """Set an output's heater range (each step is ~10x more power). Anything above 0 lets the
     output heat: in closed loop as the PID demands, in open loop at the front-panel manual output.
-    Refused above `max_heater_range`. Start with the lowest range that can reach the setpoint."""
+    Refused above `max_heater_range`, or if the setpoint already programmed on a closed-loop, zone
+    or warm-up output is above `max_setpoint_k`. Start with the lowest range that can reach the
+    setpoint."""
     server.check("max_heater_range", heater_range, f"heater range for output {output}")
     ls = server.driver
     with ls.t.lock:
+        if heater_range > 0:
+            _check_programmed_setpoint(ls, output)
         ls.set_heater_range(output, heater_range)
         return _output_status(ls, output)
+
+
+def _check_programmed_setpoint(ls: LakeShoreController, output: int) -> None:
+    """Before an output is allowed to heat, check the setpoint it will heat to (which may have
+    been set on the front panel, or before the limit was lowered) against `max_setpoint_k`."""
+    mode, inp, _ = ls.output_mode(output)
+    if mode not in _SETPOINT_MODES or inp is None:
+        return
+    setpoint_k = _to_kelvin(ls.setpoint(output), ls.setpoint_units(output))
+    if setpoint_k is None:
+        raise InstrumentProtocolError(
+            f"Refused: output {output} controls on input {inp}, whose preferred units are sensor units, so "
+            "its setpoint cannot be checked against `max_setpoint_k`. Change the input's preferred units to "
+            "kelvin or Celsius on the controller. Nothing was sent."
+        )
+    server.check(
+        "max_setpoint_k", setpoint_k, f"programmed setpoint of output {output} (checked before heating)"
+    )
 
 
 @mcp.tool(**CONTROL)
@@ -353,7 +383,6 @@ def wait_for_stable_temperature(
         if ls.abort.wait(min(poll_interval_s, max(timeout_s - now, 0.0))):
             aborted = True
             break
-    step = max(1, len(trace) // 100)
     elapsed = time.monotonic() - t0
     if stable:
         msg = f"Input {inp} stable at {temp:.4f} K (setpoint {setpoint_k:.4f} K) for {stable_for_s:g} s."
@@ -373,17 +402,33 @@ def wait_for_stable_temperature(
         window_mean_k=statistics.fmean(window) if window else None,
         window_stdev_k=statistics.stdev(window) if len(window) > 1 else None,
         aborted=aborted,
-        trace=trace[::step],
+        trace=_downsample_trace(trace, 100),
         message=msg,
     )
+
+
+def _downsample_trace(trace: list[tuple[float, float]], target: int) -> list[tuple[float, float]]:
+    """About ``target`` evenly spaced points, always keeping the first, last, coldest and hottest
+    readings (an overshoot must not vanish from the summary)."""
+    if len(trace) <= target:
+        return list(trace)
+    step = len(trace) / target
+    keep = {int(i * step) for i in range(target)} | {len(trace) - 1}
+    temps = [t for _, t in trace]
+    keep |= {temps.index(min(temps)), temps.index(max(temps))}
+    return [trace[i] for i in sorted(keep)]
 
 
 @mcp.tool(**SAFETY)
 def all_heaters_off() -> dict[str, object]:
     """Turn every output off (heater range 0 on outputs 1-4), like the front-panel All Off key,
-    and stop any running wait. Reports the read-back range of each output."""
+    and stop any running wait. Reports the read-back range of each output and `all_off`."""
     result = server.driver.all_heaters_off()
-    return {"outputs": {str(k): v for k, v in result.items()}, "timestamp": _now()}
+    return {
+        "all_off": all(v == "off" for v in result.values()),
+        "outputs": {str(k): v for k, v in result.items()},
+        "timestamp": _now(),
+    }
 
 
 def main() -> None:

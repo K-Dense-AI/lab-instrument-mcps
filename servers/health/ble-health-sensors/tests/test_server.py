@@ -1,8 +1,18 @@
+import asyncio
 import csv
 import struct
+import threading
+import time
+from types import SimpleNamespace
 
 import pytest
-from labmcp import InstrumentConnectionError, InstrumentProtocolError, InstrumentTimeout, SafetyLimitError
+from labmcp import (
+    InstrumentConnectionError,
+    InstrumentError,
+    InstrumentProtocolError,
+    InstrumentTimeout,
+    SafetyLimitError,
+)
 from labmcp.testing import simulated_client, tool_names
 from labmcp_ble_health.driver import (
     BLEHealthSensor,
@@ -26,6 +36,7 @@ from labmcp_ble_health.simulator import (
     SIM_BP_MONITOR,
     SIM_HR_STRAP,
     SIM_KIT,
+    SIM_OXIMETER,
     SimulatedBLEBackend,
     enc_float,
     enc_sfloat,
@@ -385,3 +396,143 @@ def test_bleak_adapter_kwargs_match_installed_bleak(monkeypatch):
     assert backend._scanner_kwargs() == {"adapter": "hci1"}
     backend._adapter = None
     assert backend._client_kwargs() == {"pair": False}
+
+
+# ------------------------------------------------------------------ regression tests (software review)
+
+
+def _run_listen(sensor, seconds, errors):
+    try:
+        sensor.listen([0x2A37], seconds=seconds)
+    except InstrumentError as exc:
+        errors.append(str(exc))
+
+
+def test_new_measurement_cancels_one_still_running():
+    # A listen whose MCP call timed out on the client keeps running; the retry must not have its
+    # notifications stolen (and later unsubscribed) by it.
+    d = make_driver(SIM_HR_STRAP)
+    errors: list[str] = []
+    orphan = threading.Thread(target=_run_listen, args=(d, 30, errors), daemon=True)
+    orphan.start()
+    time.sleep(0.5)
+    samples, malformed, _ = d.record_heart_rate(2.5)
+    orphan.join(5)
+    assert not orphan.is_alive() and "cancelled" in errors[0]
+    assert len(samples) >= 2 and malformed == 0
+
+
+def test_close_cancels_a_running_listen():
+    d = make_driver(SIM_HR_STRAP)
+    errors: list[str] = []
+    t = threading.Thread(target=_run_listen, args=(d, 30, errors), daemon=True)
+    t.start()
+    time.sleep(0.5)
+    d.close()  # what `reconnect` does
+    t.join(3)
+    assert not t.is_alive() and "closed" in errors[0]
+    with pytest.raises(InstrumentConnectionError, match="closed"):
+        d.listen([0x2A37], seconds=1)
+
+
+class _LateOximeter(SimulatedBLEBackend):
+    """A spot-check oximeter that only becomes connectable after a while."""
+
+    def __init__(self):
+        super().__init__(SIM_OXIMETER)
+        self.attempts = 0
+
+    def connect(self, timeout_s):
+        self.attempts += 1
+        if self.attempts < 3:
+            raise InstrumentConnectionError("not advertising yet")
+        super().connect(timeout_s)
+
+
+def test_spot_check_waits_for_the_oximeter_to_become_available():
+    sensor = BLEHealthSensor(_LateOximeter(), SIM_OXIMETER, settle_s=0.3)
+    ms, malformed = sensor.pulse_oximetry("spot_check", 5, timeout_s=15)
+    assert ms[0].kind == "spot_check" and ms[0].spo2_pct.value == 97 and malformed == 0
+
+
+class _GlitchyOximeter(SimulatedBLEBackend):
+    def _plx_continuous(self):
+        yield 0.1, 0x2A5F, b"\x1c\x01"  # truncated: flags say status fields follow
+        for _delay, char, payload in super()._plx_continuous():
+            yield 0.2, char, payload
+
+
+def test_malformed_packet_does_not_discard_a_continuous_recording():
+    sensor = BLEHealthSensor(_GlitchyOximeter(SIM_OXIMETER), SIM_OXIMETER, settle_s=0.3)
+    ms, malformed = sensor.pulse_oximetry("continuous", 1.5, timeout_s=10)
+    assert malformed == 1 and len(ms) >= 3
+    assert any(m.spo2_pct.value is not None for m in ms)
+
+
+def test_bleak_backend_close_releases_the_loop_and_fails_fast():
+    from labmcp_ble_health.driver import BleakBackend
+
+    backend = BleakBackend(None)
+    backend.close()
+    assert backend._loop.is_closed()
+    t0 = time.monotonic()
+    with pytest.raises(InstrumentConnectionError, match="closed"):
+        backend._call(asyncio.sleep(0), 5.0, "read")
+    assert time.monotonic() - t0 < 1.0
+    backend.close()  # idempotent
+
+
+def test_bleak_connect_that_times_out_disconnects_the_client():
+    from labmcp_ble_health.driver import BleakBackend
+
+    clients = []
+
+    class FakeClient:
+        def __init__(self, device, timeout, **kwargs):
+            self.disconnected = False
+            clients.append(self)
+
+        async def connect(self):
+            await asyncio.sleep(30)
+
+        async def disconnect(self):
+            self.disconnected = True
+
+    class FakeScanner:
+        @staticmethod
+        async def find_device_by_address(address, timeout, **kwargs):
+            return object()
+
+    backend = BleakBackend("AA:BB:CC:DD:EE:FF")
+    backend._bleak = SimpleNamespace(BleakScanner=FakeScanner, BleakClient=FakeClient)
+    try:
+        with pytest.raises(InstrumentTimeout):
+            backend._call(backend._connect_coro(1.0), 0.3, "connect")
+        deadline = time.monotonic() + 3
+        while not clients[0].disconnected and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert clients[0].disconnected  # no half-open link left behind
+    finally:
+        backend.close()
+
+
+async def test_heart_rate_save_path_is_checked_before_recording(tmp_path):
+    existing = tmp_path / "hr.csv"
+    existing.write_text("keep")
+    async with simulated_client(server, address="") as client:
+        t0 = time.monotonic()
+        with pytest.raises(Exception, match="already exists"):
+            await client.call_tool("record_heart_rate", {"duration_s": 5, "save_path": str(existing)})
+        with pytest.raises(Exception, match=r"\.csv"):
+            await client.call_tool("record_heart_rate", {"duration_s": 5, "save_path": str(tmp_path / "hr.txt")})
+        assert time.monotonic() - t0 < 4  # refused before recording anything
+    assert existing.read_text() == "keep"
+
+
+def test_connect_timeout_option_is_bounded():
+    server.configure(simulate=True, address="", options={"connect_timeout_s": "600"})
+    try:
+        with pytest.raises(InstrumentConnectionError, match="between 1 and 60"):
+            _ = server.driver
+    finally:
+        server.configure(simulate=True, address="", options={})

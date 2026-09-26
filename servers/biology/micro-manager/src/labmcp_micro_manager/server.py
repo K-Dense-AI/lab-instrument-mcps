@@ -7,6 +7,7 @@ import json
 import math
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Annotated, Any
 
 import numpy as np
@@ -39,6 +40,13 @@ from labmcp_micro_manager.driver import (
 from labmcp_micro_manager.simulator import FakeMicroscopeCore
 
 SOFT_LIMIT_OPTIONS = ("x_min_um", "x_max_um", "y_min_um", "y_max_um", "z_min_um", "z_max_um")
+
+#: An acquisition must finish inside one tool call. Longer ones are refused up front (from the exposure
+#: time alone) and stopped between slices/timepoints if overheads make them run long; the tool timeout
+#: leaves room for the last images, returning Z and writing the TIFF.
+ACQ_MAX_S = 3600.0
+_ACQ_OVERRUN_S = 60.0
+ACQ_TOOL_TIMEOUT_S = 4000.0
 
 
 def connect(ctx: ConnectContext) -> MicroManagerScope:
@@ -201,6 +209,7 @@ class StackSummary(BaseModel):
     best_focus_z_um: float | None = Field(description="Z of the sharpest slice (first channel)")
     returned_to_z_um: float | None
     aborted: bool
+    note: str | None = Field(None, description="Why the acquisition ended early, if it did")
     duration_s: float
     timestamp: str
 
@@ -216,6 +225,7 @@ class TimeLapseSummary(BaseModel):
         description="Mean intensity change from first to last timepoint per channel (bleaching/drift indicator)"
     )
     aborted: bool
+    note: str | None = Field(None, description="Why the acquisition ended early, if it did")
     duration_s: float
     timestamp: str
 
@@ -302,6 +312,11 @@ def _resolve_channels(channels: list[str] | None, channel_group: str | None) -> 
     group = channel_group or scope.channel_group() or ("Channel" if "Channel" in scope.config_groups() else None)
     if not group:
         raise InstrumentProtocolError("No channel group is set in this configuration: pass channel_group.")
+    if OBJECTIVE_GROUP_RE.search(group):
+        raise InstrumentProtocolError(
+            f"{group!r} looks like an objective turret group: an acquisition must not rotate the turret between "
+            "images. Use set_objective between acquisitions."
+        )
     groups = scope.config_groups()
     if group not in groups:
         raise InstrumentProtocolError(f"Unknown config group {group!r}. Groups: {', '.join(groups)}.")
@@ -322,6 +337,11 @@ def _frame_stats(index: int, img: np.ndarray, bit_depth: int, channel: str | Non
                       focus_score=round(s["focus_score"], 6), **extra)
 
 
+def _still_free(path: Path) -> Path:
+    """The path chosen before an acquisition, or the next free name if a file appeared meanwhile."""
+    return resolve_save_path(str(path), None, "", "") if path.exists() else path
+
+
 def _restore_preset(group: str | None, preset: str | None) -> None:
     """Put the channel preset back after an acquisition (best effort)."""
     if group and preset:
@@ -339,6 +359,19 @@ def _config_groups() -> list[ConfigGroup]:
         role = "channel" if name == channel else ("objective" if OBJECTIVE_GROUP_RE.search(name) else None)
         out.append(ConfigGroup(name=name, presets=g["presets"], current=g["current"], role=role))
     return out
+
+
+def _check_acquisition_time(estimate_s: float, what: str) -> None:
+    if estimate_s > ACQ_MAX_S:
+        raise InstrumentProtocolError(
+            f"The {what} would take at least {estimate_s:.0f} s, more than one tool call allows ({ACQ_MAX_S:.0f} s). "
+            "Use fewer images or shorter exposures, or split it into several acquisitions. Nothing was moved."
+        )
+
+
+def _budget_note(what: str) -> str:
+    return (f"Stopped early: the {what} would not have finished within one tool call ({ACQ_MAX_S:.0f} s). "
+            "The images acquired so far were saved.")
 
 
 def _thin(frames: list[FrameStats], limit: int = 100) -> list[FrameStats]:
@@ -433,7 +466,7 @@ def set_exposure(
     return _scope().set_exposure_ms(exposure_ms)
 
 
-@mcp.tool(**CONTROL)
+@mcp.tool(**HAZARD)  # can leave a lamp or laser on the sample indefinitely
 def set_shutter(
     open: Annotated[bool, Field(description="True opens the shutter (sample illuminated continuously)")],
     auto_shutter: Annotated[
@@ -454,9 +487,15 @@ def close_shutter() -> dict[str, bool | None]:
     """Close the shutter (stop illuminating the sample) and abort any running acquisition."""
     scope = _scope()
     scope.abort.set()
-    if not scope.roles()["shutter"]:
-        return {"shutter_open": None, "auto_shutter": scope.auto_shutter()}
-    return {"shutter_open": scope.set_shutter(False), "auto_shutter": scope.auto_shutter()}
+    try:
+        state = scope.set_shutter(False) if scope._get("getShutterDevice") else None
+    except InstrumentError as exc:
+        raise InstrumentProtocolError(f"Could not close the shutter: {exc} (any acquisition was aborted).") from exc
+    try:
+        auto = scope.auto_shutter()
+    except InstrumentError:
+        auto = None
+    return {"shutter_open": state, "auto_shutter": auto}
 
 
 # --------------------------------------------------------------------------
@@ -515,8 +554,14 @@ def move_z(
 @mcp.tool(**SAFETY)
 def stop_stage() -> dict[str, Any]:
     """Immediately stop XY and Z stage motion and abort any z-stack or time-lapse in progress."""
-    stopped = _scope().stop_stages()
-    return {"stopped": stopped, "acquisition_aborted": True, "position": _position().model_dump()}
+    errors: list[str] = []
+    stopped = _scope().stop_stages(errors)
+    try:
+        position = _position().model_dump()
+    except InstrumentError as exc:
+        position = None
+        errors.append(f"reading the position failed: {exc}")
+    return {"stopped": stopped, "acquisition_aborted": True, "errors": errors, "position": position}
 
 
 @mcp.tool(**HAZARD, timeout=120)
@@ -552,11 +597,12 @@ def snap_image(
     during the exposure. Saves the full image as TIFF and returns summary statistics (min/max/mean,
     saturation, sharpness) plus an optional contrast-stretched preview."""
     scope = _scope()
+    path = resolve_save_path(save_path, _data_dir(), "snap", _stamp())  # refuse a bad path before exposing
     cam = scope.camera_info()
     img = scope.snap()
     pos = scope.position()
     stats = image_stats(img, cam["bit_depth"])
-    path = resolve_save_path(save_path, _data_dir(), "snap", _stamp())
+    path = _still_free(path)
     presets = _presets()
     save_tiff(path, img, "YX", pixel_size_um=cam["pixel_size_um"],
               description={"exposure_ms": cam["exposure_ms"], **presets, "x_um": pos["x_um"], "y_um": pos["y_um"],
@@ -570,7 +616,7 @@ def snap_image(
     return _with_preview(summary, img if include_preview else None, preview_size_px)
 
 
-@mcp.tool(**HAZARD, output_schema=StackSummary.model_json_schema(), timeout=3700)
+@mcp.tool(**HAZARD, output_schema=StackSummary.model_json_schema(), timeout=ACQ_TOOL_TIMEOUT_S)
 def acquire_z_stack(
     start_offset_um: Annotated[float, Field(description="First slice relative to the current Z (e.g. -10)")],
     end_offset_um: Annotated[float, Field(description="Last slice relative to the current Z (e.g. +10)")],
@@ -586,24 +632,35 @@ def acquire_z_stack(
     several channels at each), saves a multi-page TIFF, reports per-slice statistics and the sharpest
     slice, and returns Z to where it started. Every slice must stay within `max_z_step_um` of the start
     and the Z soft limits."""
+    if not (math.isfinite(start_offset_um) and math.isfinite(end_offset_um)):
+        raise InstrumentProtocolError("start_offset_um and end_offset_um must be finite numbers. Nothing was moved.")
     scope = _scope()
     z0 = scope.position()["z_um"]
     if z0 is None:
         raise InstrumentProtocolError("No focus (Z) drive is configured.")
     span = end_offset_um - start_offset_um
-    n = int(math.floor(abs(span) / step_um + 1e-9)) + 1
+    group, chans = _resolve_channels(channels, channel_group)
+    # Count the slices (and check max_frames) before building the list: a tiny step over a large
+    # span would otherwise allocate billions of positions.
+    slices = abs(span) / step_um + 1e-9
+    server.check("max_frames", (math.floor(slices) + 1 if math.isfinite(slices) else math.inf) * len(chans),
+                 "number of images")
+    n = int(math.floor(slices)) + 1
     sign = 1.0 if span >= 0 else -1.0
     zs = [round(z0 + start_offset_um + sign * i * step_um, 4) for i in range(n)]
-    group, chans = _resolve_channels(channels, channel_group)
-    server.check("max_frames", n * len(chans), "number of images")
     for z in zs:
         _check_z_target(z0, z)
     cam = scope.camera_info()
+    slice_s = len(chans) * cam["exposure_ms"] / 1000.0
+    _check_acquisition_time(n * slice_s, "z-stack")
+    path = resolve_save_path(save_path, _data_dir(), "zstack", _stamp())  # refuse a bad path before moving
     original = scope.config_groups()[group]["current"] if group else None
     frames: list[FrameStats] = []
     images: list[list[np.ndarray]] = []
     aborted = False
+    note: str | None = None
     t0 = time.monotonic()
+    deadline = t0 + ACQ_MAX_S + _ACQ_OVERRUN_S
     back: float | None = None
     with scope.lock:
         scope.abort.clear()
@@ -612,20 +669,33 @@ def acquire_z_stack(
                 if scope.abort.is_set():
                     aborted = True
                     break
+                if time.monotonic() + slice_s > deadline:
+                    aborted, note = True, _budget_note("z-stack")
+                    break
                 scope.move_z(z)
-                slice_imgs = []
+                slice_imgs: list[np.ndarray] = []
+                slice_frames: list[FrameStats] = []
                 for ch in chans:
+                    if scope.abort.is_set():
+                        break
                     if group and ch:
                         scope.set_config(group, ch)
                     img = scope.snap()
                     slice_imgs.append(img)
-                    frames.append(_frame_stats(len(frames), img, cam["bit_depth"], ch, z_um=z))
+                    slice_frames.append(_frame_stats(len(frames) + len(slice_frames), img, cam["bit_depth"], ch, z_um=z))
+                if len(slice_imgs) < len(chans):  # stopped in the middle of a slice: drop it
+                    aborted = True
+                    break
                 images.append(slice_imgs)
+                frames.extend(slice_frames)
         finally:
             _restore_preset(group, original)
             if scope.abort.is_set():
                 aborted = True  # stop_stage was called: do not move again
-                back = scope.position()["z_um"]
+                try:
+                    back = scope.position()["z_um"]
+                except InstrumentError:
+                    back = None
             else:
                 try:
                     back = scope.move_z(z0)
@@ -634,21 +704,21 @@ def acquire_z_stack(
     if not images:
         raise InstrumentProtocolError("The z-stack was aborted before the first slice; nothing was saved.")
     data = np.stack([np.stack(s) for s in images])  # Z, C, Y, X
-    path = resolve_save_path(save_path, _data_dir(), "zstack", _stamp())
+    path = _still_free(path)
     save_tiff(path, data, "ZCYX", pixel_size_um=cam["pixel_size_um"], z_step_um=step_um,
               description={"exposure_ms": cam["exposure_ms"], "channels": chans, "z_start_um": zs[0]})
     first = [f for f in frames if f.channel == chans[0]]
     best = max(first, key=lambda f: f.focus_score).z_um if first else None
     summary = StackSummary(
         path=str(path), axes="ZCYX", shape=list(data.shape), channels=chans, z_positions_um=zs[: len(images)],
-        frames=_thin(frames), best_focus_z_um=best, returned_to_z_um=back, aborted=aborted,
+        frames=_thin(frames), best_focus_z_um=best, returned_to_z_um=back, aborted=aborted, note=note,
         duration_s=round(time.monotonic() - t0, 2), timestamp=_now(),
     )
     preview = data[:, 0].max(axis=0) if include_preview else None
     return _with_preview(summary, preview, 384)
 
 
-@mcp.tool(**HAZARD, output_schema=TimeLapseSummary.model_json_schema(), timeout=3700)
+@mcp.tool(**HAZARD, output_schema=TimeLapseSummary.model_json_schema(), timeout=ACQ_TOOL_TIMEOUT_S)
 def acquire_time_lapse(
     timepoints: Annotated[int, Field(ge=1, le=100000, description="Number of timepoints")],
     interval_s: Annotated[float, Field(ge=0, le=86400, description="Time between timepoint starts (s)")],
@@ -667,16 +737,25 @@ def acquire_time_lapse(
     server.check("max_frames", timepoints * len(chans), "number of images")
     server.check("max_acquisition_duration_s", (timepoints - 1) * interval_s, "time-lapse duration")
     cam = scope.camera_info()
+    tp_s = len(chans) * cam["exposure_ms"] / 1000.0
+    _check_acquisition_time(max((timepoints - 1) * interval_s + tp_s, timepoints * tp_s), "time-lapse")
+    path = resolve_save_path(save_path, _data_dir(), "timelapse", _stamp())  # refuse a bad path before imaging
     original = scope.config_groups()[group]["current"] if group else None
     frames: list[FrameStats] = []
     images: list[list[np.ndarray]] = []
     aborted = False
+    note: str | None = None
     t0 = time.monotonic()
+    deadline = t0 + ACQ_MAX_S + _ACQ_OVERRUN_S
     with scope.lock:
         scope.abort.clear()
         try:
             for t in range(timepoints):
-                wait = t0 + t * interval_s - time.monotonic()
+                start_at = t0 + t * interval_s
+                if max(start_at, time.monotonic()) + tp_s > deadline:
+                    aborted, note = True, _budget_note("time-lapse")
+                    break
+                wait = start_at - time.monotonic()
                 if wait > 0 and scope.abort.wait(wait):
                     aborted = True
                     break
@@ -684,20 +763,27 @@ def acquire_time_lapse(
                     aborted = True
                     break
                 t_s = round(time.monotonic() - t0, 3)
-                tp = []
+                tp: list[np.ndarray] = []
+                tp_frames: list[FrameStats] = []
                 for ch in chans:
+                    if scope.abort.is_set():
+                        break
                     if group and ch:
                         scope.set_config(group, ch)
                     img = scope.snap()
                     tp.append(img)
-                    frames.append(_frame_stats(len(frames), img, cam["bit_depth"], ch, t_s=t_s))
+                    tp_frames.append(_frame_stats(len(frames) + len(tp_frames), img, cam["bit_depth"], ch, t_s=t_s))
+                if len(tp) < len(chans):  # stopped in the middle of a timepoint: drop it
+                    aborted = True
+                    break
                 images.append(tp)
+                frames.extend(tp_frames)
         finally:
             _restore_preset(group, original)
     if not images:
         raise InstrumentProtocolError("The time-lapse was aborted before the first timepoint; nothing was saved.")
     data = np.stack([np.stack(tp) for tp in images])  # T, C, Y, X
-    path = resolve_save_path(save_path, _data_dir(), "timelapse", _stamp())
+    path = _still_free(path)
     save_tiff(path, data, "TCYX", pixel_size_um=cam["pixel_size_um"], interval_s=interval_s or None,
               description={"exposure_ms": cam["exposure_ms"], "channels": chans})
     change: dict[str, float] = {}
@@ -707,7 +793,7 @@ def acquire_time_lapse(
             change[str(ch or "current")] = round(100.0 * (series[-1] - series[0]) / series[0], 2)
     summary = TimeLapseSummary(
         path=str(path), axes="TCYX", shape=list(data.shape), channels=chans, interval_s=interval_s,
-        frames=_thin(frames), intensity_change_percent=change, aborted=aborted,
+        frames=_thin(frames), intensity_change_percent=change, aborted=aborted, note=note,
         duration_s=round(time.monotonic() - t0, 2), timestamp=_now(),
     )
     return _with_preview(summary, data[-1, 0] if include_preview else None, 384)

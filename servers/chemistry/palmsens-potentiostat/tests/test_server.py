@@ -363,3 +363,173 @@ async def test_raw_swv_script_potential_limit_refuses():
                 "run_methodscript",
                 {"script": "var p\nvar c\nvar f\nvar r\ncell_on\nmeas_loop_swv p c f r 0 5 10m 20m 10\nendloop"},
             )
+
+
+# ------------------------------------------------------------------ regressions (software review)
+
+# A raw script without "on_finished: cell_off" (30 s chronoamperometry).
+RAW_NO_FINISH = [
+    "var p", "var c", "set_e 300m", "cell_on", "meas_loop_ca p c 300m 100m 30",
+    "pck_start", "pck_add p", "pck_add c", "pck_end", "endloop",
+]  # fmt: skip
+
+
+def test_abort_switches_the_cell_off_after_a_raw_script_without_on_finished():
+    # Regression: abort_measurement only sent Z while a script ran, relying on on_finished:, so a
+    # raw script without that section kept the cell on although the tool promises it is switched off.
+    sim = MethodScriptSimulator(speed=10.0)
+    dev = MethodScriptDevice(SimulatedTransport(sim, read_termination="\n", write_termination="\n"))
+    dev.identify()
+    box = {}
+    worker = threading.Thread(target=lambda: box.update(result=dev.execute(RAW_NO_FINISH, timeout_s=60)))
+    worker.start()
+    time.sleep(0.3)
+    assert sim.cell_powered is True
+    info = dev.abort()
+    worker.join(10)
+    assert info == {"was_running": True, "stopped": True, "note": "cell switched off"}
+    assert box["result"].aborted and sim.cell_powered is False
+
+
+class FlakyTransport(SimulatedTransport):
+    """Raises one OSError (a USB glitch) on the read after ``fail_at`` is armed."""
+
+    fail_at: int | None = None
+    reads = 0
+
+    def _read(self, max_bytes, timeout):
+        self.reads += 1
+        if self.fail_at is not None and self.reads >= self.fail_at:
+            self.fail_at = None
+            raise OSError("USB glitch")
+        return super()._read(max_bytes, timeout)
+
+
+def test_collection_failure_aborts_the_script_and_switches_the_cell_off():
+    # Regression: if reading the output failed mid-script, the exception escaped with the script
+    # still running and the cell on, and nothing stopped it.
+    sim = MethodScriptSimulator(speed=10.0)
+    t = FlakyTransport(sim, read_termination="\n", write_termination="\n")
+    dev = MethodScriptDevice(t)
+    dev.identify()
+    t.fail_at = t.reads + 15
+    with pytest.raises(InstrumentError, match="aborted and the cell switched off"):
+        dev.execute(RAW_NO_FINISH, timeout_s=60)
+    assert sim.cell_powered is False and not dev.running
+
+
+def test_malformed_package_does_not_end_the_measurement():
+    class NoisyLine(MethodScriptSimulator):
+        corrupted = False
+
+        def poll(self):
+            lines = super().poll()
+            for k, line in enumerate(lines):
+                if line.startswith("P") and not self.corrupted:
+                    lines[k] = "Pda80#0800u;ba8000800u"  # serial noise in the hex digits
+                    self.corrupted = True
+            return lines
+
+    dev = MethodScriptDevice(SimulatedTransport(NoisyLine(speed=1000.0), read_termination="\n", write_termination="\n"))
+    dev.identify()
+    result = dev.execute(cv_script(), timeout_s=10)
+    assert len(result.malformed) == 1 and len(result.packets) == 320 and result.lines[-1] == "*"
+
+
+def test_decode_value_rejects_non_hex_digits():
+    with pytest.raises(InstrumentProtocolError, match="Malformed"):
+        decode_value("80#0800u")  # was a raw ValueError
+    with pytest.raises(InstrumentProtocolError, match="Malformed metadata"):
+        parse_package("Pba8000800u,1Z")
+
+
+def test_stale_line_is_not_taken_as_the_script_acknowledgement():
+    dev = make_device()
+    dev.t.push("Z!0006\n")  # e.g. the late reply to an abort that raced with the end of a script
+    assert dev.execute(cv_script(), timeout_s=10).error is None
+
+
+async def test_nan_values_are_dropped_not_returned(monkeypatch):
+    # Regression: a '     nan' value became a NaN float in the result, which is not valid JSON for
+    # the output schema (the client rejects the whole result) and poisons the summaries.
+    async with simulated_client(server, options=FAST) as client:
+        cell = server.driver.t.simulator.cell
+        real, calls = cell.noise, {"n": 0}
+
+        def sometimes_nan(i):
+            calls["n"] += 1
+            return math.nan if calls["n"] % 10 == 0 else real(i)
+
+        monkeypatch.setattr(cell, "noise", sometimes_nan)
+        ca = (
+            await client.call_tool("run_chronoamperometry", {"potential_v": 0.5, "run_time_s": 2, "interval_s": 0.1})
+        ).structured_content
+        assert ca["n_points"] == 18 and any("invalid ('nan')" in w for w in ca["warnings"])
+        assert math.isfinite(ca["summary"]["charge_c"])
+        script = (
+            "var p\nvar c\nset_e 100m\ncell_on\nmeas_loop_ca p c 100m 100m 1\npck_start\npck_add p\npck_add c\n"
+            "pck_end\nendloop\non_finished:\ncell_off"
+        )
+        raw = (await client.call_tool("run_methodscript", {"script": script})).structured_content
+        assert any(pkg["ba"] is None for pkg in raw["packages"])
+
+
+async def test_raw_script_current_range_limit_refuses():
+    # Regression: the raw-script path bypassed max_current_range_a.
+    async with simulated_client(server, options=FAST, limits={"max_current_range_a": 1e-3}) as client:
+        for line in ("set_range ba 100m", "set_autoranging ba 1n 50m", "var r\nstore_var r 20m ja\nset_range ba r"):
+            with pytest.raises(Exception, match="max_current_range_a"):
+                await client.call_tool("run_methodscript", {"script": f"{line}\ncell_off"})
+        ok = (await client.call_tool("run_methodscript", {"script": "set_range ba 100u\ncell_off"})).structured_content
+        assert ok["error"] is None
+
+
+async def test_measurement_tool_timeout_covers_the_longest_allowed_run():
+    # Regression: a 3600 s run is given a script timeout of 1.2 x 3600 + 30 s, but the tools timed
+    # out at 3700 s, returning an error while the cell was still on.
+    from labmcp_palmsens.server import HARD_MAX_DURATION_S
+
+    for name in (
+        "run_cyclic_voltammetry",
+        "run_linear_sweep_voltammetry",
+        "run_differential_pulse_voltammetry",
+        "run_chronoamperometry",
+        "run_methodscript",
+    ):
+        tool = await server.mcp.get_tool(name)
+        assert tool.timeout >= HARD_MAX_DURATION_S * 1.2 + 30 + 15 + 30 + 30
+
+
+async def test_save_path_is_checked_before_measuring(tmp_path):
+    existing = tmp_path / "cv.csv"
+    existing.write_text("keep me", encoding="utf-8")
+    async with simulated_client(server, options=FAST) as client:
+        args = {"begin_potential_v": -0.1, "end_potential_v": 0.5}
+        with pytest.raises(Exception, match="already exists"):
+            await client.call_tool("run_linear_sweep_voltammetry", {**args, "save_path": str(existing)})
+        with pytest.raises(Exception, match=r"\.csv"):
+            await client.call_tool("run_linear_sweep_voltammetry", {**args, "save_path": str(tmp_path / "x.json")})
+        log = (await client.call_tool("get_command_log", {"limit": 500})).data
+        assert not any(entry["data"].startswith("meas_loop") for entry in log)  # nothing was run
+    assert existing.read_text(encoding="utf-8") == "keep me"
+
+
+def test_connect_closes_the_port_when_identify_fails(monkeypatch):
+    import labmcp_palmsens.server as server_module
+
+    created = []
+
+    class Failing(MethodScriptDevice):
+        def __init__(self, transport):
+            super().__init__(transport)
+            created.append(transport)
+
+        def identify(self):
+            raise InstrumentProtocolError("bootloader mode")
+
+    monkeypatch.setattr(server_module, "MethodScriptDevice", Failing)
+    server.configure(simulate=True, options=FAST)
+    with pytest.raises(InstrumentError, match="bootloader"):
+        server.driver  # noqa: B018 - property access connects
+    assert created and created[0].closed
+    server.configure(options={})

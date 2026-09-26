@@ -33,7 +33,7 @@ The simulator provides six devices (addresses `00:00:5E:00:53:01`–`06`, from t
    uvx labmcp-ble-health --address AA:BB:CC:DD:EE:FF --check                       # Linux / Windows
    uvx labmcp-ble-health --address 1A2B3C4D-1111-2222-3333-444455556666 --check    # macOS
    ```
-   Devices that require bonding (common for BP monitors and scales): add `--option pair=true` on Linux/Windows; macOS shows a system pairing prompt automatically. On Linux choose a non-default adapter with `--option adapter=hci1`; lengthen device discovery with `--option connect_timeout_s=40`.
+   Devices that require bonding (common for BP monitors and scales): add `--option pair=true` on Linux/Windows; macOS shows a system pairing prompt automatically. On Linux choose a non-default adapter with `--option adapter=hci1`; lengthen device discovery with `--option connect_timeout_s=40` (at most 60 s).
 
 macOS: the terminal (or MCP client app) that launches the server needs Bluetooth permission (System Settings › Privacy & Security › Bluetooth). Without it macOS terminates the process as soon as Bluetooth is touched (exit code 134), before any error message can be printed.
 
@@ -98,7 +98,10 @@ Override at launch: `--limit max_record_duration_s=1800`. Note that many MCP cli
 
 ## Notes
 
-- **Measurement devices push, they are not polled.** Blood pressure monitors, thermometers, scales and spot-check oximeters only *indicate* a value when a measurement completes (these characteristics cannot be read). Call the tool first, then take the measurement. The tool keeps scanning and reconnecting until its timeout because many monitors only advertise right after measuring.
+- **Measurement devices push, they are not polled.** Blood pressure monitors, thermometers, scales and spot-check oximeters only *indicate* a value when a measurement completes (these characteristics cannot be read). Call the tool first, then take the measurement. The tool keeps scanning and reconnecting until its timeout because many monitors only advertise right after measuring (for oximeters this needs `mode="spot_check"`; `auto` must connect first to find out which mode the device supports).
+- **One measurement at a time.** Starting a measurement cancels one that is still running on the same server (for example a recording whose tool call already timed out in the MCP client), and `reconnect` cancels it too; the cancelled call returns an error.
+- **Malformed packets** are skipped and logged (`get_command_log`) rather than discarding the whole recording; `record_heart_rate` and `read_pulse_oximetry` report how many in `malformed_packets`.
+- **`save_path`** (`record_heart_rate`) must be a new `.csv` file: `~` is expanded, missing folders are created, and an existing file is never overwritten. It is checked before recording starts.
 - **Stored measurements.** Monitors send unsent stored readings back-to-back, oldest first, when they connect. Tools keep listening 1.5 s after the first one and return the newest as the result, listing older ones in `other_measurements`; the device clock time is in `device_timestamp` (device local time, often wrong if the clock was never set).
 - **Special values** (IEEE 11073 NaN, NRes, ±INF) are never turned into numbers: they are reported as `null` with an explanation (`special_values`, `unavailable_samples`). Oximeters typically send NaN for the first seconds while acquiring.
 - **Units**: blood pressure in kPa is converted to mmHg (1 kPa = 7.500617 mmHg), °F to °C, lb to kg; `unit_reported` says what the device sent. Weight resolution is 0.005 kg / 0.01 lb per the Weight Scale spec; `0xFFFF` means "measurement unsuccessful" and is returned as `weight_kg: null`. Energy expended is in kJ (HRS 1.0).

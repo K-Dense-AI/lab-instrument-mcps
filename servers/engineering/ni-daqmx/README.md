@@ -96,7 +96,8 @@ Override at launch, e.g. `--limit max_ao_voltage_v=10 --limit max_acquisition_s=
 
 ## Notes
 
-- **Every tool call is one short DAQmx task** (create channels, configure timing, read or write, close), as in NI's examples, so the server never holds the device reserved between calls. Another program using the device at the same time causes a clear "resource reserved" error (-50103).
+- **Every tool call is one short DAQmx task** (create channels, configure timing, read or write, close), as in NI's examples, so the server never holds the device reserved between calls. Another program using the device at the same time causes a clear "resource reserved" error (-50103). Output and digital-line tasks are serialised separately from acquisitions, so `set_outputs_safe` (and `write_analog`) never wait for a running acquisition to finish: NI-DAQmx runs an analog-input task and AO/DIO tasks on the same device side by side.
+- **Acquisitions** are capped at 600 s per tool call even if `max_acquisition_s` is raised. The returned waveform is downsampled by keeping each block's minimum and maximum, so short spikes are not lost. `save_path` must be a new `.csv` file: it is checked before acquiring, and an existing file is never overwritten.
 - **Outputs hold their value after the task closes** on most NI devices, which is what the output tools rely on. Some devices have configurable idle/power-up output behaviour; check your device if it resets outputs.
 - **Reading a digital line can change it.** A DAQmx digital-input task configures the line as an input. The server therefore reports lines it is driving from their last commanded level instead of reading them, and documents the risk for lines driven by other software.
 - **Terminal configuration matters.** `default` lets NI-DAQmx choose (often differential where supported). A wrong choice gives offsets or noise rather than an error.

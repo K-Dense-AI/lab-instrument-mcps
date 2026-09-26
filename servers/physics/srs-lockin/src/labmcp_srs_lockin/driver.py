@@ -36,8 +36,11 @@ import re
 import threading
 import time
 from dataclasses import dataclass
+from typing import TypeVar
 
 from labmcp import InstrumentProtocolError, Transport
+
+T = TypeVar("T")
 
 SR8X0 = "sr8x0"
 SR86X = "sr86x"
@@ -153,6 +156,16 @@ def _floats(cmd: str, reply: str, count: int) -> list[float]:
     if len(values) != count:
         raise InstrumentProtocolError(f"Expected {count} values from {cmd!r}, got {reply!r}")
     return values
+
+
+def _lookup(table: tuple[T, ...], index: int, cmd: str) -> T:
+    """``table[index]`` for an index the lock-in reported, refusing negative/out-of-range values
+    (a negative index would otherwise silently wrap around to the end of the table)."""
+    if not 0 <= index < len(table):
+        raise InstrumentProtocolError(
+            f"Lock-in reported index {index} for {cmd!r}, outside the known range 0-{len(table) - 1}."
+        )
+    return table[index]
 
 
 class SRSLockIn:
@@ -338,13 +351,33 @@ class SRSLockIn:
         return self.query_float("SOFF?") if self.family == SR86X else None
 
     def set_amplitude_minimum(self) -> dict[str, float]:
-        """Put the sine output in its safest state and stop any running sweep."""
+        """Put the sine output in its safest state and stop any running sweep.
+
+        Best effort: the amplitude and (SR86x) the DC level are each attempted even if the other
+        fails; an error listing every failure is raised afterwards."""
         self.abort.set()
-        self.set_amplitude_v(self.spec.min_amplitude_v)
-        out = {"amplitude_v": self.amplitude_v()}
+        errors: list[str] = []
+        out: dict[str, float] = {}
+        steps = [("SLVL", lambda: self.set_amplitude_v(self.spec.min_amplitude_v))]
         if self.family == SR86X:
-            self.write("SOFF 0")  # SR860 p. 109: sine out dc level
-            out["dc_level_v"] = self.query_float("SOFF?")
+            steps.append(("SOFF", lambda: self.write("SOFF 0")))  # SR860 p. 109: sine out dc level
+        for name, step in steps:
+            try:
+                step()
+            except Exception as exc:  # keep going: the other setting must still be tried
+                errors.append(f"{name}: {exc}")
+        try:
+            out["amplitude_v"] = self.amplitude_v()
+            if self.family == SR86X:
+                out["dc_level_v"] = self.query_float("SOFF?")
+        except Exception as exc:
+            errors.append(f"read-back: {exc}")
+        if errors:
+            raise InstrumentProtocolError(
+                "Could not confirm the sine output is at its minimum: "
+                + "; ".join(errors)
+                + f". Read back so far: {out or 'nothing'}. Check the instrument (or unplug SINE OUT)."
+            )
         return out
 
     # ------------------------------------------------------------ gain / filter
@@ -353,19 +386,19 @@ class SRSLockIn:
         return self.query_int("SENS?" if self.family == SR8X0 else "SCAL?")
 
     def sensitivity_v(self) -> float:
-        return self.spec.sensitivities_v[self.sensitivity_index()]
+        return _lookup(self.spec.sensitivities_v, self.sensitivity_index(), "sensitivity")
 
     def set_sensitivity_index(self, i: int) -> None:
         self.write(f"{'SENS' if self.family == SR8X0 else 'SCAL'} {int(i)}")
 
     def time_constant_s(self) -> float:
-        return self.spec.time_constants_s[self.query_int("OFLT?")]
+        return _lookup(self.spec.time_constants_s, self.query_int("OFLT?"), "OFLT?")
 
     def set_time_constant_index(self, i: int) -> None:
         self.write(f"OFLT {int(i)}")
 
     def filter_slope_db(self) -> int:
-        return FILTER_SLOPES_DB[self.query_int("OFSL?")]
+        return _lookup(FILTER_SLOPES_DB, self.query_int("OFSL?"), "OFSL?")
 
     def set_filter_slope_db(self, slope_db: int) -> None:
         self.write(f"OFSL {FILTER_SLOPES_DB.index(slope_db)}")
@@ -377,7 +410,7 @@ class SRSLockIn:
         self.write(f"SYNC {1 if on else 0}")
 
     def reserve(self) -> str | None:
-        return RESERVE_MODES[self.query_int("RMOD?")] if self.family == SR8X0 else None
+        return _lookup(RESERVE_MODES, self.query_int("RMOD?"), "RMOD?") if self.family == SR8X0 else None
 
     def set_reserve(self, mode: str) -> None:
         if self.family != SR8X0:
@@ -390,7 +423,7 @@ class SRSLockIn:
 
     def input_configuration(self) -> str:
         if self.family == SR8X0:
-            return INPUT_CONFIGS[self.query_int("ISRC?")]
+            return _lookup(INPUT_CONFIGS, self.query_int("ISRC?"), "ISRC?")
         if self.query_int("IVMD?") == 1:
             return "I_100MOhm" if self.query_int("ICUR?") == 1 else "I_1MOhm"
         return "A-B" if self.query_int("ISRC?") == 1 else "A"
@@ -422,7 +455,9 @@ class SRSLockIn:
         self.write(f"IGND {1 if shield == 'ground' else 0}")
 
     def input_range_v(self) -> float | None:
-        return SR86X_INPUT_RANGES_V[self.query_int("IRNG?")] if self.family == SR86X else None
+        return (
+            _lookup(SR86X_INPUT_RANGES_V, self.query_int("IRNG?"), "IRNG?") if self.family == SR86X else None
+        )
 
     def set_input_range_v(self, v: float) -> None:
         if self.family != SR86X:

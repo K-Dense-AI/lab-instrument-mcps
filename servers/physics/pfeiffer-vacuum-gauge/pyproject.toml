@@ -1,13 +1,13 @@
 [project]
 name = "labmcp-pfeiffer-tpg"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP server for Pfeiffer Vacuum TPG 361/362/366 and TPG 261/262 gauge controllers: read and log pressures, gauge types, units, ionisation-gauge power."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [{ name = "K-Dense and LabMCP contributors" }]
 keywords = ["mcp", "lab-instrument", "vacuum", "pressure-gauge", "pfeiffer", "tpg", "physics"]
-dependencies = ["labmcp>=0.1,<0.2"]
+dependencies = ["labmcp>=0.1.2,<0.2"]
 
 [project.scripts]
 labmcp-pfeiffer-tpg = "labmcp_pfeiffer_tpg.server:main"

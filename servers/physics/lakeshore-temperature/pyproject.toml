@@ -1,6 +1,6 @@
 [project]
 name = "labmcp-lakeshore"
-version = "0.1.1"
+version = "0.1.2"
 description = "MCP server for Lake Shore Cryotronics 335/336/350 temperature controllers: read sensors, setpoints, ramps, heater ranges, PID, wait for stability, all heaters off."
 readme = "README.md"
 license = "Apache-2.0"

@@ -1,13 +1,13 @@
 [project]
 name = "labmcp-rigol-scope"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP server for Rigol digital oscilloscopes (DS1000Z/MSO1000Z, DS1000Z-E, MSO5000, DHO800/900/1000/4000): settings, triggering, measurements, waveform capture and screenshots over SCPI."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [{ name = "K-Dense and LabMCP contributors" }]
 keywords = ["mcp", "lab-instrument", "oscilloscope", "rigol", "scpi", "ds1054z", "dho800", "mso5000", "waveform"]
-dependencies = ["labmcp[visa]>=0.1,<0.2", "pyusb>=1.2"]
+dependencies = ["labmcp[visa]>=0.1.2,<0.2", "pyusb>=1.2"]
 
 [project.scripts]
 labmcp-rigol-scope = "labmcp_rigol_scope.server:main"

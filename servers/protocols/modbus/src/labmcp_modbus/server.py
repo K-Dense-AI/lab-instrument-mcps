@@ -26,6 +26,7 @@ from labmcp_modbus.driver import (
     ModbusDevice,
     PointReading,
     PymodbusClient,
+    values_match,
 )
 from labmcp_modbus.registers import (
     DATA_TYPES,
@@ -184,7 +185,9 @@ class RegisterRead(BaseModel):
     count: int
     registers: list[int] = Field(description="Raw unsigned 16-bit values")
     hex: list[str]
-    decoded: list[float] | None = Field(default=None, description="Values decoded with decode_as")
+    decoded: list[float | str] | None = Field(
+        default=None, description='Values decoded with decode_as ("nan"/"inf"/"-inf" for non-finite floats)'
+    )
     timestamp: str
 
 
@@ -203,6 +206,9 @@ class PointWrite(BaseModel):
     read_back: float | bool | str | None
     unit: str
     matches: bool = Field(description="True if the read-back equals the written value")
+    read_back_error: str | None = Field(
+        default=None, description="Why the value could not be read back (it WAS written)"
+    )
     timestamp: str
 
 
@@ -267,13 +273,19 @@ def read_registers(
         if count % size:
             raise InstrumentError(f"{decode_as} needs a multiple of {size} registers; got count={count}.")
         decoded = [
-            float(struct.unpack(">" + code, registers_to_bytes(regs[i : i + size], word_order, byte_order))[0])
+            _finite_or_text(struct.unpack(">" + code, registers_to_bytes(regs[i : i + size], word_order, byte_order))[0])
             for i in range(0, count, size)
         ]
     return RegisterRead(
         table=table, address=address, count=count, registers=regs, hex=[f"0x{r:04X}" for r in regs],
         decoded=decoded, timestamp=_now(),
     )  # fmt: skip
+
+
+def _finite_or_text(number: float) -> float | str:
+    """NaN/inf are not valid JSON numbers (the structured output would fail validation)."""
+    number = float(number)
+    return number if math.isfinite(number) else str(number)
 
 
 @mcp.tool(**READ)
@@ -309,7 +321,7 @@ def write_point(
     """Write a named point from the register map (setpoint, mode, output enable...). The value
     is checked against the point's writable flag, min/max or enum BEFORE sending, converted
     to raw registers, written, then read back. Changing setpoints and outputs acts on real
-    equipment."""
+    equipment. If the write succeeds but the read-back fails, `read_back_error` says why."""
     reading, written = server.driver.write_point(name, value)
     return PointWrite(
         name=name,
@@ -317,15 +329,10 @@ def write_point(
         written=written,
         read_back=reading.value,
         unit=reading.unit,
-        matches=_same(reading.value, written),
+        matches=reading.error is None and values_match(reading.value, written),
+        read_back_error=reading.error,
         timestamp=_now(),
     )
-
-
-def _same(a: Any, b: Any) -> bool:
-    if isinstance(a, float) and isinstance(b, float):
-        return math.isclose(a, b, rel_tol=1e-6, abs_tol=1e-9)
-    return bool(a == b)
 
 
 def _read_back(address: int, count: int) -> list[int] | None:
@@ -389,7 +396,8 @@ def apply_safe_state() -> dict[str, Any]:
     """Put the device into the safe state defined in the register map (e.g. heater output
     off, controller to standby), writing each step in order and reading it back. Every
     step is attempted even if an earlier one fails. Call it immediately if anything looks
-    wrong."""
+    wrong. `all_ok` is true only if every step was written AND read back with the requested
+    value; a step the device acknowledged but ignored (e.g. in local mode) is not ok."""
     steps = server.driver.apply_safe_state()
     return {"steps": steps, "all_ok": all(s["ok"] for s in steps), "timestamp": _now()}
 

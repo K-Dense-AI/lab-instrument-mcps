@@ -3,7 +3,7 @@
   "name": "io.github.K-Dense-AI/labmcp-lakeshore",
   "title": "Lake Shore Temperature Controller",
   "description": "MCP server for Lake Shore Cryotronics 335/336/350 temperature controllers: read sensors, setpoints, ",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "repository": {
     "url": "https://github.com/K-Dense-AI/lab-instrument-mcps",
     "source": "github",
@@ -15,7 +15,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "labmcp-lakeshore",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "transport": {
         "type": "stdio"
       },

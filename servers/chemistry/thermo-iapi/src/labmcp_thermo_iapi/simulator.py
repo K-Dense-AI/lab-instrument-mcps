@@ -26,8 +26,10 @@ run time.
 
 from __future__ import annotations
 
+import logging
 import math
 import random
+import re
 import threading
 from collections import deque
 from collections.abc import Callable
@@ -44,6 +46,8 @@ from labmcp_thermo_iapi.backend import (
     ParameterDescription,
     ScanRecord,
 )
+
+log = logging.getLogger("labmcp.thermo_iapi.simulator")
 
 PROTON = 1.007276
 ISOTOPE_SPACING = 1.003355
@@ -83,6 +87,19 @@ MODELS: dict[str, dict[str, Any]] = {
         "analyzer": None,
     },
 }
+
+
+def _first_number(value: str | None, default: float | None) -> float | None:
+    """The first usable number of an IAPI value, which may be multi-valued ("1.2;2.0",
+    "350;-1"). ``-1`` means "the instrument default", as in the IAPI examples."""
+    for part in re.split(r"[;,]", str(value or "")):
+        try:
+            number = float(part)
+        except ValueError:
+            continue
+        if number != -1 and math.isfinite(number):
+            return number
+    return default
 
 
 def _transient_ms(resolution: float) -> float:
@@ -458,20 +475,22 @@ class FakeOrbitrap(OrbitrapBackend):
 
     def _acquire(self, values: dict[str, str], access_id: int) -> tuple[ScanRecord, float]:
         v = {**self._defaults(), **values}
-        scan_type = v.get("ScanType", "Full")
-        lo, hi = float(v.get("FirstMass", 350)), float(v.get("LastMass", 1500))
+        scan_type = v.get("ScanType", "Full").split(";")[0]
+        # Validated values may be multi-valued or "-1" (default): never let one crash the scan thread.
+        lo = _first_number(v.get("FirstMass"), 350.0) or 350.0
+        hi = _first_number(v.get("LastMass"), 1500.0) or 1500.0
         if hi <= lo:
             lo, hi = hi, lo
-        resolution = float(v.get("OrbitrapResolution", 60000))
-        agc = float(v.get("AGCTarget", 300000))
-        max_it = float(v.get("MaxIT", 50))
-        precursor = float(v["PrecursorMass"]) if v.get("PrecursorMass") else None
+        resolution = _first_number(v.get("OrbitrapResolution"), 60000.0) or 60000.0
+        agc = _first_number(v.get("AGCTarget"), 300000.0) or 300000.0
+        max_it = _first_number(v.get("MaxIT"), 50.0) or 50.0
+        precursor = _first_number(v.get("PrecursorMass"), None)
         is_ms2 = scan_type == "MSn" and precursor is not None
         if is_ms2:
             charge = int(v.get("_charge", 2))
             peaks = self._ms2_peaks(precursor or 0.0, charge, lo, hi)
         elif scan_type == "SIM" and precursor is not None:
-            width = float(v.get("IsolationWidth", 10.0))
+            width = _first_number(v.get("IsolationWidth"), 10.0) or 10.0
             peaks = self._ms1_peaks(precursor - width / 2, precursor + width / 2, resolution)
         else:
             peaks = self._ms1_peaks(lo, hi, resolution)
@@ -589,7 +608,11 @@ class FakeOrbitrap(OrbitrapBackend):
 
     def _run(self) -> None:
         while not self._stop.is_set():
-            record, duration = self.step()
+            try:
+                record, duration = self.step()
+            except Exception:  # pragma: no cover - a bug here must not silently stop all scans
+                log.exception("FakeOrbitrap could not produce a scan; skipping it")
+                record, duration = None, 0.1
             if self._stop.wait(duration / self.speed):
                 break
             if record is not None and self._on_scan is not None:

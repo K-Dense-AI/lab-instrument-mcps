@@ -7,7 +7,7 @@ license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [{ name = "K-Dense and LabMCP contributors" }]
 keywords = ["mcp", "lab-instrument", "mass-spectrometry", "orbitrap", "thermo-fisher", "iapi", "proteomics"]
-dependencies = ["labmcp>=0.1,<0.2"]
+dependencies = ["labmcp>=0.1.2,<0.2"]
 
 [project.optional-dependencies]
 # The IAPI is a Windows .NET API; the IAPI assemblies themselves are licensed by Thermo Fisher

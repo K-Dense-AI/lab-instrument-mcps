@@ -1,4 +1,5 @@
 import asyncio
+import threading
 import time
 
 import numpy as np
@@ -259,8 +260,8 @@ async def test_read_only_hides_control_tools():
     async with simulated_client(server, read_only=True, options={"simulator": "fake"}) as client:
         names = await tool_names(client)
         assert {"record", "get_band_powers", "get_signal_quality", "list_supported_boards"} <= names
-        assert not names & {"start_streaming", "stop_streaming", "insert_marker", "configure_board"}
-        assert "reconnect" in names  # safety tools stay available
+        assert not names & {"start_streaming", "insert_marker", "configure_board"}
+        assert {"reconnect", "stop_streaming"} <= names  # safety tools stay available
 
 
 async def test_record_duration_limit():
@@ -285,3 +286,108 @@ async def test_missing_preset_is_explained(simulator):
             await client.call_tool("get_board_info", {"preset": "ancillary"})
         info = (await client.call_tool("get_board_info", {})).structured_content
         assert "ancillary" not in info["presets"]
+
+
+# ------------------------------------------------------------------ regression tests (software review)
+
+
+def _in_thread(fn, *args):
+    out: dict = {}
+
+    def run():
+        try:
+            out["result"] = fn(*args)
+        except Exception as exc:  # pragma: no cover - reported by the assertions
+            out["error"] = exc
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return t, out
+
+
+def test_start_streaming_during_a_recording_keeps_the_stream_running():
+    b = fake_board()
+    t, out = _in_thread(b.acquire, 1.0)  # starts a temporary stream
+    time.sleep(0.3)
+    b.start_stream(10000)  # start_streaming: the user now wants the stream
+    t.join(5)
+    assert out["result"].data.shape[1] > 100
+    assert b.streaming and b.user_stream  # the recording must not have stopped it
+    b.insert_marker(5)
+    b.close()
+
+
+def test_stop_streaming_ends_a_live_recording_with_only_its_own_data():
+    b = fake_board()
+    b.start_stream(100000)
+    time.sleep(1.0)  # older data in the ring buffer
+    started = time.time()
+    t, out = _in_thread(b.acquire, 5.0)
+    time.sleep(0.5)
+    b.stop_stream()
+    t.join(1.5)
+    assert not t.is_alive()  # returned at once instead of sleeping 5 s
+    rec = out["result"]
+    assert rec.stopped_early
+    assert 50 <= rec.data.shape[1] <= 200  # ~0.5 s at 250 Hz, not 5 s of mostly older data
+    assert rec.data[12].min() >= started - 0.2  # timestamps: nothing from before the call
+    b.close()
+
+
+def test_overlapping_temporary_recordings_share_the_stream_then_stop_it():
+    b = fake_board()
+    t1, out1 = _in_thread(b.acquire, 0.6)
+    time.sleep(0.2)
+    t2, out2 = _in_thread(b.acquire, 1.0)
+    t1.join(5)
+    assert b.streaming  # still needed by the second recording
+    t2.join(5)
+    assert "error" not in out1 and "error" not in out2
+    assert out1["result"].data.shape[1] >= 100 and out2["result"].data.shape[1] >= 200
+    assert not b.streaming  # the last one out stopped the temporary stream
+    b.close()
+
+
+async def test_record_save_path_is_checked_before_recording(tmp_path):
+    existing = tmp_path / "rec.csv"
+    existing.write_text("keep")
+    async with simulated_client(server, options={"simulator": "fake"}) as client:
+        t0 = time.monotonic()
+        with pytest.raises(Exception, match="already exists"):
+            await client.call_tool("record", {"duration_s": 3, "save_path": str(existing)})
+        with pytest.raises(Exception, match=r"\.csv"):
+            await client.call_tool("record", {"duration_s": 3, "save_path": str(tmp_path / "rec.npy")})
+        assert time.monotonic() - t0 < 2.5  # refused before recording anything
+        new = tmp_path / "sub" / "rec.csv"
+        rec = (await client.call_tool("record", {"duration_s": 0.3, "save_path": str(new)})).structured_content
+        assert rec["saved_to"] == str(new.resolve()) and new.exists()
+    assert existing.read_text() == "keep"
+
+
+def test_exg_gain_must_be_an_ads1299_gain():
+    from labmcp import AuditLog, ConnectContext, SafetyLimits, Settings
+    from labmcp_brainflow.server import _exg_gain
+
+    def ctx(value):
+        return ConnectContext(Settings(options={"exg_gain": value}), AuditLog(), SafetyLimits(()))
+
+    assert _exg_gain(ctx("12")) == 12
+    for bad in ("0", "3", "x"):
+        with pytest.raises(InstrumentConnectionError, match="ADS1299 gains"):
+            _exg_gain(ctx(bad))
+
+
+async def test_configure_board_is_a_hazard_tool():
+    async with simulated_client(server, options={"simulator": "fake"}) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+        assert tools["configure_board"].annotations.destructiveHint is True
+        assert "safety" in tools["stop_streaming"].meta["fastmcp"]["tags"]  # the matching stop
+
+
+@pytest.mark.skipif(not HAVE_BRAINFLOW, reason="no BrainFlow")
+def test_datafilter_errors_are_instrument_errors():
+    from labmcp_brainflow.driver import BrainFlowLibrary
+
+    data = np.random.default_rng(0).normal(size=(2, 20))
+    with pytest.raises(InstrumentProtocolError, match="band powers"):
+        BrainFlowLibrary().avg_band_powers(data, [1], 250)

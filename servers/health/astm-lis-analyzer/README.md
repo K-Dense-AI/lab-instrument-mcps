@@ -44,9 +44,9 @@ On the analyzer, open the host / LIS / "online" communication settings:
      ```bash
      uvx labmcp-astm-lis --option listen_port=5000 --option allow_from=192.168.1.80 --check
      ```
-5. Optional: keep a local record of every message with `--option store_path=~/lis/results.jsonl` (reloaded when the server restarts).
+5. Optional: keep a local record of every message with `--option store_path=~/lis/results.jsonl` (the newest `max_messages` are reloaded when the server restarts; if the file cannot be written, messages are still kept in memory and `get_connection_status` reports `store_write_errors`).
 
-The receiver starts as soon as the MCP server starts, so uploads are acknowledged even before the agent calls a tool.
+The receiver starts as soon as the MCP server starts, so uploads are acknowledged even before the agent calls a tool. Received results stay in memory across `reconnect` (only `clear_results` or a server restart without `store_path` removes them), because the analyzer never re-sends a result it has been sent an ACK for.
 
 ## Add to your MCP client
 
@@ -111,7 +111,7 @@ Patient IDs, sex, attending physician and free-text comment records are **not** 
 
 - **Receive-only.** No order download, no host-query responses and no result acknowledgements beyond the link-level ACK. Query (Q) messages from the analyzer are stored and reported (`kind: "query"`) but not answered. Order download is planned future work.
 - **Link layer (E1381).** Every frame is checked: checksum (modulo-256 sum from the frame number to ETX/ETB, as two hex digits), frame number (first frame 1, then modulo 8; a repeat of the last accepted number is treated as a retransmission and ACKed without duplicating data) and framing. Defective frames get NAK and the analyzer retransmits them. Frames outside an ENQ … EOT session are ignored and counted in `bytes_ignored`, which usually means the analyzer is not using the ASTM low-level protocol (raw E1394 without framing is not supported). A session that goes silent for 30 s, or restarts with ENQ, has its incomplete message discarded, as E1381 requires; a message that ends with EOT but no terminator (L) record is kept and flagged `complete: false`.
-- **Tolerances.** Frames with more than 240 text characters and end frames that pack several records are accepted (and counted); a frame whose CR LF never arrives is NAKed after 10 s. Text is decoded as Latin-1 by default (`--option encoding=...`).
+- **Tolerances.** Frames with more than 240 text characters and end frames that pack several records are accepted (and counted); a frame whose CR LF never arrives is NAKed after 10 s. Text is decoded as Latin-1 by default (`--option encoding=...`; an unknown encoding name is refused at start-up).
 - **Records (E1394).** Delimiters are taken from each header record (`H|\^&` by default). Escape sequences `&F& &S& &R& &E&` and the vendor form `&|&` are decoded; other escapes are kept verbatim. The test code is the first non-empty "local code" component of the Universal Test ID (`^^^TSH`, `^^^^WBC`), falling back to the first component. The sample ID is the order's Specimen ID, or the first non-empty component of the Instrument Specimen ID. Values are returned exactly as sent (`"<0.1"`, `">500"`, `"Cancelled"`); `numeric_value` is only set for plain numbers.
 - **Flags and statuses** are passed through as sent. Meanings are only attached for the abnormal flags defined by LIS2-A2 / E1394 (`N L H LL HH < > A U D B W`) and the result statuses documented in the vendor specification used (`F X`); anything else is analyzer-specific, so check your analyzer's host-interface manual.
 - Timestamps inside records (test started/completed, header time) are the analyzer's local time; `received_at` is when this server stored the message (UTC).

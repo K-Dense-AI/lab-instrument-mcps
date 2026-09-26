@@ -34,8 +34,35 @@ from labmcp import InstrumentConnectionError, InstrumentProtocolError, Instrumen
 
 #: CA string values are at most 40 bytes including the terminating NUL (MAX_STRING_SIZE).
 MAX_STRING_CHARS = 39
+#: EPICS 3.14+ record names (the part before the first '.') are at most 59 characters. caproto
+#: raises for longer names *inside its search thread*, which kills that thread and stops every
+#: later PV search on the context, so longer names are refused before they reach caproto.
+MAX_RECORD_NAME_CHARS = 59
 _INT_RANGES = {"CHAR": (0, 255), "INT": (-(2**15), 2**15 - 1), "LONG": (-(2**31), 2**31 - 1)}
-_PV_NAME_RE = re.compile(r"^[^\s\"']{1,255}$")
+_FLOAT32_MAX = 3.4028234663852886e38  # DBR_FLOAT: larger magnitudes would reach the IOC as +/-inf
+_PV_NAME_RE = re.compile(r"[^\s\"']{1,255}")
+#: Fields that set the limits this server (and the IOC) enforce: output-record drive limits,
+#: operating range (the control limits of records without DRVH/DRVL) and motor-record user/dial
+#: limits. Writing them would let a two-step write escape the control-limit check.
+LIMIT_FIELDS = frozenset({"DRVH", "DRVL", "HOPR", "LOPR", "HLM", "LLM", "DHLM", "DLLM"})
+
+
+def check_pv_name(name: str) -> None:
+    """Raise :class:`InstrumentProtocolError` unless ``name`` is a usable Channel Access PV name."""
+    if not isinstance(name, str) or not _PV_NAME_RE.fullmatch(name):
+        raise InstrumentProtocolError(f"Invalid PV name {name!r} (no whitespace or quotes, max 255 chars).")
+    record = name.partition(".")[0]
+    if len(record) > MAX_RECORD_NAME_CHARS:
+        raise InstrumentProtocolError(
+            f"Invalid PV name {name!r}: the record name is {len(record)} characters, EPICS allows at most "
+            f"{MAX_RECORD_NAME_CHARS}."
+        )
+
+
+def pv_field(name: str) -> str:
+    """The field part of ``REC.FIELD`` (upper case, without a ``$`` long-string suffix); '' for none."""
+    _, dot, fld = name.rpartition(".")
+    return fld.rstrip("$").upper() if dot else ""
 
 
 class EnvOverride:
@@ -115,9 +142,35 @@ def _text(raw: Any) -> str:
 
 
 def _limits(lo: Any, hi: Any) -> tuple[float, float] | None:
-    """EPICS convention: equal low/high limits (usually 0, 0) mean 'not configured'."""
+    """EPICS convention: equal low/high limits (usually 0, 0) mean 'not configured'.
+
+    EPICS 3.16+ reports an unset limit as NaN (e.g. an ai record's alarm limits whose severity is
+    NO_ALARM), so a NaN side means 'no limit on that side' and two NaN sides mean 'not configured'.
+    """
     lo, hi = float(lo), float(hi)
-    return None if lo == hi else (lo, hi)
+    if (math.isnan(lo) and math.isnan(hi)) or lo == hi:
+        return None
+    return (lo, hi)
+
+
+def _fmt_limit(v: float) -> str:
+    return "no limit" if math.isnan(v) else f"{v:g}"
+
+
+def _outside(v: float, lo: float, hi: float) -> bool:
+    """True if ``v`` violates the limits; a NaN side is 'no limit on that side'."""
+    return (not math.isnan(lo) and v < lo) or (not math.isnan(hi) and v > hi)
+
+
+def _latin1(text: str, name: str) -> bytes:
+    """CA strings are latin-1; refuse (rather than silently replace) characters it can't hold."""
+    try:
+        return text.encode("latin-1")
+    except UnicodeEncodeError as exc:
+        raise InstrumentProtocolError(
+            f"Refused: {text[exc.start:exc.end]!r} cannot be sent to {name} (Channel Access strings are "
+            "latin-1). Nothing was written."
+        ) from None
 
 
 class EpicsClient:
@@ -130,18 +183,23 @@ class EpicsClient:
         timeout: float = 2.0,
         put_allowlist: str | None = None,
         require_ctrl_limits: bool = False,
+        allow_limit_field_writes: bool = False,
         audit: Any | None = None,
         on_close: Any | None = None,
         description: str = "",
         check_pv: str | None = None,
     ) -> None:
+        self._on_close = on_close
         self.env = EnvOverride(env or {})
         self.env.apply()
         try:
             from caproto import AccessRights, AlarmSeverity, AlarmStatus, ChannelType
             from caproto.threading.client import Context
-        except Exception:
-            self.env.restore()
+
+            self.ctx = Context(timeout=timeout)
+        except BaseException:
+            # Undo everything a failed start left behind: the environment and (in --simulate) the IOC.
+            self.close()
             raise
         self.AccessRights = AccessRights
         self.AlarmSeverity = AlarmSeverity
@@ -150,12 +208,10 @@ class EpicsClient:
         self.timeout = timeout
         self.allow = re.compile(put_allowlist) if put_allowlist else None
         self.require_ctrl_limits = require_ctrl_limits
+        self.allow_limit_field_writes = allow_limit_field_writes
         self.audit = audit
-        self._on_close = on_close
         self.description = description
         self.check_pv = check_pv
-        self.ctx = Context(timeout=timeout)
-        self.lock = threading.RLock()
 
     # ------------------------------------------------------------ connection
 
@@ -168,6 +224,7 @@ class EpicsClient:
             "ca_environment": env or "defaults (auto address list: broadcast on all interfaces)",
             "put_allowlist": self.allow.pattern if self.allow else None,
             "require_ctrl_limits": self.require_ctrl_limits,
+            "allow_limit_field_writes": self.allow_limit_field_writes,
         }
         if self.description:
             info["note"] = self.description
@@ -182,8 +239,7 @@ class EpicsClient:
     def connect(self, names: list[str], timeout: float | None = None) -> list[Any]:
         """Search for and connect to ``names``; raise listing any that could not be found."""
         for n in names:
-            if not _PV_NAME_RE.match(n):
-                raise InstrumentProtocolError(f"Invalid PV name {n!r} (no whitespace or quotes, max 255 chars).")
+            check_pv_name(n)
         tmo = self.timeout if timeout is None else timeout
         pvs = self.ctx.get_pvs(*names, timeout=tmo)
         deadline = time.monotonic() + tmo
@@ -202,8 +258,10 @@ class EpicsClient:
         return pvs
 
     def close(self) -> None:
-        with contextlib.suppress(Exception):
-            self.ctx.disconnect()
+        ctx = getattr(self, "ctx", None)
+        if ctx is not None:
+            with contextlib.suppress(Exception):
+                ctx.disconnect()
         self.env.restore()
         if self._on_close is not None:
             with contextlib.suppress(Exception):
@@ -219,21 +277,29 @@ class EpicsClient:
         return self._read_pv(pv, timeout)
 
     def read_many(self, names: list[str], timeout: float | None = None) -> list[PVReading | Exception]:
+        """One result per name, in order: a reading, or the exception that prevented it."""
         tmo = self.timeout if timeout is None else timeout
-        pvs = self.ctx.get_pvs(*names, timeout=tmo)
+        out: list[PVReading | Exception | None] = [None] * len(names)
+        valid: list[int] = []
+        for i, n in enumerate(names):
+            try:
+                check_pv_name(n)
+                valid.append(i)
+            except InstrumentProtocolError as exc:
+                out[i] = exc
+        pvs = self.ctx.get_pvs(*(names[i] for i in valid), timeout=tmo) if valid else []
         deadline = time.monotonic() + tmo
-        out: list[PVReading | Exception] = []
-        for pv in pvs:
+        for i, pv in zip(valid, pvs, strict=True):
             try:
                 pv.wait_for_connection(timeout=max(0.05, deadline - time.monotonic()))
             except Exception:
-                out.append(InstrumentConnectionError(f"Could not connect to {pv.name} within {tmo:g} s."))
+                out[i] = InstrumentConnectionError(f"Could not connect to {pv.name} within {tmo:g} s.")
                 continue
             try:
-                out.append(self._read_pv(pv, timeout))
+                out[i] = self._read_pv(pv, timeout)
             except Exception as exc:
-                out.append(exc)
-        return out
+                out[i] = exc
+        return [r if r is not None else InstrumentProtocolError("not read") for r in out]
 
     def _read_pv(self, pv: Any, timeout: float | None) -> PVReading:
         tmo = self.timeout if timeout is None else timeout
@@ -306,7 +372,7 @@ class EpicsClient:
         finally:
             with contextlib.suppress(Exception):
                 sub.remove_callback(token)
-        return updates
+        return updates[:max_updates]  # a snapshot: a callback already queued may still append
 
     def update_value(self, pv_native: str, response: Any, enum_strings: list[str] | None) -> Any:
         data = response.data
@@ -325,11 +391,21 @@ class EpicsClient:
 
     def prepare_put(self, name: str, value: Any, *, check_allowlist: bool = True) -> PreparedPut:
         """Validate a write against the allow-list, access rights, native type, element count and
-        control (DRVH/DRVL) limits. Nothing is written."""
+        control (DRVH/DRVL) limits. Nothing is written.
+
+        ``check_allowlist=False`` (the scientist-configured safe state) also skips the limit-field guard.
+        """
+        check_pv_name(name)
         if check_allowlist and not self.allowed(name):
             raise InstrumentProtocolError(
                 f"Refused: {name} does not match the put allow-list /{self.allow.pattern}/ "  # type: ignore[union-attr]
                 "(--option put_allowlist). Nothing was written."
+            )
+        if check_allowlist and not self.allow_limit_field_writes and pv_field(name) in LIMIT_FIELDS:
+            raise InstrumentProtocolError(
+                f"Refused: {name} sets a limit ({pv_field(name)}) that guards writes to the record. Limits are "
+                "changed by the responsible scientist, not through this server (--option "
+                "allow_limit_field_writes=true to permit it). Nothing was written."
             )
         (pv,) = self.connect([name])
         if not pv.access_rights & self.AccessRights.WRITE:
@@ -342,7 +418,7 @@ class EpicsClient:
         values = list(value) if isinstance(value, (list, tuple)) else [value]
         warnings: list[str] = []
         if native == "CHAR" and count > 1 and isinstance(value, str):
-            raw = value.encode("latin-1", "replace")
+            raw = _latin1(value, name)
             if len(raw) >= count:
                 raise InstrumentProtocolError(f"Refused: {len(raw)} characters do not fit in {name} ({count - 1} max).")
             values = list(raw) + [0]
@@ -369,7 +445,7 @@ class EpicsClient:
                 if not isinstance(v, (str, int, float)) or isinstance(v, bool):
                     raise InstrumentProtocolError(f"Refused: {name} is a string PV; got {v!r}.")
                 s = str(v)
-                if len(s.encode("latin-1", "replace")) > MAX_STRING_CHARS:
+                if len(_latin1(s, name)) > MAX_STRING_CHARS:
                     raise InstrumentProtocolError(f"Refused: CA strings hold at most {MAX_STRING_CHARS} characters.")
                 data.append(s)
         else:
@@ -387,16 +463,21 @@ class EpicsClient:
                         raise InstrumentProtocolError(f"Refused: {v!r} is outside the {native} range {lo}..{hi}.")
                     data.append(int(v))
                 else:
+                    if native == "FLOAT" and abs(float(v)) > _FLOAT32_MAX:
+                        raise InstrumentProtocolError(
+                            f"Refused: {v!r} does not fit in {name} (32-bit FLOAT, max {_FLOAT32_MAX:.7g}); it would "
+                            "arrive as infinity. Nothing was written."
+                        )
                     data.append(float(v))
             limits = current.control_limits
             if limits is not None and not (native == "CHAR" and isinstance(value, str)):
                 lo, hi = limits
-                bad = [v for v in data if not lo <= v <= hi]
+                bad = [v for v in data if _outside(v, lo, hi)]
                 if bad:
                     raise InstrumentProtocolError(
                         f"Refused: {bad[0]:g} is outside the control limits of {name} "
-                        f"({lo:g} .. {hi:g}{' ' + current.units if current.units else ''}; DRVL/DRVH for output "
-                        "records - the IOC would silently clip it). Nothing was written."
+                        f"({_fmt_limit(lo)} .. {_fmt_limit(hi)}{' ' + current.units if current.units else ''}; "
+                        "DRVL/DRVH for output records - the IOC would silently clip it). Nothing was written."
                     )
             elif limits is None:
                 if self.require_ctrl_limits:

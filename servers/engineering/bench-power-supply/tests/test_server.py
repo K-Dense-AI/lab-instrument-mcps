@@ -269,3 +269,39 @@ def test_limit_error_type():
     with pytest.raises(SafetyLimitError):
         server.check("max_voltage_v", 6)
     server.disconnect()
+
+
+async def test_output_off_succeeds_despite_a_stale_error_in_the_queue():
+    async with simulated_client(server) as client:
+        await client.call_tool("set_voltage", {"channel": 1, "voltage_v": 5.0})
+        await client.call_tool("set_current_limit", {"channel": 1, "current_a": 0.2})
+        await client.call_tool("output_on", {"channel": 1})
+        # e.g. left by a front-panel action or an earlier command: the OFF itself worked.
+        server.driver.t.simulator.error_queue.append('-113,"Undefined header"')
+        off = (await client.call_tool("output_off", {"channel": 1})).structured_content
+        assert off["output_on"] is False
+        assert any("Undefined header" in note for note in off["notes"])
+        assert server.driver.output_state(1) is False
+
+
+async def test_output_off_reports_state_when_full_status_cannot_be_read():
+    async with simulated_client(server) as client:
+        await client.call_tool("output_on", {"channel": 2})
+        psu = server.driver
+
+        def broken_measure(ch):
+            raise InstrumentProtocolError("measurement failed")
+
+        psu.measure = broken_measure
+        off = (await client.call_tool("output_off", {"channel": 2})).structured_content
+        assert off["output_on"] is False and off["measured_voltage_v"] is None
+        assert any("measurement failed" in note for note in off["notes"])
+
+
+async def test_output_on_error_does_not_leave_the_output_energised():
+    async with simulated_client(server) as client:
+        await client.call_tool("set_voltage", {"channel": 1, "voltage_v": 5.0})
+        server.driver.t.simulator.error_queue.append('-221,"Settings conflict"')
+        with pytest.raises(Exception, match="switched OFF again"):
+            await client.call_tool("output_on", {"channel": 1})
+        assert server.driver.output_state(1) is False

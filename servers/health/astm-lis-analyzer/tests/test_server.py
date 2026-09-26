@@ -395,3 +395,165 @@ def test_lis2_a2_standard_abnormal_flags_are_decoded():
     assert m.results[0].abnormal_flag_meanings == ["abnormal", "worse (direction not relevant or not defined)"]
     assert m.results[1].abnormal_flag_meanings == ["significant change up"]
     assert m.results[2].abnormal_flag_meanings == ["analyzer-specific code"]
+
+
+# ------------------------------------------------------------------ regression tests (software review)
+
+
+def test_unicode_digit_sequence_and_overflowing_value_do_not_drop_the_message():
+    # Latin-1 '²' passes str.isdigit() but int() rejects it; the whole message used to be lost.
+    rec = BECKMAN_UPLOAD[:3] + ["R|²|^^^A^1|1e999|||N||F", "R|2|^^^B^1|7.5|||N||F", "L|1|F"]
+    m = parse_message(rec, message_id=1, received_at="x", source="t", complete=True, redacted=False)
+    assert [r.sequence for r in m.results] == [1, 2]
+    assert m.results[0].value == "1e999" and m.results[0].numeric_value is None  # not inf
+    assert m.results[1].numeric_value == 7.5
+
+
+def test_failing_record_handler_still_acks_the_frame():
+    delivered, log = [], []
+
+    def on_record(record):
+        if record.startswith("P"):
+            raise RuntimeError("boom")
+        delivered.append(record)
+
+    link = E1381Receiver(on_record, lambda _ok: None, log.append)
+    link.on_enq()
+    frame = build_frames("H|\\^&\rP|1\rO|1|S1", 1)[0]  # one end frame packing three records
+    assert link.on_frame(frame) == ACK
+    assert delivered == ["H|\\^&", "O|1|S1"]
+    assert any("record handler failed" in line for line in log)
+
+
+def test_unknown_encoding_is_refused_at_connect():
+    server.configure(address="", simulate=True, options={"encoding": "no-such-codec"})
+    try:
+        with pytest.raises(InstrumentConnectionError, match="Unknown encoding"):
+            _ = server.driver
+        server.configure(address="", simulate=True, options={"max_messages": "0"})
+        with pytest.raises(InstrumentConnectionError, match="at least 1"):
+            _ = server.driver
+    finally:
+        server.configure(address="", simulate=True, options={})
+
+
+def test_store_reload_is_bounded_and_skips_bad_rows(tmp_path):
+    path = tmp_path / "results.jsonl"
+    store = ResultStore(store_path=str(path))
+    for msg in default_messages() * 2:
+        store.add(msg, source="t", complete=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"message_id": 99, "received_at": "not a date", "records": BECKMAN_UPLOAD}) + "\n")
+        fh.write("\xff garbage\n")
+    reloaded = ResultStore(store_path=str(path), max_messages=3)
+    assert reloaded.counts()["messages"] == 1 and reloaded.load_errors == 2  # only the newest 3 lines parsed
+    assert reloaded.messages(since=parse_since("2000-01-01"))[1] == 1  # `since` works despite the bad row
+    assert reloaded.add(BECKMAN_UPLOAD, source="t", complete=True).message_id == 5
+
+
+def test_store_write_failure_keeps_message_and_is_reported(tmp_path):
+    path = tmp_path / "results.jsonl"
+    store = ResultStore(store_path=str(path))
+    path.mkdir()  # appending now fails with IsADirectoryError / PermissionError
+    msg = store.add(BECKMAN_UPLOAD, source="t", complete=True)
+    assert msg.results and store.counts()["results"] == 1
+    assert store.counts()["store_write_errors"] == 1 and store.counts()["last_store_error"]
+
+
+def test_results_survive_reconnect():
+    server.configure(address="", simulate=False, options={"listen_port": "0", "listen_host": "127.0.0.1"})
+    try:
+        store = server.driver.store
+        store.add(BECKMAN_UPLOAD, source="t", complete=True)
+        server.disconnect()  # what the `reconnect` tool does
+        assert server.driver.store is store and store.counts()["results"] == 1
+    finally:
+        server.disconnect()
+        server.configure(address="", simulate=True, options={})
+
+
+class _ClosedLink(SimulatedTransport):
+    def __init__(self):
+        super().__init__(ASTMAnalyzerSimulator())
+
+
+def test_link_opened_while_closing_is_closed():
+    first, second = _ClosedLink(), _ClosedLink()
+    opening = threading.Event()
+    calls = []
+
+    def open_link():
+        calls.append(1)
+        if len(calls) == 1:
+            return first
+        opening.set()
+        rx._stop.wait(5)  # still connecting when close() is called
+        return second
+
+    rx = ASTMReceiver(open_link, mode="test", where="t", store=ResultStore())
+    first.close()  # the link drops; the receiver reconnects (after its backoff)
+    assert opening.wait(5)
+    rx.close()
+    assert not rx._thread.is_alive()
+    assert second.closed and rx.link is None
+
+
+def test_link_that_drops_immediately_is_not_reopened_in_a_tight_loop():
+    opens = []
+
+    def open_link():
+        link = _ClosedLink()
+        link.close()  # every read fails at once, like a peer that accepts and hangs up
+        opens.append(link)
+        return link
+
+    rx = ASTMReceiver(open_link, mode="test", where="t", store=ResultStore())
+    try:
+        time.sleep(1.5)
+        assert len(opens) <= 3  # 1 s, 2 s, ... backoff instead of hundreds of reconnects
+    finally:
+        rx.close()
+
+
+def test_receive_timeout_fires_despite_stray_bytes():
+    sim = ASTMAnalyzerSimulator(messages=[])
+    link = SimulatedTransport(sim)
+    rx = ASTMReceiver(lambda: link, mode="simulated", where="sim", store=ResultStore(), receive_timeout_s=0.5)
+    stop = threading.Event()
+
+    def noise():
+        while not stop.wait(0.05):
+            link.push(b"x")
+
+    try:
+        link.push(ENQ)
+        assert wait_until(lambda: rx.protocol.state == "transfer", 5)
+        t = threading.Thread(target=noise, daemon=True)
+        t.start()
+        assert wait_until(lambda: rx.protocol.stats.sessions_aborted == 1, 5)
+    finally:
+        stop.set()
+        rx.close()
+
+
+def test_listener_survives_connection_aborted_before_accept():
+    lt = ListenTransport("127.0.0.1", 0)
+    real = lt._server
+
+    class AbortingServer:
+        def fileno(self):
+            return real.fileno()
+
+        def accept(self):
+            real.accept()[0].close()
+            raise ConnectionAbortedError("reset by peer before accept")
+
+        def close(self):
+            real.close()
+
+    lt._server = AbortingServer()
+    try:
+        with socket.create_connection(("127.0.0.1", lt.port), timeout=5):
+            assert lt._read(1, 2.0) == b""  # no exception: the listener stays up
+    finally:
+        lt.close()

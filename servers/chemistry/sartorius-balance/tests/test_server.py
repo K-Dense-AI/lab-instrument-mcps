@@ -240,3 +240,11 @@ def test_limit_error_type():
     server.configure(simulate=True, limits={"max_series_duration_s": 1})
     with pytest.raises(SafetyLimitError):
         server.check("max_series_duration_s", 5)
+
+
+async def test_series_longer_than_the_tool_timeout_is_refused():
+    # Regression: with max_series_duration_s raised (the README suggests 3600), the 900 s tool
+    # timeout cut the series off; now one call is capped below the tool timeout.
+    async with simulated_client(server, limits={"max_series_duration_s": 100000}) as client:
+        with pytest.raises(Exception, match="single tool call"):
+            await client.call_tool("log_weight_series", {"count": 1000, "interval_s": 10})

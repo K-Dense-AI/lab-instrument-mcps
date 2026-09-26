@@ -27,10 +27,11 @@ the full header/trailer dictionaries are always returned as sent by the instrume
 
 from __future__ import annotations
 
+import math
 import re
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -67,37 +68,58 @@ def parse_selection(selection: str) -> Selection:
     return Selection("choice", choices=tuple(c.strip() for c in s.split(",") if c.strip()))
 
 
-def _check_one(name: str, value: str, sel: Selection) -> str | None:
-    """Return an error message if ``value`` does not fit ``sel``."""
-    if sel.kind == "string":
+def _finite(text: str) -> float | None:
+    try:
+        number = float(text)
+    except ValueError:
         return None
+    return number if math.isfinite(number) else None
+
+
+def _check_one(name: str, value: str, sel: Selection) -> tuple[str | None, str]:
+    """Return ``(error or None, value in the instrument's own spelling)``.
+
+    IAPI silently ignores values it doesn't recognise, so a value accepted here is sent exactly
+    as the instrument lists it: ``hcd`` -> ``HCD``, ``60000.0`` -> ``60000`` for a choice list,
+    ``2.0`` -> ``2`` for an integer range.
+    """
+    if sel.kind == "string":
+        return None, value
     if sel.kind == "none":
-        return None if value == "" else f"{name} takes no value (got {value!r})"
+        return (None, value) if value == "" else (f"{name} takes no value (got {value!r})", value)
     if sel.kind == "choice":
         if value in sel.choices:
-            return None
+            return None, value
         lowered = {c.lower(): c for c in sel.choices}
         if value.lower() in lowered:
-            return None
-        return f"{name}={value!r} is not one of the allowed values: {', '.join(sel.choices)}"
-    try:
-        number = float(value)
-    except ValueError:
-        return f"{name}={value!r} is not a number (allowed {sel.low:g} to {sel.high:g})"
-    if sel.kind == "int" and number != int(number):
-        return f"{name}={value!r} must be an integer (allowed {sel.low:g} to {sel.high:g})"
+            return None, lowered[value.lower()]
+        number = _finite(value)
+        if number is not None:
+            for choice in sel.choices:
+                if _finite(choice) == number:
+                    return None, choice
+        return f"{name}={value!r} is not one of the allowed values: {', '.join(sel.choices)}", value
     assert sel.low is not None and sel.high is not None
+    number = _finite(value)
+    if number is None:
+        return f"{name}={value!r} is not a number (allowed {sel.low:g} to {sel.high:g})", value
+    if sel.kind == "int":
+        if number != int(number):
+            return f"{name}={value!r} must be an integer (allowed {sel.low:g} to {sel.high:g})", value
+        value = str(int(number))
     if not sel.low <= number <= sel.high:
-        return f"{name}={value!r} is outside the instrument's range {sel.low:g} to {sel.high:g}"
-    return None
+        return f"{name}={value!r} is outside the instrument's range {sel.low:g} to {sel.high:g}", value
+    return None, value
 
 
 def validate_scan_values(values: dict[str, str], possible: list[ParameterDescription]) -> dict[str, str]:
     """Check every value against ``PossibleParameters``; raise listing every problem.
 
-    Multi-valued parameters (e.g. ``ActivationType = "CID;HCD"`` or ``IsolationWidth =
-    "1.2;2.0"``, as used in the repository's scan-handler example) are checked element by
-    element, splitting on ``;`` (and on ``,`` unless the selection is a choice list).
+    Returns the values keyed by the instrument's parameter names and spelled as the instrument
+    lists them. Multi-valued parameters (e.g. ``ActivationType = "CID;HCD"`` or
+    ``IsolationWidth = "1.2;2.0"``, as used in the repository's scan-handler example) are
+    checked element by element, splitting on ``;`` (and on ``,`` unless the selection is a
+    choice list).
     """
     if not possible:
         raise InstrumentProtocolError(
@@ -116,17 +138,26 @@ def validate_scan_values(values: dict[str, str], possible: list[ParameterDescrip
             continue
         sel = parse_selection(p.selection)
         value = str(raw).strip()
+        err: str | None
         if sel.kind in ("string", "none"):
-            err = _check_one(p.name, value, sel)
+            err, value = _check_one(p.name, value, sel)
+        elif not value:
+            err = f"{p.name} is empty"
         else:
             # "-1" marks "use the default" in multi-valued lists (e.g. IsolationWidth "3;-1,-1,-1"
             # in the FusionExampleClient2pt0 example).
-            parts = [x.strip() for x in re.split(r"[;]" if sel.kind == "choice" else r"[;,]", value)]
-            if not value:
-                err = f"{p.name} is empty"
-            else:
-                errs = [_check_one(p.name, part, sel) for part in parts if part != "-1"]
-                err = next((e for e in errs if e), None)
+            tokens = re.split(r"(;)" if sel.kind == "choice" else r"([;,])", value)
+            errs: list[str] = []
+            for i in range(0, len(tokens), 2):
+                part = tokens[i].strip()
+                if part == "-1":
+                    tokens[i] = part
+                    continue
+                e, tokens[i] = _check_one(p.name, part, sel)
+                if e:
+                    errs.append(e)
+            err = errs[0] if errs else None
+            value = "".join(tokens)
         if err:
             problems.append(err)
         out[p.name] = value
@@ -186,6 +217,34 @@ def summarize_scan(rec: ScanRecord) -> dict[str, Any]:
     }
 
 
+class SlidingWindow:
+    """Thread-safe count of events in the last ``window_s`` seconds (monotonic clock).
+
+    The server keeps one for the whole process and hands it to every driver it creates, so
+    `reconnect` does not reset the custom-scan rate limit.
+    """
+
+    def __init__(self, window_s: float = 60.0) -> None:
+        self.window_s = window_s
+        self._times: deque[float] = deque()
+        self._lock = threading.Lock()
+
+    def count(self) -> int:
+        now = time.monotonic()
+        with self._lock:
+            while self._times and now - self._times[0] > self.window_s:
+                self._times.popleft()
+            return len(self._times)
+
+    def add(self) -> None:
+        with self._lock:
+            self._times.append(time.monotonic())
+
+    def clear(self) -> None:
+        with self._lock:
+            self._times.clear()
+
+
 class OrbitrapDriver:
     """Owns a backend, buffers its scans and enforces pre-send validation."""
 
@@ -195,13 +254,17 @@ class OrbitrapDriver:
         *,
         audit: AuditLog | None = None,
         buffer_size: int = 500,
+        custom_scan_window: SlidingWindow | None = None,
     ) -> None:
         self.backend = backend
         self.audit = audit
         self._buffer: deque[ScanRecord] = deque(maxlen=max(10, buffer_size))
         self._cond = threading.Condition()
         self._sequence = 0
-        self._custom_scan_times: deque[float] = deque()
+        self._custom_scans = custom_scan_window if custom_scan_window is not None else SlidingWindow(60.0)
+        # running number -> last scan sequence when that custom scan was placed, so its result can
+        # be picked up even if it arrived before wait_for_scan was called.
+        self._custom_placed: OrderedDict[int, int] = OrderedDict()
         self._running_number = 0
         self.lock = threading.RLock()
         self._params_cache: list[ParameterDescription] | None = None
@@ -266,7 +329,15 @@ class OrbitrapDriver:
         access_id: int | None = None,
         after_sequence: int | None = None,
     ) -> ScanRecord | None:
-        """Wait for a scan newer than ``after_sequence`` (default: now) matching the filters."""
+        """Wait for a scan newer than ``after_sequence`` matching the filters.
+
+        ``after_sequence`` defaults to now, except for the access id of a custom scan placed
+        through this driver: its result may already have arrived (a scan takes milliseconds, the
+        next tool call seconds), so the default is the moment the scan was placed.
+        """
+        if after_sequence is None and access_id is not None:
+            with self._cond:
+                after_sequence = self._custom_placed.get(access_id)
         start = self.last_sequence if after_sequence is None else after_sequence
         deadline = time.monotonic() + timeout_s
         seen = start
@@ -302,12 +373,9 @@ class OrbitrapDriver:
                 return parse_selection(p.selection)
         return None
 
-    def custom_scans_in_window(self, window_s: float = 60.0) -> int:
-        now = time.monotonic()
-        with self.lock:
-            while self._custom_scan_times and now - self._custom_scan_times[0] > window_s:
-                self._custom_scan_times.popleft()
-            return len(self._custom_scan_times)
+    def custom_scans_in_window(self) -> int:
+        """Custom scans placed in the rate-limit window (60 s), including before a reconnect."""
+        return self._custom_scans.count()
 
     def next_running_number(self) -> int:
         with self.lock:
@@ -319,35 +387,48 @@ class OrbitrapDriver:
     ) -> bool:
         """Send an already-validated custom scan and count it for the rate limit."""
         with self.lock:
-            self._custom_scan_times.append(time.monotonic())
-            sent = self.backend.set_custom_scan(
-                values, running_number=running_number, single_processing_delay_s=single_processing_delay_s
+            self._custom_scans.add()  # counted even if the call fails: it may have reached Tune
+            with self._cond:
+                self._custom_placed[running_number] = self._sequence
+                self._custom_placed.move_to_end(running_number)
+                while len(self._custom_placed) > 1000:
+                    self._custom_placed.popitem(last=False)
+            return self._do(
+                f"SetCustomScan(RunningNumber={running_number}, {values})",
+                lambda: self.backend.set_custom_scan(
+                    values, running_number=running_number, single_processing_delay_s=single_processing_delay_s
+                ),
             )
-        self._event(f"SetCustomScan(RunningNumber={running_number}, {values}) -> {sent}")
-        return sent
 
     def set_repeating_scan(self, values: dict[str, str], running_number: int) -> bool:
-        with self.lock:
-            sent = self.backend.set_repeating_scan(values, running_number=running_number)
-        self._event(f"SetRepetitionScan(RunningNumber={running_number}, {values}) -> {sent}")
-        return sent
+        with self._cond:  # a repeating scan's access id means "the next one", not "since placed"
+            self._custom_placed.pop(running_number, None)
+        return self._do(
+            f"SetRepetitionScan(RunningNumber={running_number}, {values})",
+            lambda: self.backend.set_repeating_scan(values, running_number=running_number),
+        )
 
+    # Cancels don't wait for the driver lock: a stop must not queue behind another control call.
     def cancel_custom_scan(self) -> bool:
-        sent = self.backend.cancel_custom_scan()
-        self._event(f"CancelCustomScan() -> {sent}")
-        return sent
+        return self._do("CancelCustomScan()", self.backend.cancel_custom_scan, locked=False)
 
     def cancel_repeating_scan(self) -> bool:
-        sent = self.backend.cancel_repeating_scan()
-        self._event(f"CancelRepetition() -> {sent}")
-        return sent
+        return self._do("CancelRepetition()", self.backend.cancel_repeating_scan, locked=False)
 
     # --------------------------------------------------------------- acquisition
 
-    def _do(self, what: str, fn: Callable[[], Any]) -> Any:
-        with self.lock:
-            result = fn()
-        self._event(what)
+    def _do(self, what: str, fn: Callable[[], Any], *, locked: bool = True) -> Any:
+        """Run one IAPI control call and record it (and its result or error) in the command log."""
+        try:
+            if locked:
+                with self.lock:
+                    result = fn()
+            else:
+                result = fn()
+        except Exception as exc:
+            self._event(f"{what} -> error: {exc}")
+            raise
+        self._event(what if result is None else f"{what} -> {result}")
         return result
 
     def start_acquisition(self, mode: str, **kwargs: Any) -> None:

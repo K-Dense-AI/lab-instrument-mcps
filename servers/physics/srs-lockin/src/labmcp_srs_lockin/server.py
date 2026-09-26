@@ -6,7 +6,6 @@ import csv
 import math
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Annotated, Literal
 
 from labmcp import (
@@ -15,10 +14,12 @@ from labmcp import (
     READ,
     SAFETY,
     ConnectContext,
+    InstrumentError,
     InstrumentProtocolError,
     InstrumentServer,
     Limit,
     parse_address,
+    prepare_save_path,
 )
 from pydantic import BaseModel, Field
 
@@ -69,7 +70,11 @@ def connect(ctx: ConnectContext) -> SRSLockIn:
         write_termination="\n",
         timeout=3.0,
     )
-    return SRSLockIn(transport, model=model, output_interface=interface)
+    try:
+        return SRSLockIn(transport, model=model, output_interface=interface)
+    except Exception:
+        transport.close()  # don't hold the port open (Windows would refuse the next attempt)
+        raise
 
 
 server = InstrumentServer(
@@ -159,11 +164,15 @@ class SweepResult(BaseModel):
     points: list[SweepPoint]
     unit: Literal["V", "A"]
     count: int
-    completed: bool = Field(description="False if stopped early by `set_amplitude_minimum`")
+    completed: bool = Field(
+        description="False if stopped early (by `set_amplitude_minimum` or the time budget)"
+    )
     settle_time_per_point_s: float
     duration_s: float
-    peak_frequency_hz: float = Field(description="Frequency of the largest R")
-    peak_r: float
+    peak_frequency_hz: float | None = Field(
+        description="Frequency of the largest R (null if no point was measured)"
+    )
+    peak_r: float | None
     amplitude_v: float = Field(description="Sine amplitude used for the whole sweep")
     time_constant_s: float
     warnings: list[str]
@@ -423,7 +432,13 @@ def auto_range() -> LockinSettings:
     return _settings(lockin)
 
 
-@mcp.tool(**HAZARD, timeout=3700)
+#: ``frequency_sweep`` tool timeout. The sweep stops a minute before it, so it always returns its
+#: data rather than being cut off, whatever ``max_sweep_duration_s`` is.
+_SWEEP_TIMEOUT_S = 3700
+_SWEEP_BUDGET_S = _SWEEP_TIMEOUT_S - 60
+
+
+@mcp.tool(**HAZARD, timeout=_SWEEP_TIMEOUT_S)
 def frequency_sweep(
     start_hz: Annotated[float, Field(gt=0, le=4e6, description="First frequency")],
     stop_hz: Annotated[float, Field(gt=0, le=4e6, description="Last frequency")],
@@ -444,9 +459,12 @@ def frequency_sweep(
     output filter to settle at each point, and record X/Y/R/θ vs frequency - e.g. a resonance or
     transfer-function measurement. The drive amplitude stays at its present value. Needs the
     internal reference. The estimated duration must be within `max_sweep_duration_s`;
-    `set_amplitude_minimum` stops a running sweep."""
+    `set_amplitude_minimum` stops a running sweep. `save_path` must be a new .csv file."""
     lockin = server.driver
     spec = lockin.spec
+    # Clear the stop flag before anything else: a set_amplitude_minimum from now on must stop
+    # this sweep, even one that arrives while the settings below are being read.
+    lockin.abort.clear()
     with lockin.t.lock:
         if not lockin.reference_internal():
             raise InstrumentProtocolError("A frequency sweep needs the internal reference (set_reference).")
@@ -467,6 +485,13 @@ def frequency_sweep(
     settle_s = n_tc * tc
     estimate = points * (settle_s + 0.05)
     server.check("max_sweep_duration_s", estimate, "estimated sweep duration")
+    if estimate > _SWEEP_BUDGET_S:
+        raise InstrumentError(
+            f"Refused: the estimated sweep duration of {estimate:.0f} s exceeds the {_SWEEP_BUDGET_S} s one "
+            "call can take. Use fewer points or a shorter time constant, or split the range. Nothing was sent."
+        )
+    # Validate the output file before the sweep, so a bad path cannot waste the measurement.
+    path = prepare_save_path(save_path, suffixes=(".csv",)) if save_path else None
     if log_spacing:
         ratio = math.log(stop_hz / start_hz)
         freqs = [start_hz * math.exp(ratio * i / (points - 1)) for i in range(points)]
@@ -479,35 +504,38 @@ def frequency_sweep(
             "carry 2f ripple. Consider a longer time constant or the sync filter."
         )
 
-    lockin.abort.clear()
     started = _now()
     t0 = time.monotonic()
+    deadline = t0 + _SWEEP_BUDGET_S
     data: list[SweepPoint] = []
-    completed = True
+    stop_reason: str | None = None
     try:
         for f in freqs:
-            if lockin.abort.is_set():
-                completed = False
+            if time.monotonic() + settle_s > deadline:
+                stop_reason = "Sweep stopped early: it would not finish within the tool's time budget."
                 break
-            lockin.set_frequency_hz(f)
+            with lockin.t.lock:  # set_amplitude_minimum sets the flag, then needs this lock
+                if lockin.abort.is_set():
+                    stop_reason = "Sweep stopped early by set_amplitude_minimum."
+                    break
+                lockin.set_frequency_hz(f)
             if lockin.abort.wait(settle_s):
-                completed = False
+                stop_reason = "Sweep stopped early by set_amplitude_minimum."
                 break
             snap = lockin.snapshot()
             data.append(SweepPoint(frequency_hz=f, x=snap.x, y=snap.y, r=snap.r, theta_deg=snap.theta_deg))
     finally:
         if restore_frequency:
             lockin.set_frequency_hz(f_initial)
-    if not completed:
-        warnings.append("Sweep stopped early by set_amplitude_minimum.")
+    completed = stop_reason is None
+    if stop_reason:
+        warnings.append(stop_reason)
     over = lockin.overloads()
     if over:
         warnings.append("Overload during sweep: " + "; ".join(over))
     saved = None
-    if save_path and data:
-        path = Path(save_path).expanduser()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", newline="") as fh:
+    if path is not None and data:
+        with path.open("w", newline="", encoding="utf-8") as fh:
             writer = csv.writer(fh)
             writer.writerow(["frequency_hz", f"x_{unit}", f"y_{unit}", f"r_{unit}", "theta_deg"])
             for p in data:
@@ -521,8 +549,8 @@ def frequency_sweep(
         completed=completed,
         settle_time_per_point_s=settle_s,
         duration_s=time.monotonic() - t0,
-        peak_frequency_hz=peak.frequency_hz if peak else float("nan"),
-        peak_r=peak.r if peak else float("nan"),
+        peak_frequency_hz=peak.frequency_hz if peak else None,
+        peak_r=peak.r if peak else None,
         amplitude_v=amplitude,
         time_constant_s=tc,
         warnings=warnings,

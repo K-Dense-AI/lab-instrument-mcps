@@ -237,12 +237,17 @@ def main() -> None:
     ap.add_argument("--vendor", required=True)
     a = ap.parse_args()
 
-    if not a.package.startswith("labmcp-"):
-        sys.exit("--package must start with 'labmcp-'")
+    if not re.fullmatch(r"labmcp(-[a-z0-9]+)+", a.package):
+        sys.exit("--package must start with 'labmcp-' and be lower-case-with-dashes (it becomes a module name)")
     if not re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", a.slug):
         sys.exit("--slug must be lower-case-with-dashes")
+    for opt, value in (("--name", a.name), ("--vendor", a.vendor)):
+        if any(ch in value for ch in '"\\{}') or not value.strip():  # pasted into TOML and Python strings
+            sys.exit(f"{opt} must be non-empty and must not contain quotes, backslashes or braces")
     module = a.package.replace("-", "_")
     cls = "".join(p.capitalize() for p in a.package.removeprefix("labmcp-").split("-")) + "Driver"
+    if not cls.isidentifier():  # e.g. labmcp-3d-printer -> "3dPrinterDriver"
+        cls = "Instrument" + cls
     dest = ROOT / "servers" / a.domain / a.slug
     if dest.exists():
         sys.exit(f"{dest} already exists")
@@ -261,7 +266,8 @@ def main() -> None:
     for rel, template in files.items():
         path = dest / rel
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(template.format(**ctx) if "{" in template else template)
+        # UTF-8 on every OS (the README template has emoji; Windows would default to cp1252).
+        path.write_text(template.format(**ctx) if "{" in template else template, encoding="utf-8", newline="\n")
     print(f"Created {dest.relative_to(ROOT)}\nNext: uv sync --all-packages && uv run pytest {dest.relative_to(ROOT)}")
     print("Then follow docs/writing-a-server.md.")
 

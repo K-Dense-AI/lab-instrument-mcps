@@ -5,7 +5,6 @@ from __future__ import annotations
 import csv
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Annotated, Literal
 
 from labmcp import (
@@ -14,9 +13,11 @@ from labmcp import (
     READ,
     SAFETY,
     ConnectContext,
+    InstrumentError,
     InstrumentProtocolError,
     InstrumentServer,
     Limit,
+    prepare_save_path,
 )
 from pydantic import BaseModel, Field
 
@@ -24,6 +25,7 @@ from labmcp_keithley_smu.driver import (
     KeithleySMU,
     SourceKind,
     Status,
+    is_overflow,
     linear_levels,
     log_levels,
     open_smu,
@@ -148,10 +150,14 @@ class SweepResult(BaseModel):
     compliance: float
     compliance_unit: str
     level: list[float] = Field(description="Programmed source levels (downsampled to max_points)")
-    voltage_v: list[float] = Field(description="Measured voltage (downsampled)")
-    current_a: list[float] = Field(description="Measured current (downsampled)")
+    voltage_v: list[float | None] = Field(description="Measured voltage (downsampled; null = overflow)")
+    current_a: list[float | None] = Field(description="Measured current (downsampled; null = overflow)")
     in_compliance: list[bool] = Field(description="Compliance flag per returned point")
     compliance_points: int = Field(description="Number of measured points that were in compliance")
+    overflow_points: int = Field(
+        default=0,
+        description="Points where the SMU returned its overflow marker (excluded from stats and fit)",
+    )
     first_compliance_level: float | None
     voltage_min_v: float | None
     voltage_max_v: float | None
@@ -239,7 +245,7 @@ def configure_source(
         ),
     ],
     source_range: Annotated[
-        float | None, Field(gt=0, description="Fixed source range (V or A); omit for auto-range")
+        float | None, Field(gt=0, le=1100, description="Fixed source range (V or A); omit for auto-range")
     ] = None,
     nplc: Annotated[
         float,
@@ -314,6 +320,11 @@ def measure() -> MeasurementModel:
     energised DUT. Does not change any setting; refused if the output is off."""
     drv = server.driver
     st, r = drv.measure()
+    if is_overflow(r.voltage_v) or is_overflow(r.current_a):
+        raise InstrumentProtocolError(
+            f"The SMU returned an overflow marker (V = {r.voltage_v:g}, I = {r.current_a:g}): the "
+            "measurement is out of range. Check the measure range / compliance settings."
+        )
     return MeasurementModel(
         voltage_v=r.voltage_v,
         current_a=r.current_a,
@@ -366,7 +377,13 @@ def _indices(n: int, max_points: int) -> list[int]:
     return sorted({round(i * step) for i in range(max_points)})
 
 
-@mcp.tool(**HAZARD, timeout=1800)
+#: ``run_iv_sweep`` tool timeout. The sweep itself stops (output off) a minute before it, so it
+#: always returns its data rather than being cut off, whatever ``max_sweep_duration_s`` is.
+_SWEEP_TIMEOUT_S = 1800
+_SWEEP_BUDGET_S = _SWEEP_TIMEOUT_S - 60
+
+
+@mcp.tool(**HAZARD, timeout=_SWEEP_TIMEOUT_S)
 def run_iv_sweep(
     start: Annotated[
         float, Field(ge=-1100, le=1100, description="First level: V (voltage sweep) or A (current sweep)")
@@ -399,8 +416,12 @@ def run_iv_sweep(
     """Run a stepped IV sweep: configure the source, switch the output ON, step through the
     levels measuring V and I at each, then ALWAYS switch the output OFF (also on errors or when
     `output_off` is called). Returns the curve (downsampled), compliance flags, a linear fit and
-    optional full CSV. The output must be off beforehand. Limits are checked first."""
+    optional full CSV (a new file; an existing file is never overwritten). The output must be off
+    beforehand. Limits are checked first."""
     drv = server.driver
+    # A stop requested from now on (output_off) must keep the output off: clear the flag before
+    # any check, never after configuring, so a concurrent output_off cannot be lost.
+    drv.abort.clear()
     levels = log_levels(start, stop, points) if spacing == "log" else linear_levels(start, stop, points)
     if dual:
         levels = levels + levels[-2::-1]
@@ -409,6 +430,14 @@ def run_iv_sweep(
     _check_request(drv, source, peak, compliance)
     estimate = len(levels) * (delay_s + 2 * nplc / 50.0 + 0.02)
     server.check("max_sweep_duration_s", estimate, "estimated sweep duration")
+    if estimate > _SWEEP_BUDGET_S:
+        raise InstrumentError(
+            f"Refused: the estimated sweep duration of {estimate:.0f} s exceeds the {_SWEEP_BUDGET_S} s one "
+            "call can take. Use fewer points or a shorter delay_s/nplc, and split the range over several "
+            "sweeps. Nothing was sent."
+        )
+    # Validate the output file before energising anything, so a bad path cannot waste the sweep.
+    path = prepare_save_path(save_path, suffixes=(".csv",)) if save_path else None
     if drv.output_state():
         raise InstrumentProtocolError(
             "The output is ON. Call `output_off` first; the sweep switches the output on and off itself."
@@ -416,16 +445,26 @@ def run_iv_sweep(
     started = _now()
     t0 = time.monotonic()
     drv.configure(source, levels[0], compliance, None, nplc)
-    data = drv.sweep(source, levels, delay_s=delay_s, stop_on_compliance=stop_on_compliance)
+    data = drv.sweep(
+        source,
+        levels,
+        delay_s=delay_s,
+        stop_on_compliance=stop_on_compliance,
+        clear_abort=False,
+        deadline=t0 + _SWEEP_BUDGET_S,
+    )
     output_off = not drv.output_state()
     duration = time.monotonic() - t0
 
+    n = len(data.readings)
     volts = [r.voltage_v for r in data.readings]
     amps = [r.current_a for r in data.readings]
     comp = [r.in_compliance for r in data.readings]
+    # Overflow markers (+9.9E37) are not measurements: keep them out of the stats and the fit.
+    good = [k for k in range(n) if not (is_overflow(volts[k]) or is_overflow(amps[k]))]
     fit = None
     if spacing == "linear":
-        ok = [k for k, c in enumerate(comp) if not c]
+        ok = [k for k in good if not comp[k]]
         x, y = (
             ([volts[k] for k in ok], [amps[k] for k in ok])
             if source == "voltage"
@@ -443,10 +482,8 @@ def run_iv_sweep(
                 slope=slope, intercept=intercept, resistance_ohm=resistance, r_squared=r2, points_used=len(ok)
             )
     saved = None
-    if save_path:
-        path = Path(save_path).expanduser()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", newline="") as fh:
+    if path is not None:
+        with path.open("w", newline="", encoding="utf-8") as fh:
             writer = csv.writer(fh)
             writer.writerow(["index", "level", "voltage_v", "current_a", "in_compliance", "timestamp"])
             for k, r in enumerate(data.readings):
@@ -460,9 +497,10 @@ def run_iv_sweep(
                         r.timestamp,
                     ]
                 )
-        saved = str(path.resolve())
-    idx = _indices(len(data.readings), max_points)
-    n = len(data.readings)
+        saved = str(path)
+    idx = _indices(n, max_points)
+    good_set = set(good)
+    gv, ga = [volts[k] for k in good], [amps[k] for k in good]
     first_comp = next((data.levels[k] for k, c in enumerate(comp) if c), None)
     return SweepResult(
         source=source,
@@ -474,16 +512,17 @@ def run_iv_sweep(
         compliance=compliance,
         compliance_unit="A" if source == "voltage" else "V",
         level=[data.levels[k] for k in idx],
-        voltage_v=[volts[k] for k in idx],
-        current_a=[amps[k] for k in idx],
+        voltage_v=[volts[k] if k in good_set else None for k in idx],
+        current_a=[amps[k] if k in good_set else None for k in idx],
         in_compliance=[comp[k] for k in idx],
         compliance_points=sum(comp),
+        overflow_points=n - len(good),
         first_compliance_level=first_comp,
-        voltage_min_v=min(volts) if n else None,
-        voltage_max_v=max(volts) if n else None,
-        current_min_a=min(amps) if n else None,
-        current_max_a=max(amps) if n else None,
-        max_abs_power_w=max(abs(v * i) for v, i in zip(volts, amps, strict=True)) if n else None,
+        voltage_min_v=min(gv) if gv else None,
+        voltage_max_v=max(gv) if gv else None,
+        current_min_a=min(ga) if ga else None,
+        current_max_a=max(ga) if ga else None,
+        max_abs_power_w=max(abs(v * i) for v, i in zip(gv, ga, strict=True)) if gv else None,
         ohmic_fit=fit,
         aborted=data.aborted,
         stop_reason=data.stop_reason,

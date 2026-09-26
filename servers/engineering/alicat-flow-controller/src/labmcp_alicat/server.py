@@ -6,7 +6,6 @@ import csv
 import statistics
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Annotated, Literal
 
 from labmcp import (
@@ -20,11 +19,18 @@ from labmcp import (
     InstrumentProtocolError,
     InstrumentServer,
     Limit,
+    SafetyLimitError,
+    prepare_save_path,
 )
 from pydantic import BaseModel, Field
 
 from labmcp_alicat.driver import GASES, STATUS_CODES, AlicatDevice, DataFrame
 from labmcp_alicat.simulator import AlicatSimulator
+
+#: A logging series must finish inside one tool call (see ``timeout=`` on `log_flow_series`), even if
+#: `max_series_duration_s` is raised: otherwise the call is cut off and the readings are lost.
+HARD_MAX_SERIES_S = 850.0
+SERIES_TOOL_TIMEOUT_S = 900.0
 
 
 def connect(ctx: ConnectContext) -> AlicatDevice:
@@ -356,16 +362,25 @@ def list_gases() -> list[GasEntry]:
     return [GasEntry(number=n, name=name) for n, name in server.driver.gases()]
 
 
-@mcp.tool(**READ, timeout=900)
+@mcp.tool(**READ, timeout=SERIES_TOOL_TIMEOUT_S)
 def log_flow_series(
     count: Annotated[int, Field(ge=2, le=1000, description="Number of readings")] = 20,
     interval_s: Annotated[float, Field(ge=0.05, le=600, description="Seconds between readings")] = 1.0,
-    save_path: Annotated[str | None, Field(description="Optional CSV path for the full series")] = None,
+    save_path: Annotated[
+        str | None, Field(description="Optional new .csv file for the full series (an existing file is not overwritten)")
+    ] = None,
 ) -> FlowSeries:
     """Record a time series of data frames (e.g. to check flow stability, settling after a
     setpoint change, or pressure drift). Returns every point plus mean/stdev/min/max of the
     mass flow (or the main measured quantity for non-flow devices)."""
-    server.check("max_series_duration_s", (count - 1) * interval_s, "series duration")
+    duration = (count - 1) * interval_s
+    server.check("max_series_duration_s", duration, "series duration")
+    if duration > HARD_MAX_SERIES_S:
+        raise SafetyLimitError(
+            f"Refused: a {duration:g} s series cannot run in a single tool call (maximum {HARD_MAX_SERIES_S:g} s). "
+            "Split it into several shorter series. Nothing was sent to the instrument."
+        )
+    path = prepare_save_path(save_path, suffixes=(".csv",)) if save_path else None
     dev = server.driver
     frames: list[tuple[float, FlowReading]] = []
     t0 = time.monotonic()
@@ -388,9 +403,8 @@ def log_flow_series(
         for t, r in frames
     ]
     saved = None
-    if save_path:
-        path = Path(save_path).expanduser()
-        with path.open("w", newline="") as fh:
+    if path is not None:
+        with path.open("w", newline="", encoding="utf-8") as fh:
             writer = csv.writer(fh)
             writer.writerow(["timestamp", "t_s"] + [f"{f.key} ({f.unit})" if f.unit else f.key for f in first.fields]
                             + ["status"])

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import contextlib
 import re
+import time
 from dataclasses import dataclass, field
 
 from labmcp import InstrumentProtocolError, InstrumentTimeout, Transport
@@ -136,10 +137,16 @@ class EZOCircuit:
             return self._collect(cmd, self.timeout if timeout is None else timeout)
 
     def _collect(self, cmd: str, timeout: float) -> list[str]:
+        # One overall deadline, not a per-line timeout: a circuit that keeps streaming readings
+        # (continuous mode still on, e.g. after waking from sleep) must not keep us here forever.
         data: list[str] = []
+        deadline = time.monotonic() + timeout
         while True:
             try:
-                line = self.t.read(timeout).strip()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise InstrumentTimeout("overall reply deadline passed")
+                line = self.t.read(remaining).strip()
             except InstrumentTimeout as exc:
                 raise InstrumentTimeout(
                     f"No '*OK' from the EZO circuit after {cmd!r}"
@@ -250,6 +257,8 @@ class EZOCircuit:
         # Skip label tokens (e.g. PRS with U,1 appends ",psi"); keep numbers in order.
         tokens = [tok.strip() for tok in raw.split(",") if tok.strip()]
         numbers = [float(tok) for tok in tokens if _NUMBER_RE.match(tok)]
+        if not numbers:
+            raise InstrumentProtocolError(f"The EZO circuit's reply to 'R' contains no number: {raw!r}.")
         expected = self.outputs()
         if len(numbers) != len(expected):
             # The O,... settings may have been changed by someone else: re-read and retry once.

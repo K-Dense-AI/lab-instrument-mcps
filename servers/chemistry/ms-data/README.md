@@ -28,17 +28,17 @@ uvx labmcp-ms-data --simulate --check
    uvx --from 'labmcp-ms-data[bruker]' labmcp-ms-data --help   # + Bruker timsTOF spectra/XICs
    uvx --from 'labmcp-ms-data[mzmlb]' labmcp-ms-data --help    # + mzMLb
    ```
-2. **Choose the data folder** with `--address` (default: the current directory). Subfolders are searched. The agent can only read and write inside this folder: paths with `..`, absolute paths elsewhere and symlinks pointing outside are refused.
+2. **Choose the data folder** with `--address` (default: the current directory; the server refuses to start in the filesystem root, where many MCP clients launch servers, without an `--address`). Subfolders are searched. The agent can only read and write inside this folder: paths with `..`, absolute paths elsewhere and symlinks pointing outside are refused.
    ```bash
    uvx labmcp-ms-data --address ~/data/lcms --check
    ```
 3. **Vendor files (optional):** install a converter yourself; this package never bundles or downloads vendor libraries.
-   - **Thermo .raw, any OS:** [ThermoRawFileParser](https://github.com/compomics/ThermoRawFileParser) (`--option converter=thermorawfileparser`, plus `--option converter_path=/opt/trfp/ThermoRawFileParser.dll` if it isn't on PATH; `.dll` is started with `dotnet`, `.exe` with `mono` on Linux/macOS).
+   - **Thermo .raw, any OS:** [ThermoRawFileParser](https://github.com/compomics/ThermoRawFileParser) (`--option converter=thermorawfileparser`, plus `--option converter_path=/opt/trfp/ThermoRawFileParser.dll` if it isn't on PATH; `.dll` is started with `dotnet`, `.exe` with `mono` on Linux/macOS). With `converter=auto`, a `converter_path` is recognised from its file name.
    - **All vendors, Windows:** [ProteoWizard msconvert](https://proteowizard.sourceforge.io/download.html) (`--option converter=msconvert`).
-   - **All vendors, Linux/macOS:** Docker and `docker pull proteowizard/pwiz-skyline-i-agree-to-the-vendor-licenses` (`--option converter=docker`). Pulling the image means you accept the vendor licences. On Apple Silicon it runs under x86-64 emulation (slow). On Linux the output files are owned by root.
+   - **All vendors, Linux/macOS:** Docker and `docker pull proteowizard/pwiz-skyline-i-agree-to-the-vendor-licenses` (`--option converter=docker`). Pulling the image means you accept the vendor licences. Only the input's folder (read-only) and the output folder are mounted into the container. On Apple Silicon it runs under x86-64 emulation (slow). On Linux the output files are owned by root.
    - `converter=auto` (default) tries ThermoRawFileParser for Thermo files, then msconvert, then Docker.
 
-   The commands used are: `ThermoRawFileParser -i=<file> -o=<dir> -f=2 [-p] [-g]` and `msconvert <file> -o <dir> --mzML --zlib [--gzip] [--filter "peakPicking vendor msLevel=1-"]` (inside Docker via `wine msconvert`). They are run without a shell, with a timeout.
+   The commands used are: `ThermoRawFileParser -i=<file> -o=<dir> -f=2 [-p] [-g]` and `msconvert <file> -o <dir> --mzML --zlib [--gzip] [--filter "peakPicking vendor msLevel=1-"]` (inside Docker via `wine msconvert`). They are run without a shell, with a timeout; on timeout the converter's whole process tree (and the Docker container) is killed and the incomplete output is deleted.
 
 ## Add to your MCP client
 
@@ -60,7 +60,7 @@ claude mcp add ms-data -- uvx --from 'labmcp-ms-data[bruker]' labmcp-ms-data --a
 }
 ```
 
-Add `--read-only` to hide `convert_to_mzml` (the only tool that writes a data file; `save_path` CSV exports inside the data folder remain available). For other clients, generate the snippet with `uvx labmcp config ms-data --address /path/to/data --client vscode` (also `cursor`, `codex`, `claude-code`).
+Add `--read-only` to hide `convert_to_mzml` (the only tool that writes a data file; `save_path` CSV exports inside the data folder remain available). A `save_path` must end in `.csv` (a name without an extension gets one), and an existing file is never replaced unless the call passes `overwrite=true`. For other clients, generate the snippet with `uvx labmcp config ms-data --address /path/to/data --client vscode` (also `cursor`, `codex`, `claude-code`).
 
 ## Tools
 
@@ -106,8 +106,8 @@ Override at launch: `--limit max_conversion_time_s=7200`.
 - **Format support:** mzML (indexed or not, optionally `.gz`) through pyteomics (Apache-2.0), using the PSI-MS vocabulary bundled with psims (no download). mzMLb needs the `[mzmlb]` extra (h5py, hdf5plugin). Gzipped mzML is decompressed to a temporary file for random access.
 - **Bruker timsTOF (TDF):** run metadata (instrument, serial, date, m/z and 1/K0 ranges), the TIC (`Frames.SummedIntensities`), BPC intensity (`Frames.MaxIntensity`, the most intense single peak in any mobility scan; its m/z is not stored) and the DDA precursor list are read straight from the `analysis.tdf` SQLite tables (`GlobalMetadata`, `Frames`, `Precursors`, `PasefFrameMsMsInfo`), so they work without extras. Spectra and XICs need the `[bruker]` extra (`timsrust-pyo3`, Apache-2.0, wheels for Linux/macOS/Windows). MS1 and diaPASEF frames are summed over ion mobility (diaPASEF MS2 frames mix all isolation windows); each ddaPASEF precursor is one MS2 spectrum. Ion mobility is not resolved in the outputs. Bruker BAF `.d` folders need conversion.
 - **Vendor formats:** Thermo, Waters, Agilent, SCIEX, Shimadzu and Bruker BAF files can only be decoded with the vendors' own libraries, whose licences don't allow redistribution. The server detects them and converts them with a tool you installed (see above). It never downloads vendor code.
-- **Numbers:** retention times are in minutes; XIC intensity is the sum of all peaks inside ± tolerance; areas are trapezoidal integrals over RT in minutes, with no baseline subtraction, between the points where the trace falls to 1 % of the apex or reaches a valley. Use them for relative comparisons.
-- **Big files:** the first access to a run makes one pass over all spectra to index it (TIC, precursors, RTs). Up to 4 runs stay cached (`--option cache_size=N`). A run is reopened automatically when the file changes. XICs read every spectrum in the RT window, so narrow the window on long runs.
+- **Numbers:** retention times are in minutes (mzML scan start times in seconds are converted, going by the unit accession); XIC intensity is the sum of all peaks inside ± tolerance; areas are trapezoidal integrals over RT in minutes, with no baseline subtraction, between the points where the trace falls to 1 % of the apex or reaches a valley. The FWHM is measured within those bounds (it is `null` when a co-eluting peak keeps the trace above half height). Use them for relative comparisons.
+- **Big files:** the first access to a run makes one pass over all spectra to index it (TIC, precursors, RTs). Up to 4 runs stay cached (`--option cache_size=N`). A run is reopened automatically when the file changes (modification time or size). XICs read every spectrum in the RT window, so narrow the window on long runs.
 - **Profile data:** chromatograms and XICs work as-is. `get_spectrum` reports local maxima as "peaks". Convert with peak picking for proper centroids.
 
 ## Hardware verification

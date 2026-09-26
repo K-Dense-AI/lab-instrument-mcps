@@ -85,7 +85,7 @@ Run one server per circuit. Add `--read-only` to allow readings but block calibr
 |---|---|---|
 | `max_series_duration_s` | 600 s | Longest logging series an agent may start |
 
-Override at launch: `--limit max_series_duration_s=3600`. These circuits only measure, so there are no hazardous tools; the risk is a *bad calibration*, which is why `calibrate` validates point names and standard values per circuit type and `clear_calibration` is hidden in `--read-only` mode.
+Override at launch: `--limit max_series_duration_s=3600` (3600 s is the most one `log_series` call can run; split longer logs into several calls). `log_series` writes its optional `save_path` only to a new `.csv` file (existing files are never overwritten). These circuits only measure, so there are no hazardous tools; the risk is a *bad calibration*, which is why `calibrate` validates point names and standard values per circuit type and `clear_calibration` is hidden in `--read-only` mode.
 
 ## Example prompts
 

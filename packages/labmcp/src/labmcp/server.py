@@ -30,6 +30,7 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import os
 import sys
 import threading
@@ -127,6 +128,8 @@ class ConnectContext:
     settings: Settings
     audit: AuditLog
     limits: SafetyLimits
+    #: Transports opened through :meth:`open_transport`; closed again if ``connect`` fails.
+    _opened: list[Transport] = field(default_factory=list, repr=False, compare=False)
 
     @property
     def simulate(self) -> bool:
@@ -169,8 +172,11 @@ class ConnectContext:
                 for k, v in defaults.items()
                 if k in {"read_termination", "write_termination", "encoding", "timeout"}
             }
-            return SimulatedTransport(simulator(), audit=self.audit, **common)
-        return open_transport(self.require_address(), audit=self.audit, **defaults)
+            transport: Transport = SimulatedTransport(simulator(), audit=self.audit, **common)
+        else:
+            transport = open_transport(self.require_address(), audit=self.audit, **defaults)
+        self._opened.append(transport)
+        return transport
 
 
 class InstrumentServer(Generic[D]):
@@ -225,26 +231,37 @@ class InstrumentServer(Generic[D]):
     @property
     def driver(self) -> D:
         """The connected driver. Connects on first use; raises a helpful error if it can't."""
-        if self._driver is not None:
-            return self._driver
+        # Read ``self._driver`` once: a concurrent ``reconnect`` may reset it to None at any time.
+        driver = self._driver
+        if driver is not None:
+            return driver
         with self._lock:
-            if self._driver is None:
+            driver = self._driver
+            if driver is None:
                 ctx = ConnectContext(self.settings, self.audit, self.limits)
                 try:
-                    self._driver = self._connect(ctx)
-                    self._last_error = None
-                    where = "simulator" if self.settings.simulate else self.settings.address
-                    self.audit.event(f"connected to {where}", "labmcp")
-                except InstrumentError as exc:
-                    self._last_error = str(exc)
-                    raise
-                except Exception as exc:
+                    driver = self._connect(ctx)
+                except BaseException as exc:
+                    # Close whatever connect() opened before failing (e.g. the driver's handshake
+                    # timed out): a leaked serial port or single-client TCP socket would make every
+                    # retry fail with "port busy" until the garbage collector happened to run.
+                    for transport in ctx._opened:
+                        transport.close()
+                    if isinstance(exc, InstrumentError):
+                        self._last_error = str(exc)
+                        raise
+                    if not isinstance(exc, Exception):
+                        raise
                     self._last_error = f"{type(exc).__name__}: {exc}"
                     raise InstrumentConnectionError(
                         f"Could not connect to {self.name} at {self.settings.address!r}: "
                         f"{self._last_error}"
                     ) from exc
-        return self._driver
+                self._driver = driver
+                self._last_error = None
+                where = "simulator" if self.settings.simulate else self.settings.address
+                self.audit.event(f"connected to {where}", "labmcp")
+        return driver
 
     @property
     def connected(self) -> bool:
@@ -279,7 +296,16 @@ class InstrumentServer(Generic[D]):
         limits: dict[str, float] | None = None,
         options: dict[str, str] | None = None,
     ) -> InstrumentServer[D]:
-        """Apply settings programmatically (tests, notebooks, embedding)."""
+        """Apply settings programmatically (tests, notebooks, embedding).
+
+        Arguments left as ``None`` keep their current value, except ``limits``: the given
+        overrides *replace* the previous ones, and ``None`` means the server's defaults.
+        Pass every override you want on each call.
+        """
+        if timeout is not None:
+            timeout = float(timeout)
+            if not (math.isfinite(timeout) and timeout > 0):  # NaN/inf/<=0 would hang every read
+                raise ValueError(f"timeout must be a positive number of seconds, got {timeout!r}")
         self.disconnect()
         s = self.settings
         if address is not None:
@@ -311,7 +337,12 @@ class InstrumentServer(Generic[D]):
         raw_opts = env.get("LABMCP_OPTIONS", "").strip()
         if raw_opts.startswith("{"):  # JSON, for values that contain commas (e.g. regexes)
             try:
-                opts = {str(k): str(v) for k, v in json.loads(raw_opts).items()}
+                # null means "not set" (str() would give the string "None"); true -> "true", like the CLI
+                opts = {
+                    str(k): v if isinstance(v, str) else json.dumps(v)
+                    for k, v in json.loads(raw_opts).items()
+                    if v is not None
+                }
             except (json.JSONDecodeError, AttributeError) as exc:
                 raise ValueError(f"LABMCP_OPTIONS is not a valid JSON object: {exc}") from exc
         else:
@@ -353,7 +384,7 @@ class InstrumentServer(Generic[D]):
                 limits={**s.limits, **parse_limit_args(args.limit)},
                 options={**s.options, **_parse_kv(args.option)},
             )
-        except ValueError as exc:
+        except (ValueError, OSError) as exc:  # OSError: e.g. the audit-log folder can't be created
             parser.error(str(exc))
 
         if args.check:
@@ -418,6 +449,8 @@ class InstrumentServer(Generic[D]):
         except Exception as exc:
             info["connected"] = self.connected
             info["error"] = str(exc) if isinstance(exc, InstrumentError) else f"{type(exc).__name__}: {exc}"
+        if self.audit.write_error:
+            info["audit_log_error"] = f"Cannot write {self.audit.path}: {self.audit.write_error}"
         return info
 
     def _register_builtin_tools(self) -> None:
@@ -495,6 +528,6 @@ def _parse_kv(items: list[str] | None) -> dict[str, str]:
     for item in items or []:
         key, sep, value = item.partition("=")
         if not sep:
-            raise SystemExit(f"--option must look like name=value, got {item!r}")
+            raise ValueError(f"--option must look like name=value, got {item!r}")
         out[key.strip()] = value.strip()
     return out

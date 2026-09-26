@@ -1,6 +1,6 @@
 [project]
 name = "labmcp"
-version = "0.1.1"
+version = "0.1.2"
 description = "Shared foundations for MCP servers that control laboratory instruments: transports, simulators, safety limits, audit logging."
 readme = "README.md"
 license = "Apache-2.0"

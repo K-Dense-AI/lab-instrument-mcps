@@ -1,6 +1,6 @@
 [project]
 name = "labmcp-brainflow"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP server for EEG/EMG/ECG/PPG biosensing boards via BrainFlow (OpenBCI, Muse, Neurosity, g.tec Unicorn, BrainBit, ...): stream, record, band powers, markers, signal quality."
 readme = "README.md"
 license = "Apache-2.0"
@@ -8,7 +8,7 @@ requires-python = ">=3.10"
 authors = [{ name = "K-Dense and LabMCP contributors" }]
 keywords = ["mcp", "lab-instrument", "eeg", "emg", "ecg", "ppg", "bci", "brainflow", "openbci", "muse", "neuroscience"]
 dependencies = [
-    "labmcp>=0.1,<0.2",
+    "labmcp>=0.1.2,<0.2",
     "brainflow>=5.21",
     "numpy>=1.24",
 ]

@@ -16,12 +16,16 @@ are documented in :mod:`labmcp_ms_worklist.formats`.
 from __future__ import annotations
 
 import csv
+import functools
 import json
+import math
 import os
 import random
 import re
 import secrets
 import shutil
+import string
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,21 +42,38 @@ from labmcp_ms_worklist.formats import (
     FormatSpec,
     Sample,
     check_position,
+    control_char_problem,
     decode,
     encode,
     filename_problem,
     generate_positions,
+    normalise_header,
     parse,
+    parse_number,
     render,
     resolve_columns,
     sanitise_filename,
+    volume_overrides,
 )
 
 MAX_IMPORT_BYTES = 5_000_000
+NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+PLACEHOLDERS = ("index", "sample_name", "sample_id", "type", "worklist", "date", "position")
 
 
 class WorklistError(InstrumentError):
     """A worklist operation was refused (bad input, sandbox violation, validation failure)."""
+
+
+def _locked(method: Any) -> Any:
+    """Serialise store operations: FastMCP runs sync tools in a thread pool."""
+
+    @functools.wraps(method)
+    def wrapper(self: WorklistStore, *args: Any, **kwargs: Any) -> Any:
+        with self.lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
 
 
 class Defaults(BaseModel):
@@ -148,6 +169,7 @@ class WorklistStore:
         self.root = root.resolve()
         self.simulated = simulated
         self.drafts: dict[str, Worklist] = {}
+        self.lock = threading.RLock()
 
     # ------------------------------------------------------------------ basics
 
@@ -208,28 +230,42 @@ class WorklistStore:
             raise WorklistError(f"Refused {relpath!r}: its folder resolves outside the worklist folder.")
         if target.is_dir():
             raise WorklistError(f"Refused {relpath!r}: a folder with that name exists.")
-        if overwrite:
-            tmp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
-            tmp.write_bytes(data)
-            os.replace(tmp, target)
-        else:
-            try:
+        try:
+            if overwrite:
+                tmp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+                try:
+                    tmp.write_bytes(data)
+                    os.replace(tmp, target)
+                finally:
+                    tmp.unlink(missing_ok=True)
+            else:
                 with open(target, "xb") as fh:
                     fh.write(data)
-            except FileExistsError:
-                raise WorklistError(
-                    f"{relpath!r} already exists in the worklist folder. Choose another file name or pass "
-                    "overwrite=true."
-                ) from None
+        except FileExistsError:
+            raise WorklistError(
+                f"{relpath!r} already exists in the worklist folder. Choose another file name or pass "
+                "overwrite=true."
+            ) from None
+        except OSError as exc:
+            raise WorklistError(f"Could not write {relpath!r}: {exc}") from exc
         return target
 
     def read_file(self, relpath: str) -> bytes:
         path = self.resolve(relpath)
         if not path.is_file():
             raise WorklistError(f"{relpath!r} does not exist in the worklist folder {str(self.root)!r}.")
-        if path.stat().st_size > MAX_IMPORT_BYTES:
-            raise WorklistError(f"{relpath!r} is larger than {MAX_IMPORT_BYTES // 1_000_000} MB; not a worklist?")
-        return path.read_bytes()
+        try:
+            if path.stat().st_size > MAX_IMPORT_BYTES:
+                raise WorklistError(f"{relpath!r} is larger than {MAX_IMPORT_BYTES // 1_000_000} MB; not a worklist?")
+            return path.read_bytes()
+        except OSError as exc:
+            raise WorklistError(f"Could not read {relpath!r}: {exc}") from exc
+
+    def _decode(self, relpath: str) -> str:
+        try:
+            return decode(self.read_file(relpath))
+        except ValueError as exc:
+            raise WorklistError(f"Could not read {relpath!r}: {exc}.") from exc
 
     def list_files(self) -> list[dict[str, Any]]:
         out = []
@@ -240,6 +276,7 @@ class WorklistStore:
 
     # ----------------------------------------------------------------- drafts
 
+    @_locked
     def create(
         self,
         name: str,
@@ -251,7 +288,7 @@ class WorklistStore:
     ) -> Worklist:
         if fmt not in FORMATS:
             raise WorklistError(f"Unknown format {fmt!r}. Use one of: {', '.join(sorted(FORMATS))}.")
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", name):
+        if not NAME_RE.fullmatch(name):
             raise WorklistError(
                 "Worklist names must be 1-64 characters of letters, digits, '_', '-' or '.', starting with a "
                 "letter or digit (they are used in file names)."
@@ -265,12 +302,14 @@ class WorklistStore:
         self._append(wl, samples)
         return wl
 
+    @_locked
     def add(self, name: str, samples: list[Sample]) -> Worklist:
         wl = self.get(name)
         self._append(wl, samples)
         wl.record("add_samples", sample_count=len(samples))
         return wl
 
+    @_locked
     def set_plan(self, name: str, plan: ControlPlan) -> Worklist:
         wl = self.get(name)
         if plan.randomize and plan.seed is None:
@@ -290,13 +329,21 @@ class WorklistStore:
             )
         if d.plate_size not in (24, 48, 54, 96, 384):
             raise WorklistError("plate_size must be 24, 48, 54, 96 or 384.")
+        hint = "Placeholders: {index}, {sample_name}, {sample_id}, {type}, {worklist}, {date}, {position}."
         try:
+            fields = list(string.Formatter().parse(d.data_file_pattern))
+            for _, fld, spec, conv in fields:
+                if fld is None:
+                    continue
+                # Only plain placeholders: no attribute/index access ('{sample_name.__class__}'), no
+                # conversions, and no huge widths ('{index:>999999999}' would allocate a gigabyte).
+                if fld not in PLACEHOLDERS or conv is not None:
+                    raise ValueError(f"unknown placeholder {{{fld}{'!' + conv if conv else ''}}}")
+                if spec and ("{" in spec or re.search(r"\d{3,}", spec)):
+                    raise ValueError(f"format spec {spec!r} of {{{fld}}} is not allowed (use e.g. {{index:03d}})")
             d.data_file_pattern.format_map(_PatternValues(1, "S", "", "sample", "WL", "A1"))
         except (KeyError, ValueError, IndexError, AttributeError) as exc:
-            raise WorklistError(
-                f"Invalid data_file_pattern {d.data_file_pattern!r}: {exc}. Placeholders: {{index}}, "
-                "{sample_name}, {sample_id}, {type}, {worklist}, {date}, {position}."
-            ) from exc
+            raise WorklistError(f"Invalid data_file_pattern {d.data_file_pattern!r}: {exc}. {hint}") from exc
 
     def _append(self, wl: Worklist, samples: list[Sample]) -> None:
         d = wl.defaults
@@ -325,8 +372,14 @@ class WorklistStore:
                 e.sample.position = p
         wl.base.extend(new)
 
-    def entries(self, wl: Worklist) -> list[Entry]:
-        """The run order: base samples, randomised and with controls inserted per the plan."""
+    @_locked
+    def entries(self, wl: Worklist, spec: FormatSpec | None = None) -> list[Entry]:
+        """The run order: base samples, randomised and with controls inserted per the plan.
+
+        With ``spec`` of another vendor than the draft's, ``extra`` values that would override one
+        of that vendor's mapped columns (e.g. Xcalibur's verbatim 'Std Clear' sample type) are left
+        out: they belong to the draft's own format.
+        """
         rows = [e.model_copy(deep=True) for e in wl.base]
         plan = wl.plan
         if plan is not None:
@@ -338,10 +391,13 @@ class WorklistStore:
                     rows[i] = e
             rows = self._insert_controls(wl, rows, plan)
         self._name_files(wl, rows)
+        if spec is not None and spec.name != wl.format:
+            for e in rows:
+                e.sample.extra = {k: v for k, v in e.sample.extra.items() if not _maps(spec, k)}
         return rows
 
-    def samples(self, wl: Worklist) -> list[Sample]:
-        return [e.sample for e in self.entries(wl)]
+    def samples(self, wl: Worklist, spec: FormatSpec | None = None) -> list[Sample]:
+        return [e.sample for e in self.entries(wl, spec)]
 
     def _control(self, wl: Worklist, kind: str, plan: ControlPlan) -> Entry:
         d = wl.defaults
@@ -378,9 +434,11 @@ class WorklistStore:
         for i, e in enumerate(rows, start=1):
             out.append(e)
             last = i == len(rows)
-            if plan.qc_every_n and i % plan.qc_every_n == 0 and not last:
+            # After the last sample the periodic control is only skipped when the matching at-end
+            # control follows (6 samples, blank every 3 -> a blank after sample 3 AND after sample 6).
+            if plan.qc_every_n and i % plan.qc_every_n == 0 and not (last and plan.qc_at_end):
                 out.append(self._control(wl, "qc", plan))
-            if plan.blank_every_n and i % plan.blank_every_n == 0 and not last:
+            if plan.blank_every_n and i % plan.blank_every_n == 0 and not (last and plan.blank_at_end):
                 out.append(self._control(wl, "blank", plan))
         out.extend(self._control(wl, "qc", plan) for _ in range(plan.qc_at_end))
         if plan.blank_at_end:
@@ -397,10 +455,20 @@ class WorklistStore:
 
     # --------------------------------------------------------------- validate
 
-    def validate(self, name: str, *, max_injection_volume_ul: float, fmt: str | None = None) -> ValidationReport:
+    @_locked
+    def validate(
+        self,
+        name: str,
+        *,
+        max_injection_volume_ul: float,
+        fmt: str | None = None,
+        has_template: bool | None = None,
+    ) -> ValidationReport:
         wl = self.get(name)
         spec = FORMATS[fmt or wl.format]
-        entries = self.entries(wl)
+        if has_template is None:
+            has_template = wl.template_columns is not None and spec.name == wl.format
+        entries = self.entries(wl, spec)
         errors: list[Issue] = []
         warnings: list[Issue] = []
         d = wl.defaults
@@ -420,11 +488,18 @@ class WorklistStore:
             for f in spec.unsupported:
                 if getattr(s, f):
                     warnings.append(Issue(row=row, field=f, message=f"{spec.title} has no column for {f}; it is not written."))
+            texts = {f: getattr(s, f) for f in TEXT_FIELDS} | {f"extra[{k!r}]": f"{k}{v}" for k, v in s.extra.items()}
+            for f, text in texts.items():
+                problem = control_char_problem(text)
+                if problem:
+                    errors.append(Issue(row=row, field=f, message=f"{f} {problem}; the import file would break."))
             if s.data_file:
                 problem = filename_problem(s.data_file)
                 if problem:
                     errors.append(Issue(row=row, field="data_file", message=f"data file {s.data_file!r} {problem}."))
                 key = s.data_file.lower()  # Windows file names are case-insensitive
+                if spec.data_file_suffix and key.endswith(spec.data_file_suffix):
+                    key = key[: -len(spec.data_file_suffix)]  # 'Run1' and 'Run1.d' are the same file
                 if spec.unique_data_files:
                     if key in seen_files:
                         errors.append(
@@ -450,13 +525,27 @@ class WorklistStore:
                 problem = check_position(s.position, d.position_pattern, d.plate_size, d.max_vial)
                 if problem:
                     errors.append(Issue(row=row, field="position", message=problem + "."))
-            v = s.injection_volume_ul
-            if v is not None:
-                if v <= 0:
-                    errors.append(Issue(row=row, field="injection_volume_ul", message=f"injection volume {v:g} µL must be > 0."))
+            volumes: list[tuple[str, float | None]] = [("injection_volume_ul", s.injection_volume_ul)]
+            for header, raw in volume_overrides(s):  # written verbatim, so checked the same way
+                try:
+                    ov = parse_number(raw)
+                except ValueError:
+                    errors.append(
+                        Issue(row=row, field=f"extra[{header!r}]",
+                              message=f"injection volume {raw!r} is not a number, so the max_injection_volume_ul "
+                              "limit cannot be checked.")
+                    )
+                    continue
+                if not (spec is AGILENT and ov == -1):  # MassHunter '-1' = as method
+                    volumes.append((f"extra[{header!r}]", ov))
+            for f, v in volumes:
+                if v is None:
+                    continue
+                if not math.isfinite(v) or v <= 0:
+                    errors.append(Issue(row=row, field=f, message=f"injection volume {v:g} µL must be a number > 0."))
                 elif v > max_injection_volume_ul:
                     errors.append(
-                        Issue(row=row, field="injection_volume_ul",
+                        Issue(row=row, field=f,
                               message=f"injection volume {v:g} µL exceeds the limit max_injection_volume_ul="
                               f"{max_injection_volume_ul:g} µL.")
                     )
@@ -488,7 +577,7 @@ class WorklistStore:
                     Issue(row=row, field="sample_type",
                           message=f"{spec.title} has no '{s.sample_type}' type; written as 'Blank'.")
                 )
-        if wl.template_columns is None and spec.name == "sciex_os":
+        if not has_template and spec.name == "sciex_os":
             warnings.append(
                 Issue(field="template", message="No SCIEX OS template header given: the default header is a best "
                       "guess. Export a blank batch from SCIEX OS and pass it as template_path to be sure.")
@@ -504,6 +593,7 @@ class WorklistStore:
 
     # ----------------------------------------------------------------- export
 
+    @_locked
     def export(
         self,
         name: str,
@@ -530,12 +620,10 @@ class WorklistStore:
         if template_columns is None and spec.name == wl.format:
             template_columns = wl.template_columns
             delimiter = delimiter or wl.delimiter
-        if template_columns is not None:
-            saved = wl.template_columns
-            wl.template_columns = template_columns
-        report = self.validate(name, max_injection_volume_ul=max_injection_volume_ul, fmt=spec.name)
-        if template_columns is not None:
-            wl.template_columns = saved
+        report = self.validate(
+            name, max_injection_volume_ul=max_injection_volume_ul, fmt=spec.name,
+            has_template=template_columns is not None,
+        )  # fmt: skip
         if not report.valid:
             listed = "; ".join(
                 f"row {i.row}: {i.message}" if i.row else i.message for i in report.errors[:10]
@@ -544,7 +632,14 @@ class WorklistStore:
             raise WorklistError(
                 f"Not exported: {len(report.errors)} validation error(s): {listed}{more}. Run validate_worklist for details."
             )
-        samples = self.samples(wl)
+        samples = self.samples(wl, spec)
+        if spec.name != wl.format:
+            overridden = sorted({k for s in self.samples(wl) for k in s.extra if _maps(spec, k)})
+            if overridden:
+                notes.append(
+                    f"Values kept verbatim from the {wl.format} draft for {', '.join(overridden)} were not written: "
+                    f"{spec.title} uses its own values for those columns."
+                )
         cols, dropped = resolve_columns(spec, template_columns)
         for f in dropped:
             if any(getattr(s, f) not in ("", None) for s in samples):
@@ -565,6 +660,15 @@ class WorklistStore:
             fname += spec.extensions[0]
         elif ext not in spec.extensions:
             raise WorklistError(f"{spec.title} files must end in {' or '.join(spec.extensions)} (got {ext!r}).")
+        # '<file name>.provenance.json': unique per export file (T.csv and T.txt don't share one), and
+        # checked before anything is written so neither file is replaced without overwrite=true.
+        target = self.resolve(fname)
+        ppath = target.with_name(target.name + ".provenance.json")
+        if write_provenance and not overwrite and ppath.exists():
+            raise WorklistError(
+                f"{ppath.relative_to(self.root).as_posix()!r} already exists. Choose another file name, pass "
+                "overwrite=true, or write_provenance=false. Nothing was written."
+            )
         path = self.write_file(fname, data, overwrite=overwrite)
         rel = path.relative_to(self.root).as_posix()
         wl.record("export_worklist", format=spec.name, file=rel, bytes=len(data))
@@ -585,11 +689,10 @@ class WorklistStore:
                 "history": wl.history,
                 "base_samples": [e.sample.model_dump() for e in wl.base],
             }
-            ppath = path.with_name(path.stem + ".provenance.json")
             self.write_file(
                 ppath.relative_to(self.root).as_posix(),
                 json.dumps(prov, indent=2, default=str).encode("utf-8"),
-                overwrite=True,
+                overwrite=overwrite,
             )
             provenance_rel = ppath.relative_to(self.root).as_posix()
         lines = text.splitlines()
@@ -610,7 +713,7 @@ class WorklistStore:
         }
 
     def _template_header(self, spec: FormatSpec, relpath: str) -> tuple[list[str], str]:
-        text = decode(self.read_file(relpath)).lstrip("﻿")
+        text = self._decode(relpath).lstrip("﻿")
         lines = [ln for ln in text.splitlines() if ln.strip()]
         if lines and lines[0].lower().startswith("bracket type="):
             lines = lines[1:]
@@ -625,15 +728,21 @@ class WorklistStore:
 
     # ----------------------------------------------------------------- import
 
+    @_locked
     def import_file(self, relpath: str, *, fmt: str | None = None, name: str | None = None,
                     replace: bool = False) -> tuple[Worklist, list[str]]:
-        text = decode(self.read_file(relpath))
+        text = self._decode(relpath)
         try:
             parsed = parse(text, fmt)
         except (ValueError, KeyError) as exc:
             raise WorklistError(f"Could not parse {relpath!r}: {exc}") from exc
         stem = re.sub(r"[^A-Za-z0-9_.-]", "_", Path(relpath).stem)[:64] or "imported"
         wl_name = name or stem
+        if not NAME_RE.fullmatch(wl_name):
+            raise WorklistError(
+                "Worklist names must be 1-64 characters of letters, digits, '_', '-' or '.', starting with a "
+                "letter or digit (they are used in file names)."
+            )
         if wl_name in self.drafts and not replace:
             raise WorklistError(f"A worklist named {wl_name!r} already exists; pass another name or replace=true.")
         spec = FORMATS[parsed.format]
@@ -651,6 +760,11 @@ class WorklistStore:
         wl.record("import_worklist", file=relpath, format=parsed.format, sample_count=len(parsed.samples))
         self.drafts[wl_name] = wl
         return wl, parsed.warnings
+
+
+def _maps(spec: FormatSpec, header: str) -> bool:
+    """True if ``spec`` reads ``header`` as one of its mapped (canonical) columns."""
+    return spec.aliases.get(normalise_header(header)) is not None
 
 
 def _extension(value: str) -> str:

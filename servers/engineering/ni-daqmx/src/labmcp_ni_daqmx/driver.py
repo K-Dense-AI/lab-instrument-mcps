@@ -46,6 +46,9 @@ _HINTS = {
 }
 _RANGE = re.compile(r"^(?P<prefix>.*?)(?P<start>\d+):(?P<stop>\d+)$")
 _LOCAL_PREFIXES = ("ai", "ao", "port", "ctr", "pfi", "_")
+#: Most channels one range such as ``ai0:31`` may expand to (a typo like ``ai0:1000000`` must not
+#: build a million-entry list).
+MAX_RANGE_CHANNELS = 1024
 
 
 def load_nidaqmx() -> Any:
@@ -84,6 +87,10 @@ def expand_channels(spec: str | list[str], device: str) -> list[str]:
         m = _RANGE.match(local)
         if m:
             start, stop = int(m["start"]), int(m["stop"])
+            if abs(stop - start) >= MAX_RANGE_CHANNELS:
+                raise InstrumentProtocolError(
+                    f"Channel range {item!r} spans {abs(stop - start) + 1} channels; at most {MAX_RANGE_CHANNELS} are allowed."
+                )
             step = 1 if stop >= start else -1
             out.extend(f"{device}/{m['prefix']}{i}" for i in range(start, stop + step, step))
         else:
@@ -122,7 +129,11 @@ class NIDAQ:
     ) -> None:
         self.nidaqmx = nidaqmx
         self.audit = audit
+        #: Serialises analog-input tasks (acquisitions can last minutes).
         self.lock = threading.RLock()
+        #: Serialises AO / DO / DI tasks. Separate from ``lock`` so that `safe_state` never waits for a
+        #: running acquisition: NI-DAQmx runs AI and AO/DIO tasks on the same device side by side.
+        self.output_lock = threading.RLock()
         self.system = self._call("opening the NI-DAQmx system", nidaqmx.system.System.local)
         names = self.device_names()
         if not names:
@@ -146,7 +157,12 @@ class NIDAQ:
         #: Last value this server wrote to each AO channel / DO line.
         self.ao_last: dict[str, float] = {}
         self.do_last: dict[str, bool] = {}
-        self.safe_do_lines = expand_channels(safe_do_lines, self.name) if safe_do_lines.strip() else []
+        self.safe_do_lines: list[str] = []
+        if safe_do_lines.strip():
+            try:  # validated now: a bad line would otherwise only fail inside safe_state
+                self.safe_do_lines = self._expand(safe_do_lines, "do")
+            except InstrumentProtocolError as exc:
+                raise InstrumentConnectionError(f"--option safe_do_lines: {exc}") from exc
 
     # ------------------------------------------------------------ low level
 
@@ -178,9 +194,9 @@ class NIDAQ:
             raise InstrumentProtocolError(message) from exc
 
     @contextlib.contextmanager
-    def _task(self, what: str) -> Any:
+    def _task(self, what: str, lock: Any = None) -> Any:
         """A short-lived DAQmx task, closed even on errors; DAQmx warnings are collected."""
-        with self.lock, warnings.catch_warnings(record=True) as caught:
+        with lock or self.lock, warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             task = self._call("creating a task", self.nidaqmx.Task)
             try:
@@ -260,7 +276,7 @@ class NIDAQ:
     def _expand(self, spec: str | list[str], kind: Literal["ai", "ao", "di", "do"]) -> list[str]:
         names = expand_channels(spec, self.name)
         attr = {"ai": "ai_physical_chans", "ao": "ao_physical_chans", "di": "di_lines", "do": "do_lines"}[kind]
-        valid = {n.lower() for n in self._names(attr)}
+        valid = {n.lower(): n for n in self._names(attr)}
         if valid:
             bad = [n for n in names if n.lower() not in valid]
             if bad:
@@ -268,6 +284,8 @@ class NIDAQ:
                 raise InstrumentProtocolError(
                     f"{bad[0]} is not one of the {label} of {self.name}. Call get_device_info for the channel list."
                 )
+            # The device's own spelling, so 'Port0/Line1' and 'port0/line1' are one key in do_last/ao_last.
+            names = [valid[n.lower()] for n in names]
         return names
 
     @staticmethod
@@ -389,7 +407,7 @@ class NIDAQ:
         measured: dict[str, bool] = {}
         if to_read:
             c = self.nidaqmx.constants
-            with self._task("digital input") as (task, _caught):
+            with self._task("digital input", self.output_lock) as (task, _caught):
                 self._call(
                     "add_di_chan", task.di_channels.add_di_chan, ",".join(to_read), line_grouping=c.LineGrouping.CHAN_PER_LINE
                 )
@@ -413,7 +431,7 @@ class NIDAQ:
             raise InstrumentProtocolError(f"Got {len(levels)} levels for {len(names)} lines.")
         c = self.nidaqmx.constants
         self._log("DO " + ", ".join(f"{n}={int(v)}" for n, v in zip(names, levels, strict=True)))
-        with self._task("digital output") as (task, _caught):
+        with self._task("digital output", self.output_lock) as (task, _caught):
             self._call("add_do_chan", task.do_channels.add_do_chan, ",".join(names), line_grouping=c.LineGrouping.CHAN_PER_LINE)
             self._call("write", task.write, levels[0] if len(names) == 1 else list(levels), auto_start=True, timeout=10.0)
         for n, v in zip(names, levels, strict=True):
@@ -431,7 +449,7 @@ class NIDAQ:
         name = names[0]
         lo, hi = self._ao_range(voltage_v, name)
         self._log(f"AO {name} = {voltage_v:g} V (range {lo:g}..{hi:g} V)")
-        with self._task("analog output") as (task, _caught):
+        with self._task("analog output", self.output_lock) as (task, _caught):
             self._call("add_ao_voltage_chan", task.ao_channels.add_ao_voltage_chan, name, min_val=lo, max_val=hi)
             self._call("write", task.write, float(voltage_v), auto_start=True, timeout=10.0)
         self.ao_last[name] = float(voltage_v)
@@ -448,19 +466,27 @@ class NIDAQ:
         zero = 0.0
         if ranges and not any(lo <= 0.0 <= hi for lo, hi in ranges):
             zero = min(lo for lo, _ in ranges)
-        for ao in self._names("ao_physical_chans"):
+        aos = self._names("ao_physical_chans")
+        aos += [n for n in self.ao_last if n.lower() not in {a.lower() for a in aos}]
+        for ao in aos:
             try:
                 self.write_voltage(ao, zero)
                 done.append(f"{ao} set to {zero:g} V")
             except InstrumentError as exc:
                 errors.append(str(exc))
-        lines = sorted(set(self.do_last) | set(self.safe_do_lines))
+        lines = sorted({n.lower(): n for n in [*self.do_last, *self.safe_do_lines]}.values())
         if digital_low and lines:
             try:
                 self.write_lines(lines, [False])
                 done.append("driven low: " + ", ".join(lines))
-            except InstrumentError as exc:
-                errors.append(str(exc))
+            except InstrumentError:
+                # One bad line must not keep the others high: retry them one by one.
+                for line in lines:
+                    try:
+                        self.write_lines([line], [False])
+                        done.append(f"driven low: {line}")
+                    except InstrumentError as exc:
+                        errors.append(f"{line}: {exc}")
         if errors:
             raise InstrumentProtocolError(
                 "Safe state only partly applied. Done: " + ("; ".join(done) or "nothing") + ". Failed: " + "; ".join(errors)

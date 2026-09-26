@@ -76,6 +76,9 @@ class FakeBoardShim:
         self._need_prepared()
         if self.streaming:
             raise InstrumentProtocolError("STREAM_ALREADY_RUN_ERROR:8 stream is already running")
+        with self._lock:  # like BrainFlow, a new stream starts with a new (empty) ring buffer
+            self._chunks, self._count = [], 0
+            self._pending_markers = []
         self.streaming = True
         self._capacity = int(num_samples)
         self._t0 = time.time()

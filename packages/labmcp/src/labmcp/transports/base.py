@@ -9,15 +9,19 @@ used in tests.
 
 from __future__ import annotations
 
+import logging
+import math
 import threading
 import time
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
-from labmcp.errors import InstrumentConnectionError, InstrumentTimeout
+from labmcp.errors import InstrumentConnectionError, InstrumentError, InstrumentTimeout
 
 if TYPE_CHECKING:
     from labmcp.audit import AuditLog
+
+log = logging.getLogger("labmcp")
 
 
 class Transport(ABC):
@@ -43,6 +47,9 @@ class Transport(ABC):
         timeout: float = 2.0,
         audit: AuditLog | None = None,
     ) -> None:
+        timeout = float(timeout)
+        if not (math.isfinite(timeout) and timeout > 0):  # NaN/inf/<=0 would hang or never wait
+            raise ValueError(f"Transport timeout must be a positive number of seconds, got {timeout!r}")
         self.read_termination = read_termination
         self.write_termination = write_termination
         self.encoding = encoding
@@ -77,11 +84,8 @@ class Transport(ABC):
                 self.audit.record("write", data, self.description)
             try:
                 self._write(data)
-            except OSError as exc:
-                raise InstrumentConnectionError(
-                    f"Write to {self.description} failed: {exc}. Check the cable/network and "
-                    "call the `reconnect` tool."
-                ) from exc
+            except Exception as exc:
+                self._raise_io_error("Write to", exc)
 
     def read_bytes(self, size: int, timeout: float | None = None) -> bytes:
         """Read exactly ``size`` bytes or raise ``InstrumentTimeout``."""
@@ -89,6 +93,8 @@ class Transport(ABC):
         deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
         with self.lock:
             while len(self._buffer) < size:
+                if self._closed:
+                    raise self._closed_error()
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     got = len(self._buffer)
@@ -109,6 +115,8 @@ class Transport(ABC):
         deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
         with self.lock:
             while terminator not in self._buffer:
+                if self._closed:
+                    raise self._closed_error()
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     partial = self._buffer.decode(self.encoding, "replace")
@@ -125,10 +133,15 @@ class Transport(ABC):
         return data
 
     def flush_input(self) -> None:
-        """Discard anything the instrument sent that we have not read yet."""
+        """Discard anything the instrument sent that we have not read yet (no-op once closed)."""
         with self.lock:
             self._buffer = b""
-            self._flush_input()
+            if self._closed:
+                return
+            try:
+                self._flush_input()
+            except Exception as exc:
+                self._raise_io_error("Flushing input from", exc)
 
     # -- line API -------------------------------------------------------------
 
@@ -152,12 +165,15 @@ class Transport(ABC):
         return self._closed
 
     def close(self) -> None:
+        """Close the link. Idempotent, never raises, and doesn't wait for the lock: a read
+        blocked in another thread fails with ``InstrumentConnectionError`` (this is how
+        ``reconnect`` interrupts a stuck exchange)."""
         if not self._closed:
             self._closed = True
             try:
                 self._close()
-            except OSError:
-                pass
+            except Exception as exc:  # best effort (pyvisa raises its own error types)
+                log.debug("Error while closing %s: %s", self.description, exc)
 
     def __enter__(self) -> Transport:
         return self
@@ -174,11 +190,33 @@ class Transport(ABC):
     def _safe_read(self, max_bytes: int, timeout: float) -> bytes:
         try:
             return self._read(max_bytes, timeout)
-        except OSError as exc:
+        except Exception as exc:
+            self._raise_io_error("Read from", exc)
+
+    def _raise_io_error(self, what: str, exc: Exception) -> NoReturn:
+        """Map a low-level I/O failure to ``InstrumentConnectionError``.
+
+        OS errors (pyserial's ``SerialException`` is one) always map. Anything else is only
+        mapped when the transport was closed under us by another thread (``reconnect`` or
+        shutdown), where sockets and pyserial raise ``ValueError``/``TypeError`` on the
+        now-invalid handle; otherwise it's a genuine bug and propagates unchanged.
+        """
+        if isinstance(exc, InstrumentError):
+            raise exc
+        if self._closed:
+            raise self._closed_error() from exc
+        if isinstance(exc, OSError):
             raise InstrumentConnectionError(
-                f"Read from {self.description} failed: {exc}. Check the cable/network and "
+                f"{what} {self.description} failed: {exc}. Check the cable/network and "
                 "call the `reconnect` tool."
             ) from exc
+        raise exc
+
+    def _closed_error(self) -> InstrumentConnectionError:
+        return InstrumentConnectionError(
+            f"The connection to {self.description} was closed while in use (by `reconnect` or "
+            "server shutdown). Call the `reconnect` tool if needed and retry."
+        )
 
     def __repr__(self) -> str:
         return f"<{type(self).__name__} {self.description}>"

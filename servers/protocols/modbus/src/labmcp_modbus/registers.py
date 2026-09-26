@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,6 +43,9 @@ DATA_TYPES: dict[str, tuple[str, int]] = {
     "bool": ("", 1),
 }
 INTEGER_TYPES = {"uint16", "int16", "uint32", "int32"}
+INTEGER_RANGES = {
+    "uint16": (0, 0xFFFF), "int16": (-0x8000, 0x7FFF), "uint32": (0, 0xFFFFFFFF), "int32": (-0x80000000, 0x7FFFFFFF),
+}  # fmt: skip
 FLOAT_TYPES = {"float32", "float64"}
 
 _POINT_KEYS = {
@@ -121,18 +125,22 @@ class Point:
             return self._pack(number), self.enum[number]
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError(f"point {self.name!r} needs a number, got {value!r}")
-        value = float(value)
+        try:
+            value = float(value)
+        except OverflowError:  # an int too large for a float
+            raise ValueError(f"point {self.name!r} needs a finite number, got {value!r}") from None
         if not math.isfinite(value):
             raise ValueError(f"point {self.name!r} needs a finite number, got {value!r}")
         self._check_range(value, value)
         raw = (value - self.offset) / self.scale
-        if self.type in INTEGER_TYPES:
-            number: float | int = round(raw)
-            stored = float(f"{number * self.scale + self.offset:.12g}")
-            self._check_range(stored, value)
-        else:
-            number, stored = raw, value
-        return self._pack(number), stored
+        if not math.isfinite(raw):  # e.g. a tiny scale: round(inf) would raise OverflowError
+            raise ValueError(f"{value:g} {self.unit} does not fit in a {self.type} register for {self.name!r}")
+        registers = self._pack(round(raw) if self.type in INTEGER_TYPES else raw)
+        # Re-check what the device will actually hold: integers are rounded to the register's
+        # resolution, and float32 rounds too (or underflows to 0 with a large scale).
+        stored = float(self.decode(registers)[0])
+        self._check_range(stored, value)
+        return registers, stored
 
     def _enum_number(self, value: float | bool | str) -> int:
         if isinstance(value, str):
@@ -148,15 +156,16 @@ class Point:
         raise ValueError(f"point {self.name!r} only accepts: {allowed}; got {value!r}")
 
     def _check_range(self, value: float, requested: float) -> None:
+        what = f"{requested:g} {self.unit}" + (
+            "" if value == requested else f" (stored as {value:g} {self.unit} at the register's resolution)"
+        )
         if self.min is not None and value < self.min:
             raise ValueError(
-                f"{requested:g} {self.unit} is below the register map minimum of {self.min:g} {self.unit} "
-                f"for {self.name!r}"
+                f"{what} is below the register map minimum of {self.min:g} {self.unit} for {self.name!r}"
             )
         if self.max is not None and value > self.max:
             raise ValueError(
-                f"{requested:g} {self.unit} is above the register map maximum of {self.max:g} {self.unit} "
-                f"for {self.name!r}"
+                f"{what} is above the register map maximum of {self.max:g} {self.unit} for {self.name!r}"
             )
 
     def _pack(self, number: float | int) -> list[int]:
@@ -308,13 +317,7 @@ def _parse_point(name: str, spec: Any, device: dict[str, Any]) -> Point:
     if point.writable and table not in WRITABLE_TABLES:
         raise RegisterMapError(f"{where}: {table} points are read-only in Modbus and cannot be writable")
     if "enum" in spec:
-        enum = spec["enum"]
-        if dtype not in INTEGER_TYPES or not isinstance(enum, dict) or not enum:
-            raise RegisterMapError(f"{where}: enum must be a non-empty mapping of integers to labels on an integer type")
-        try:
-            point.enum = {int(k): str(v) for k, v in enum.items()}
-        except (TypeError, ValueError) as exc:
-            raise RegisterMapError(f"{where}: enum keys must be integers") from exc
+        point.enum = _parse_enum(spec["enum"], dtype, where)
     if point.min is not None and point.max is not None and point.min > point.max:
         raise RegisterMapError(f"{where}: min ({point.min:g}) is greater than max ({point.max:g})")
     numeric = dtype not in {"bool"} and not point.enum
@@ -324,6 +327,44 @@ def _parse_point(name: str, spec: Any, device: dict[str, Any]) -> Point:
             "or an enum, so the server can refuse unsafe values before sending them"
         )
     return point
+
+
+def _parse_enum(enum: Any, dtype: str, where: str) -> dict[int, str]:
+    if dtype not in INTEGER_TYPES or not isinstance(enum, dict) or not enum:
+        raise RegisterMapError(f"{where}: enum must be a non-empty mapping of integers to labels on an integer type")
+    lo, hi = INTEGER_RANGES[dtype]
+    out: dict[int, str] = {}
+    labels: dict[str, int] = {}
+    for key, label in enum.items():
+        # int("1.5") fails but int(1.5) == 1 and int(True) == 1: accept only real integers
+        if isinstance(key, int) and not isinstance(key, bool):
+            number = key
+        elif isinstance(key, str) and re.fullmatch(r"\s*[-+]?\d+\s*", key):
+            number = int(key)
+        else:
+            raise RegisterMapError(f"{where}: enum keys must be integers, got {key!r}")
+        if not lo <= number <= hi:
+            raise RegisterMapError(f"{where}: enum value {number} does not fit in a {dtype} ({lo} to {hi})")
+        if number in out:
+            raise RegisterMapError(f"{where}: enum value {number} is listed twice")
+        text = str(label)
+        if text.strip().lower() in labels:  # a write by label would be ambiguous
+            raise RegisterMapError(f"{where}: enum label {text!r} is used for more than one value")
+        out[number], labels[text.strip().lower()] = text, number
+    return out
+
+
+def _check_writable_overlaps(points: dict[str, Point]) -> None:
+    """Two writable points on the same register would let the looser limits bypass the stricter ones."""
+    writable = sorted((p for p in points.values() if p.writable), key=lambda p: (p.table, p.address))
+    for i, a in enumerate(writable):
+        for b in writable[i + 1 :]:
+            if b.table != a.table or b.address >= a.address + a.count:
+                break
+            raise RegisterMapError(
+                f"writable points {a.name!r} and {b.name!r} share {a.table} address(es): writing one would "
+                "bypass the other's limits. Make one of them read-only (writable: false)."
+            )
 
 
 def parse_register_map(data: Any, source: str = "") -> RegisterMap:
@@ -358,18 +399,23 @@ def parse_register_map(data: Any, source: str = "") -> RegisterMap:
         if name in points:
             raise RegisterMapError(f"duplicate point name {name!r}")
         points[name] = _parse_point(name, spec, device)
+    _check_writable_overlaps(points)
+    raw_steps = data.get("safe_state") or []
+    if not isinstance(raw_steps, list):
+        raise RegisterMapError("safe_state must be a list of {point: <name>, value: <value>} steps")
     safe_state: list[SafeStep] = []
-    for i, step in enumerate(data.get("safe_state") or []):
+    for i, step in enumerate(raw_steps):
         where = f"safe_state[{i}]"
         if not isinstance(step, dict) or set(step) != {"point", "value"}:
             raise RegisterMapError(f"{where}: each step must be {{point: <name>, value: <value>}}")
-        if step["point"] not in points:
-            raise RegisterMapError(f"{where}: unknown point {step['point']!r}")
+        target = step["point"]
+        if isinstance(target, bool) or not isinstance(target, (str, int)) or str(target) not in points:
+            raise RegisterMapError(f"{where}: unknown point {target!r}")
         try:
-            points[step["point"]].encode(step["value"])
+            points[str(target)].encode(step["value"])
         except ValueError as exc:
             raise RegisterMapError(f"{where}: {exc}") from exc
-        safe_state.append(SafeStep(step["point"], step["value"]))
+        safe_state.append(SafeStep(str(target), step["value"]))
     return RegisterMap(points=points, device=dict(device), safe_state=safe_state, source=source)
 
 
@@ -377,25 +423,67 @@ def load_register_map(path: str | Path) -> RegisterMap:
     """Load a register map from a ``.yaml``/``.yml`` or ``.json`` file."""
     p = Path(path).expanduser()
     try:
-        text = p.read_text(encoding="utf-8")
-    except OSError as exc:
+        text = p.read_text(encoding="utf-8-sig")  # tolerate the BOM some Windows editors add
+    except (OSError, UnicodeDecodeError) as exc:
         raise RegisterMapError(f"Cannot read register map {p}: {exc}") from exc
     if p.suffix.lower() in {".yaml", ".yml"}:
         import yaml
 
         try:
-            data = yaml.safe_load(text)
+            data = yaml.load(text, Loader=_strict_yaml_loader())  # noqa: S506 - a SafeLoader subclass
         except yaml.YAMLError as exc:
             raise RegisterMapError(f"{p}: invalid YAML: {exc}") from exc
     else:
         try:
-            data = json.loads(text)
+            data = json.loads(text, object_pairs_hook=_unique_keys)
         except json.JSONDecodeError as exc:
+            raise RegisterMapError(f"{p}: invalid JSON: {exc}") from exc
+        except RegisterMapError as exc:
             raise RegisterMapError(f"{p}: invalid JSON: {exc}") from exc
     try:
         return parse_register_map(data, str(p))
     except RegisterMapError as exc:
         raise RegisterMapError(f"{p}: {exc}") from exc
+
+
+def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """``json.loads`` hook: a repeated key (e.g. a second ``max``) is an error, not "last one wins"."""
+    out: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in out:
+            raise RegisterMapError(f"duplicate key {key!r}")
+        out[key] = value
+    return out
+
+
+def _strict_yaml_loader() -> Any:
+    """A ``yaml.SafeLoader`` that rejects repeated mapping keys (PyYAML keeps the last one silently).
+
+    Keys brought in by a ``<<`` merge may still be overridden, as YAML intends.
+    """
+    import yaml
+
+    class StrictSafeLoader(yaml.SafeLoader):
+        def construct_mapping(self, node: Any, deep: bool = False) -> Any:
+            if isinstance(node, yaml.MappingNode):
+                seen: set[Any] = set()
+                for key_node, _ in node.value:
+                    if key_node.tag == "tag:yaml.org,2002:merge":
+                        continue
+                    key = self.construct_object(key_node, deep=deep)
+                    try:
+                        duplicate = key in seen
+                        seen.add(key)
+                    except TypeError:  # unhashable: SafeLoader reports it
+                        continue
+                    if duplicate:
+                        raise yaml.constructor.ConstructorError(
+                            "while constructing a mapping", node.start_mark,
+                            f"found duplicate key {key!r}", key_node.start_mark,
+                        )  # fmt: skip
+            return super().construct_mapping(node, deep=deep)
+
+    return StrictSafeLoader
 
 
 def example_map_path() -> Path:

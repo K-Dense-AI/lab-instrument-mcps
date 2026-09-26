@@ -319,3 +319,108 @@ async def test_unit_id_option():
     async with simulated_client(server, options={"unit_id": "abc"}) as client:
         with pytest.raises(Exception, match="unit_id"):
             await client.call_tool("read_points", {})
+
+
+# ------------------------------------------------------------------ regressions (review 2026-09)
+
+
+def _stub_pymodbus(inner) -> PymodbusClient:
+    from pymodbus.exceptions import ConnectionException, ModbusException, ModbusIOException
+
+    client = PymodbusClient.__new__(PymodbusClient)
+    client._errors = (ModbusIOException, ConnectionException, ModbusException)
+    client._client, client._unit_kw, client.description = inner, "device_id", "modbus-rtu:///dev/ttyUSB0"
+    return client
+
+
+def test_os_error_from_pymodbus_becomes_connection_error_and_resets_the_link():
+    # pyserial raises SerialException (an OSError) when the USB adapter is unplugged, and a reset
+    # socket raises from send(); pymodbus lets both through and keeps the dead handle.
+    class Unplugged:
+        closed = False
+
+        def read_holding_registers(self, address, count, device_id):
+            raise OSError(5, "Input/output error")
+
+        def close(self):
+            self.closed = True
+
+    inner = Unplugged()
+    with pytest.raises(InstrumentConnectionError, match="failed during read_holding_registers"):
+        _stub_pymodbus(inner).read_holding_registers(0, 2, unit=1)
+    assert inner.closed  # the next request re-opens the port
+
+
+def test_short_reply_is_a_protocol_error_not_a_struct_crash():
+    dev, sim, _ = make_device()
+    real = sim.read_input_registers
+    sim.read_input_registers = lambda address, count, unit: real(address, count, unit)[:1]
+    with pytest.raises(InstrumentProtocolError, match="1 value\\(s\\) instead of 2"):
+        dev.read_point("process_temperature_precise")  # float32: struct.unpack needed 4 bytes
+    by_name = {r.name: r for r in dev.read_points(["process_temperature_precise", "process_temperature"])}
+    assert "instead of 2" in by_name["process_temperature_precise"].error
+    assert by_name["process_temperature"].error is None
+
+
+def test_nan_float_is_reported_not_silently_null():
+    dev, sim, _ = make_device()
+    sim._refresh_inputs = lambda: None  # freeze the input registers
+    sim.input[2], sim.input[3] = 0x7FC0, 0x0000  # float32 NaN, a common "no value" marker
+    r = dev.read_point("process_temperature_precise")
+    assert r.value is None and "not a finite number" in r.error
+
+
+async def test_nan_decode_as_float32_does_not_break_structured_output():
+    async with simulated_client(server) as client:
+        await client.call_tool("read_points", {"names": ["setpoint"]})
+        sim = server.driver.client
+        sim._refresh_inputs = lambda: None
+        sim.input[2], sim.input[3] = 0xFFFF, 0xFFFF  # NaN
+        r = (await client.call_tool(
+            "read_registers", {"address": 2, "count": 2, "table": "input", "decode_as": "float32"}
+        )).structured_content
+        assert r["decoded"] == ["nan"]
+        v = (await client.call_tool("read_points", {"names": ["process_temperature_precise"]})).structured_content
+        assert v["result"][0]["value"] is None and "not a finite number" in v["result"][0]["error"]
+
+
+def test_write_point_read_back_failure_does_not_hide_the_write():
+    dev, sim, _ = make_device()
+
+    def write_only(address, count, unit):
+        raise ModbusExceptionResponse("read_holding_registers", address, 0x02)
+
+    sim.read_holding_registers = write_only
+    reading, written = dev.write_point("setpoint", 40)  # used to raise although 40 °C WAS written
+    assert written == 40.0 and sim.holding[0] == 400
+    assert reading.value is None and "was written, but reading it back failed" in reading.error
+
+
+async def test_write_point_tool_reports_read_back_error():
+    async with simulated_client(server) as client:
+        await client.call_tool("read_points", {"names": ["setpoint"]})
+
+        def write_only(address, count, unit):
+            raise ModbusExceptionResponse("read_holding_registers", address, 0x02)
+
+        server.driver.client.read_holding_registers = write_only
+        w = (await client.call_tool("write_point", {"name": "setpoint", "value": 41})).structured_content
+        assert w["written"] == 41.0 and w["matches"] is False and "ILLEGAL DATA ADDRESS" in w["read_back_error"]
+
+
+def test_safe_state_is_not_ok_when_the_device_ignores_the_write():
+    # Controllers in local/keypad mode often ACK a write and ignore it: that is not a safe state.
+    dev, sim, _ = make_device()
+    dev.write_point("output_enable", True)
+    sim.write_coil = lambda address, value, unit: None  # acknowledged, ignored
+    steps = {s["point"]: s for s in dev.apply_safe_state()}
+    assert steps["output_enable"]["ok"] is False and steps["output_enable"]["read_back"] is True
+    assert "reads back True instead of False" in steps["output_enable"]["error"]
+    assert steps["control_mode"]["ok"] is True
+
+    def unreadable(address, count, unit):
+        raise ModbusExceptionResponse("read_holding_registers", address, 0x02)
+
+    sim.read_holding_registers = unreadable
+    steps = {s["point"]: s for s in dev.apply_safe_state()}
+    assert steps["control_mode"]["ok"] is False and "not confirmed" in steps["control_mode"]["error"]

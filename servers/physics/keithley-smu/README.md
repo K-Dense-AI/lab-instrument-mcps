@@ -74,7 +74,7 @@ Add `--read-only` to allow status and measurements but block configuration, outp
 | `output_off` | 🛑 safety | Switch the SMU output OFF immediately (and abort any IV sweep in progress). Always available, including in read-only mode. |
 | `output_on` | ⚠️ hazard | Switch the SMU output ON: the configured voltage or current is applied to the DUT. The programmed level and compliance are read back from the instrument and checked against the safety limits first. Confirm with the user that the DUT is connected and safe to energise. |
 | `reconnect` | 🛑 safety | Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged). |
-| `run_iv_sweep` | ⚠️ hazard | Run a stepped IV sweep: configure the source, switch the output ON, step through the levels measuring V and I at each, then ALWAYS switch the output OFF (also on errors or when `output_off` is called). Returns the curve (downsampled), compliance flags, a linear fit and optional full CSV. The output must be off beforehand. Limits are checked first. |
+| `run_iv_sweep` | ⚠️ hazard | Run a stepped IV sweep: configure the source, switch the output ON, step through the levels measuring V and I at each, then ALWAYS switch the output OFF (also on errors or when `output_off` is called). Returns the curve (downsampled), compliance flags, a linear fit and optional full CSV (a new file; an existing file is never overwritten). The output must be off beforehand. Limits are checked first. |
 | `set_4wire` | 🎛 control | Select 4-wire (remote sense, Kelvin) or 2-wire measurement. 4-wire removes lead resistance for low-resistance DUTs but needs the SENSE leads connected. Refused while the output is on. |
 | `set_source_level` | ⚠️ hazard | Change the level of the configured source. If the output is ON the new voltage/current is applied to the DUT immediately. The level and the present compliance are checked against the safety limits first. |
 <!-- TOOLS:END -->
@@ -103,7 +103,10 @@ The limits are checked **before** anything is sent: by `configure_source` and `s
 
 ## Notes
 
-- **Simple, verifiable commands.** Sweeps are stepped loops: set the level, wait `delay_s`, take one reading, check compliance. Built-in instrument sweeps and trigger models are not used, so every point shows up in `get_command_log`. The output is switched off in a `try/finally` at the end of every sweep. Calling `output_off` while a sweep runs sets an abort flag and switches the output off at once; the sweep then stops and reports `aborted: true`.
+- **Simple, verifiable commands.** Sweeps are stepped loops: set the level, wait `delay_s`, take one reading, check compliance. Built-in instrument sweeps and trigger models are not used, so every point shows up in `get_command_log`. The output is switched off in a `try/finally` at the end of every sweep. Calling `output_off` while a sweep runs (even while it is still configuring) sets an abort flag and switches the output off at once; the sweep then stops without switching the output on again and reports `aborted: true`.
+- **Sweep duration.** Besides `max_sweep_duration_s`, one sweep can take at most 1740 s (the tool's 30-minute timeout minus a margin): longer estimates are refused, and a sweep that runs slower than estimated stops early with the output off and returns the points measured so far (`stop_reason` says why).
+- **`save_path`** must end in `.csv` and must not exist yet (an existing file is never overwritten); missing folders are created. It is checked before the output is switched on.
+- **Overflow readings** (the SMU's +9.9E37 marker) are returned as `null` in the sweep curve, counted in `overflow_points` and left out of the statistics and the fit; `measure` reports them as an error.
 - **What is measured.**
   - 2400: concurrent V and I (`:SENS:FUNC:CONC ON`, `:SENS:FUNC "VOLT","CURR"`), read with `:READ?` (`:FORM:ELEM VOLT,CURR,STAT`). Compliance comes from status-word bit 3.
   - 2450: the measure function is the non-sourced quantity, source readback is on, and `:READ? "defbuffer1",SOUR,READ` returns both. Compliance comes from `:SOUR:VOLT:ILIM:TRIP?` / `:SOUR:CURR:VLIM:TRIP?`.

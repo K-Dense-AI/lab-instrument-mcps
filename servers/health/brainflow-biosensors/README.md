@@ -73,14 +73,14 @@ claude mcp add eeg -- uvx labmcp-brainflow --option board=cyton --address /dev/t
 }
 ```
 
-With `--read-only`, the agent can still record and analyse data (a temporary stream is started for each recording) but cannot leave the stream running, insert markers or send `configure_board` commands.
+With `--read-only`, the agent can still record and analyse data (a temporary stream is started for each recording) but cannot leave the stream running, insert markers or send `configure_board` commands. `stop_streaming` stays available.
 
 ## Tools
 
 <!-- TOOLS:START -->
 | Tool | Kind | Description |
 |---|---|---|
-| `configure_board` | 🎛 control | Send a board-specific configuration command through BrainFlow's config_board (e.g. OpenBCI channel settings 'x1060110X', test signals, or Muse presets 'p50'/'p61' to enable PPG). Only acquisition settings of the amplifier change. Consult the board's SDK documentation first. |
+| `configure_board` | ⚠️ hazard | Send a raw board-specific command to the firmware through BrainFlow's config_board (e.g. OpenBCI channel settings 'x1060110X', test signals, or Muse presets 'p50'/'p61' to enable PPG). |
 | `get_band_powers` | 👁 read | EEG band powers (delta 1-4, theta 4-8, alpha 8-13, beta 13-30, gamma 30-50 Hz) over the most recent `window_s` seconds: BrainFlow's channel-averaged relative powers plus per-channel absolute (uV^2) and relative powers and the peak frequency. Records a fresh window if not streaming. |
 | `get_board_info` | 👁 read | Describe the connected board: channel names by type (EEG/EMG/ECG/EOG share the EXG rows on most boards), sampling rate, available presets (data buffers) and streaming state. |
 | `get_command_log` | 👁 read | Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done. |
@@ -89,9 +89,9 @@ With `--read-only`, the agent can still record and analyse data (a temporary str
 | `insert_marker` | 🎛 control | Write an event marker into the data stream at the current sample (for event-related experiments: stimulus onsets, condition changes). Requires `start_streaming`; markers appear in `record` results and saved files. |
 | `list_supported_boards` | 👁 read | List common BrainFlow boards: the `--option board=` alias, BrainFlow board id, and which connection detail `--address` must hold (serial port, Bluetooth MAC, IP address or serial number). Any other BrainFlow BoardIds name or numeric id is accepted too. Does not need a board. |
 | `reconnect` | 🛑 safety | Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged). |
-| `record` | 👁 read | Record `duration_s` seconds and return per-channel statistics, event markers and downsampled traces. Uses the live stream if one is running, otherwise starts a temporary one. The full data (every row, full sampling rate) can be written to `save_path`. |
+| `record` | 👁 read | Record `duration_s` seconds and return per-channel statistics, event markers and downsampled traces. Uses the live stream if one is running, otherwise starts a temporary one. The full data (every row, full sampling rate) can be written to `save_path`. `stop_streaming` ends a recording early. |
 | `start_streaming` | 🎛 control | Start continuous acquisition into BrainFlow's ring buffer (the board's radio/LEDs switch on; nothing is applied to the participant). Needed for `insert_marker`; `record` then reads from the live stream. Call `stop_streaming` when finished. |
-| `stop_streaming` | 🎛 control | Stop acquisition (saves battery). Data already in the buffer is kept until the session is released (`reconnect`) or read. |
+| `stop_streaming` | 🛑 safety | Stop acquisition (saves battery). A `record` in progress ends at once with the data acquired so far. Data already in the buffer is kept until the next stream starts or the session is released (`reconnect`). |
 <!-- TOOLS:END -->
 
 ## Safety limits
@@ -100,7 +100,7 @@ With `--read-only`, the agent can still record and analyse data (a temporary str
 |---|---|---|
 | `max_record_duration_s` | 60 s | Longest recording or analysis window (`record`, `get_band_powers`, `get_signal_quality`) an agent may request |
 
-Override at launch: `--limit max_record_duration_s=600`. No tool here applies anything to the participant. BrainFlow boards only measure.
+Override at launch: `--limit max_record_duration_s=600`. BrainFlow boards measure; the only tool that can switch on an output (for example an impedance-test current through the electrodes, or the bias drive on a channel) is `configure_board`, a raw firmware passthrough that is marked as a hazard so MCP clients ask before running it.
 
 ## Example prompts
 
@@ -118,8 +118,9 @@ Override at launch: `--limit max_record_duration_s=600`. No tool here applies an
 - **Units.** BrainFlow returns EXG in µV "wherever possible". The OYMotion gForce armbands return ADC counts. Accelerometer, PPG and similar channels use board-specific units. Timestamps are Unix seconds.
 - **Presets.** Some boards stream several buffers with different sampling rates, for example Muse EEG (default), IMU (auxiliary) and PPG (ancillary). Pass `preset=` to `get_board_info` and `record`.
 - **Markers** go into the default preset's marker row and need an active stream (`start_streaming`). You can insert them while `record` is running. Value 0 is reserved.
-- **Saved files.** `save_format="csv"` writes labelled columns for every row. `save_format="brainflow"` writes `DataFilter.write_file` output, which you can replay with `--option board=playback --address file.csv --option master_board=<board>`.
-- `configure_board` passes a string straight to the board firmware through BrainFlow's `config_board`, for example OpenBCI channel settings or Muse presets. It only changes acquisition settings, but check the board's SDK documentation for valid commands.
+- **Saved files.** `save_path` must be a new file (`.csv`; `.csv`, `.tsv` or `.txt` for `save_format="brainflow"`): `~` is expanded, missing folders are created, an existing file is never overwritten, and the path is checked before recording starts. `save_format="csv"` writes labelled columns for every row. `save_format="brainflow"` writes `DataFilter.write_file` output, which you can replay with `--option board=playback --address file.csv --option master_board=<board>`.
+- `configure_board` passes a string straight to the board firmware through BrainFlow's `config_board`, for example OpenBCI channel settings or Muse presets. Nothing is checked: some commands switch on outputs such as the lead-off (impedance-test) current. Settings persist until changed or the board is power-cycled; check the board's SDK documentation for valid commands.
+- **Streams.** `record`, `get_band_powers` and `get_signal_quality` start a temporary stream when none is running and stop it afterwards, unless `start_streaming` was called meanwhile (the stream then stays on) or another recording still uses it. `stop_streaming` ends a running `record` at once; it returns only the data acquired so far, with `stopped_early: true`.
 - `reconnect` (and stopping the server) stops the stream and calls `release_session`, which frees the serial port or BLE connection.
 
 ## Hardware verification

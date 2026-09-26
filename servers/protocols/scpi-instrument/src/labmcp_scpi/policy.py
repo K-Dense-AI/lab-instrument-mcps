@@ -1,4 +1,4 @@
-"""Checks applied to raw SCPI text *before* anything is sent to the instrument.
+r"""Checks applied to raw SCPI text *before* anything is sent to the instrument.
 
 A generic SCPI server lets the model compose arbitrary commands, so the server
 itself cannot know which ones are dangerous. This module enforces what it can:
@@ -21,6 +21,10 @@ form in which every header mnemonic is reduced to its SCPI short form, e.g.
 ``:OUTPut1:STATe ON`` becomes ``OUTP1:STAT ON`` (SCPI-99 Vol. 1, 6.2.1
 "Mnemonic Generation Rules"). Write patterns against the short form and they
 also catch the long form.
+
+SCPI booleans accept any number (SCPI-99 Vol. 1 ch. 7, Boolean: rounded, non-zero is ON),
+so deny "everything but OFF" rather than listing the ON spellings:
+``^OUTP\d*(:STAT)? (?!OFF\b)`` also refuses ``OUTP 2``, ``OUTP 1.0`` and ``OUTP #H1``.
 """
 
 from __future__ import annotations
@@ -202,7 +206,14 @@ class CommandPolicy:
         source-measure units they can switch the output on. ``FETCh?`` still works.
         ``--option allow_measure_in_read_only=true`` lifts this for DMM-only setups.
         """
-        deny = options.get("write_denylist") or options.get("denylist")
+        primary, alias = options.get("write_denylist"), options.get("denylist")
+        if primary and alias and primary.strip() != alias.strip():
+            # Using one and silently ignoring the other would drop part of the lab's denylist.
+            raise ValueError(
+                "--option write_denylist and --option denylist (its alias) are both set to different "
+                "patterns. Set only one, e.g. write_denylist='(?:A)|(?:B)'"
+            )
+        deny = primary or alias
         builtin = dict(BUILTIN_QUERY_DENYLIST)
         allow_measure = str(options.get("allow_measure_in_read_only", "")).lower() in {"1", "true", "yes", "on"}
         if read_only and not allow_measure:
@@ -229,7 +240,11 @@ class CommandPolicy:
             return
         # Also check each unit under its implied header path (see expand_headers), or
         # a denylisted command could be reached as the relative tail of a compound message.
-        for unit in [*units, *expand_headers(units), text]:
+        # And split at EVERY ';' too: the instrument's parser may not see the quotes the way
+        # split_units does (a '"' inside #<n><len> block data, or a parser without '...'
+        # strings), and a unit it runs must never hide inside what we took for a string.
+        naive = [u.strip() for u in text.split(";") if u.strip()]
+        for unit in [*units, *expand_headers(units), *naive, *expand_headers(naive), text]:
             if self._matches(self.write_denylist, unit):
                 raise CommandRefused(
                     f"Refused: {unit!r} matches the command denylist "
@@ -279,10 +294,12 @@ class CommandPolicy:
             raise CommandRefused("Refused: empty command. Nothing was sent to the instrument.")
         self._check_denylist(text, units)
         if self.write_allowlist is not None:
-            if len(units) > 1:
+            # Any ';' at all, even one that looks quoted: a '"' inside block data can make
+            # split_units see one unit where the instrument executes several.
+            if len(units) > 1 or ";" in text:
                 raise CommandRefused(
                     f"Refused: {text!r} is a compound command (';'). A write allowlist is configured, "
-                    "so send one command per call (or one per scpi_batch step). "
+                    "so send one command per call (or one per scpi_batch step), without ';'. "
                     "Nothing was sent to the instrument."
                 )
             unit = units[0]
@@ -302,6 +319,6 @@ class CommandPolicy:
             "builtin_query_denylist": list(self.builtin_query_denylist.values()),
             "matching": "case-insensitive re.search on each message unit, as sent and in SCPI short form "
             "(e.g. ':OUTPut:STATe ON' is also checked as 'OUTP:STAT ON'); denylist checks also resolve "
-            "relative headers in compound messages ('OUTP:POL NORM;STAT ON' -> 'OUTP:STAT ON'); the "
-            "allowlist must match a whole unit",
+            "relative headers in compound messages ('OUTP:POL NORM;STAT ON' -> 'OUTP:STAT ON') and also "
+            "split at every ';', even inside quotes; the allowlist must match a whole unit and refuses any ';'",
         }

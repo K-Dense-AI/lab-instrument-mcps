@@ -24,11 +24,13 @@ there is no order download and no host-query response (receive-only by design).
 from __future__ import annotations
 
 import json
+import math
 import re
 import select
 import socket
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -199,7 +201,10 @@ class E1381Receiver:
             # One record per end frame per E1381; tolerate analyzers that pack several.
             for record in re.split(r"\r\n?|\n", text):
                 if record:
-                    self.on_record(record)
+                    try:
+                        self.on_record(record)
+                    except Exception as exc:  # the frame is already accepted: it must still be ACKed
+                        self.log(f"record handler failed ({type(exc).__name__}: {exc}); record dropped")
         return ACK
 
     def _reject(self, reason: str, checksum: bool = False) -> bytes:
@@ -600,6 +605,10 @@ def _result_entry(
     test_code = _first_nonempty(test[3:]) or _first_nonempty(test[:1])
     value_parts = components(fget(fields, 4), d)
     value = value_parts[0].strip() if value_parts else ""
+    numeric = float(value) if _NUMBER_RE.match(value) else None
+    if numeric is not None and not math.isfinite(numeric):
+        numeric = None  # e.g. "1e999" overflows to inf
+    seq = fget(fields, 2).strip()
     ref = components(fget(fields, 6), d)
     flags = [c for rep in repeats(fget(fields, 7), d) for c in rep if c.strip()]
     status = text_of(fget(fields, 9), d)
@@ -625,7 +634,7 @@ def _result_entry(
         test_name=(test[1].strip() or None) if len(test) > 1 else None,
         universal_test_id=test,
         value=value,
-        numeric_value=float(value) if _NUMBER_RE.match(value) else None,
+        numeric_value=numeric,
         interpretation=d.component.join(value_parts[1:]).strip() or None,
         units=text_of(fget(fields, 5), d),
         reference_range=" ".join(p.strip() for p in ref if p.strip()),
@@ -642,7 +651,8 @@ def _result_entry(
         specimen_type=(components(fget(order, 16), d)[0].strip() if order else ""),
         comments=[],
         order_comments=order_comments,
-        sequence=int(fget(fields, 2)) if fget(fields, 2).strip().isdigit() else index,
+        # isascii: str.isdigit() is also true for e.g. Latin-1 superscripts, which int() rejects.
+        sequence=int(seq) if seq.isascii() and seq.isdigit() else index,
         record=raw,
         order_record=order_raw,
         patient_record=patient_raw,
@@ -669,6 +679,8 @@ class ResultStore:
     """Thread-safe in-memory store of received messages, optionally appended to a JSONL file."""
 
     def __init__(self, *, max_messages: int = 5000, store_path: str | None = None, redacted: bool = True) -> None:
+        if max_messages < 1:
+            raise ValueError(f"max_messages must be at least 1, got {max_messages}")
         self.max_messages = max_messages
         self.store_path = Path(store_path).expanduser() if store_path else None
         self.redacted = redacted
@@ -676,6 +688,8 @@ class ResultStore:
         self._next_id = 1
         self._lock = threading.Lock()
         self.load_errors = 0
+        self.write_errors = 0
+        self.last_write_error: str | None = None
         if self.store_path:
             self.store_path.parent.mkdir(parents=True, exist_ok=True)
             if self.store_path.exists():
@@ -683,9 +697,14 @@ class ResultStore:
 
     def _load(self) -> None:
         assert self.store_path is not None
-        for line in self.store_path.read_text(encoding="utf-8").splitlines():
+        # Only the newest max_messages are kept in memory, so only those are parsed: the file
+        # grows forever, and reading all of it would delay (and bloat) every server start.
+        with self.store_path.open(encoding="utf-8", errors="replace") as fh:
+            lines = deque(fh, maxlen=self.max_messages)
+        for line in lines:
             try:
                 row = json.loads(line)
+                parse_since(row["received_at"])  # a bad timestamp would break every `since` query
                 msg = parse_message(
                     row["records"],
                     message_id=int(row["message_id"]),
@@ -694,7 +713,7 @@ class ResultStore:
                     complete=bool(row.get("complete", True)),
                     redacted=bool(row.get("redacted", False)),
                 )
-            except (ValueError, KeyError, TypeError):
+            except (ValueError, KeyError, TypeError, AttributeError):
                 self.load_errors += 1
                 continue
             self._append(msg)
@@ -726,8 +745,12 @@ class ResultStore:
                     "redacted": msg.redacted,
                     "records": msg.records,
                 }
-                with self.store_path.open("a", encoding="utf-8") as fh:
-                    fh.write(json.dumps(row) + "\n")
+                try:
+                    with self.store_path.open("a", encoding="utf-8") as fh:
+                        fh.write(json.dumps(row) + "\n")
+                except OSError as exc:  # disk full, permissions...: the message is still kept in memory
+                    self.write_errors += 1
+                    self.last_write_error = f"{type(exc).__name__}: {exc}"
             return msg
 
     def messages(self, limit: int = 50, since: datetime | None = None) -> tuple[list[ReceivedMessage], int]:
@@ -783,6 +806,8 @@ class ResultStore:
                 "results": sum(len(m.results) for m in self._messages),
                 "last_message_at": last.received_at if last else None,
                 "last_analyzer": last.analyzer if last else None,
+                "store_write_errors": self.write_errors,
+                "last_store_error": self.last_write_error,
             }
 
 
@@ -823,40 +848,49 @@ class ListenTransport(Transport):
     def _accept(self) -> None:
         try:
             conn, addr = self._server.accept()
-        except (BlockingIOError, InterruptedError):
+        except (BlockingIOError, InterruptedError, ConnectionAbortedError):
+            # ConnectionAbortedError: the peer reset before we accepted (macOS/BSD). Not a failure of
+            # the listener, so it must not tear it down (and drop the connected analyzer).
             return
         if self.allow_from and addr[0] not in self.allow_from:
             self.rejected_connections += 1
             conn.close()
             return
+        try:
+            conn.setblocking(False)
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        except OSError:  # already reset by the peer
+            conn.close()
+            return
         self._drop()
-        conn.setblocking(False)
-        conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         self._client = conn
         self.peer = f"{addr[0]}:{addr[1]}"
         self.generation += 1
 
     def _drop(self) -> None:
-        if self._client is not None:
+        # Swap first: close() (another thread) and a peer hang-up seen by the receiver can race here.
+        client, self._client = self._client, None
+        if client is not None:
+            self.peer = None
+            self.generation += 1
             try:
-                self._client.close()
-            finally:
-                self._client = None
-                self.peer = None
-                self.generation += 1
+                client.close()
+            except OSError:
+                pass
 
     def _read(self, max_bytes: int, timeout: float) -> bytes:
-        socks = [self._server] + ([self._client] if self._client is not None else [])
+        client = self._client
+        socks = [self._server] + ([client] if client is not None else [])
         ready, _, _ = select.select(socks, [], [], max(timeout, 0))
         if self._server in ready:
             self._accept()
             return b""
-        if self._client is not None and self._client in ready:
+        if client is not None and client in ready:
             try:
-                data = self._client.recv(max_bytes)
+                data = client.recv(max_bytes)
             except OSError:
                 data = b""
-            if not data:
+            if not data and self._client is client:
                 self._drop()
             return data
         return b""
@@ -865,7 +899,8 @@ class ListenTransport(Transport):
         if self._client is None:
             return  # the analyzer went away; there is nobody to acknowledge
         try:
-            self._client.setblocking(True)
+            # Bounded, so a peer that stopped reading can never hang the receiver thread.
+            self._client.settimeout(5.0)
             self._client.sendall(data)
             self._client.setblocking(False)
         except OSError:
@@ -976,6 +1011,7 @@ class ASTMReceiver:
             encoding=encoding, receive_timeout_s=receive_timeout_s,
         )
         self._stop = threading.Event()
+        self._link_lock = threading.Lock()  # guards replacing / closing self.link
         self._thread = threading.Thread(target=self._run, name="astm-receiver", daemon=True)
         self._thread.start()
 
@@ -993,34 +1029,54 @@ class ASTMReceiver:
 
     def _run(self) -> None:
         backoff = 1.0
-        while not self._stop.is_set():
-            link = self.link
-            if link is None:
-                try:
-                    link = self.link = self._open_link()
+        try:
+            while not self._stop.is_set():
+                link = self.link
+                if link is None:
+                    try:
+                        link = self._open_link()
+                    except InstrumentError as exc:
+                        self.last_error = str(exc)
+                        self._stop.wait(backoff)
+                        backoff = min(backoff * 2, 30.0)
+                        continue
                     link.audit = None
+                    with self._link_lock:
+                        if self._stop.is_set():  # close() ran while we were connecting
+                            link.close()
+                            return
+                        self.link = link
                     self._event(f"reconnected to {self.where}")
                     self.last_error = None
-                    backoff = 1.0
-                except InstrumentError as exc:
+                try:
+                    if self._step(link):
+                        backoff = 1.0  # the link carries data: it is healthy again
+                except InstrumentConnectionError as exc:
+                    if self._stop.is_set():
+                        return
                     self.last_error = str(exc)
+                    self._event(f"link lost: {exc}")
+                    self.protocol.reset("link lost")
+                    with self._link_lock:
+                        link.close()
+                        if self.link is link:
+                            self.link = None
+                    # Wait before reconnecting: a peer that accepts and immediately drops the
+                    # connection must not be hammered (and flood the audit log) in a tight loop.
                     self._stop.wait(backoff)
                     backoff = min(backoff * 2, 30.0)
-                    continue
-            try:
-                self._step(link)
-            except InstrumentConnectionError as exc:
-                if self._stop.is_set():
-                    return
-                self.last_error = str(exc)
-                self._event(f"link lost: {exc}")
-                self.protocol.reset("link lost")
+                except Exception as exc:  # never let the receiver thread die silently
+                    self.last_error = f"{type(exc).__name__}: {exc}"
+                    self._event(f"receiver error: {self.last_error}")
+                    self._stop.wait(0.5)
+        finally:
+            self._close_link()
+
+    def _close_link(self) -> None:
+        with self._link_lock:
+            link, self.link = self.link, None
+            if link is not None:
                 link.close()
-                self.link = None
-            except Exception as exc:  # never let the receiver thread die silently
-                self.last_error = f"{type(exc).__name__}: {exc}"
-                self._event(f"receiver error: {self.last_error}")
-                self._stop.wait(0.5)
 
     def _sync_generation(self, link: Transport) -> None:
         """A new or lost analyzer connection (TCP listener) ends any session in progress."""
@@ -1031,13 +1087,16 @@ class ASTMReceiver:
             peer = getattr(link, "peer", None)
             self._event(f"analyzer connected from {peer}" if peer else "analyzer disconnected")
 
-    def _step(self, link: Transport) -> None:
+    def _step(self, link: Transport) -> bool:
+        """Handle one byte (or frame) from the link. Returns True if anything was received."""
+        # Checked every step, not only when the line is idle: stray bytes that are not frames
+        # must not keep an abandoned transfer open forever.
+        self.protocol.check_timeout()
         try:
             first = link.read_bytes(1, timeout=self.poll_s)
         except InstrumentTimeout:
             self._sync_generation(link)
-            self.protocol.check_timeout()
-            return
+            return False
         # The byte just read belongs to the current connection: reset *before* handling it.
         self._sync_generation(link)
         self.last_activity_at = utc_now()
@@ -1057,14 +1116,17 @@ class ASTMReceiver:
             reply = self.protocol.on_other(first)
         if reply:
             link.write_bytes(reply)
+        return True
 
     # -- info -------------------------------------------------------------------
 
     def link_state(self) -> str:
-        if self.link is None:
+        link = self.link  # read once: the receiver thread may replace it at any time
+        if link is None:
             return f"reconnecting ({self.last_error})"
-        if isinstance(self.link, ListenTransport):
-            return f"analyzer connected from {self.link.peer}" if self.link.peer else "listening, no analyzer connected"
+        if isinstance(link, ListenTransport):
+            peer = link.peer
+            return f"analyzer connected from {peer}" if peer else "listening, no analyzer connected"
         return "connected"
 
     def status(self) -> dict[str, Any]:
@@ -1082,9 +1144,10 @@ class ASTMReceiver:
             "link": asdict(self.protocol.stats),
             **self.store.counts(),
         }
-        if isinstance(self.link, ListenTransport):
-            info["rejected_connections"] = self.link.rejected_connections
-            info["allow_from"] = sorted(self.link.allow_from)
+        link = self.link
+        if isinstance(link, ListenTransport):
+            info["rejected_connections"] = link.rejected_connections
+            info["allow_from"] = sorted(link.allow_from)
         return info
 
     def identify(self) -> dict[str, Any]:
@@ -1103,5 +1166,5 @@ class ASTMReceiver:
         self._thread.join(timeout=2.0)
         for fn in self._on_close:
             fn()
-        if self.link is not None:
-            self.link.close()
+        # The thread closes the link on exit; this covers a thread still blocked in a read.
+        self._close_link()

@@ -63,12 +63,12 @@ Add `--read-only` to allow measurements but block switching the filament/CDEM, d
 <!-- TOOLS:START -->
 | Tool | Kind | Description |
 |---|---|---|
-| `all_off` | 🛑 safety | Put the RGA in a safe state: abort any degas, CDEM off (HV0), filament off (FL0) and quadrupole RF/DC off (MR0). Use when finished, before venting, or if anything looks wrong. |
-| `analog_scan` | 👁 read | Record an analog mass spectrum (SC1): the quadrupole steps through the mass range and the full peak shapes are returned (downsampled) with a peak list, the total pressure measured at the end of the scan, and optionally the full data as CSV. Use it to check peak positions and to survey unknown gases. Duration depends on the noise floor (e.g. 126 ms/amu at NF4). |
+| `all_off` | 🛑 safety | Put the RGA in a safe state: abort any degas, CDEM off (HV0), filament off (FL0) and quadrupole RF/DC off (MR0). Use when finished, before venting, or if anything looks wrong. It interrupts a running scan or leak check, and every step is attempted even if an earlier one fails. |
+| `analog_scan` | 👁 read | Record an analog mass spectrum (SC1): the quadrupole steps through the mass range and the full peak shapes are returned (downsampled) with a peak list, the total pressure measured at the end of the scan, and optionally the full data as CSV. Use it to check peak positions and to survey unknown gases. Duration depends on the noise floor (e.g. 126 ms/amu at NF4). An existing save_path file is never overwritten. |
 | `calibrate` | ⚠️ hazard | Calibrate the detector: `zero` (CA) re-zeroes the ion detector at the present noise floor and detector and corrects the RF scan table for temperature drift (seconds); `electrometer` (CL) recalibrates the electrometer's full I-V response (longer, clears all zero offsets). The quadrupole RF is switched off at the end. |
-| `cdem_off` | 🛑 safety | Switch the electron multiplier off (HV0) and return to Faraday-cup detection. Always allowed. |
+| `cdem_off` | 🛑 safety | Switch the electron multiplier off (HV0) and return to Faraday-cup detection. Always allowed, and it interrupts a running scan, mass measurement or leak check. |
 | `degas` | ⚠️ hazard | Start an ionizer degas (DG): 20 mA of 400 eV electrons clean the ion source by electron stimulated desorption. The CDEM is switched off and left off. Degassing shortens filament life; prefer a bakeout. Refused above `max_filament_pressure_torr` and beyond `max_degas_minutes`. Returns immediately; the RGA is busy until it finishes (any command would abort it), and `filament_off` / `all_off` stop it. |
-| `filament_off` | 🛑 safety | Switch the filament off (FL0), stopping a degas first if one is running. Always allowed. |
+| `filament_off` | 🛑 safety | Switch the filament off (FL0), stopping a degas first if one is running. Always allowed, and it interrupts a running scan, mass measurement or leak check. |
 | `get_command_log` | 👁 read | Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done. |
 | `get_connection_info` | 👁 read | Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first. |
 | `get_status` | 👁 read | Report the RGA state: filament emission, CDEM on/off and voltage, ionizer settings, scan settings, stored sensitivity factors, and the decoded error bytes (e.g. FL6 when the overpressure protection shut the filament down). Reading the error bytes clears the communication (EC?) and CDEM (EM?) error bytes, as on the instrument. |
@@ -89,16 +89,18 @@ Add `--read-only` to allow measurements but block switching the filament/CDEM, d
 
 The RGA filament must only run below 1e-4 Torr, and a CDEM should never see voltage above 1e-4 Torr, with 5e-6 Torr or less recommended (manual: FL command warning p. 6-35, "CDEM Handling and Care" in the Maintenance chapter). The RGA only measures pressure while its filament emits, so switching on needs evidence:
 
-- `set_filament` and `degas`: the pressure must be at or below `max_filament_pressure_torr`. Evidence is either `external_pressure_torr` (a reading from another gauge that the user confirmed) or, when the filament is already on and the CDEM off, a total-pressure measurement taken right then.
-- `set_cdem`: the pressure must be at or below `max_cdem_pressure_torr`. Evidence is an external reading, a total pressure measured just before (filament on, Faraday cup), or one measured within `max_pressure_reading_age_s`. The voltage must be at or below `max_cdem_voltage_v`; the hardware range of 10-2490 V is enforced as well.
+- `set_filament` and `degas`: the pressure must be at or below `max_filament_pressure_torr`. `set_cdem`: at or below `max_cdem_pressure_torr`, and the voltage at or below `max_cdem_voltage_v` (the hardware range of 10-2490 V is enforced as well).
+- Evidence for all three: `external_pressure_torr` (a reading from another gauge that the user confirmed) and, when the filament is on and the CDEM off, a total-pressure measurement taken right then. If both are available, the **higher** one is checked, so a mistyped gauge value can't override what the RGA measures. With the CDEM on (the RGA can't measure), a reading from the last `max_pressure_reading_age_s` is accepted, but only while the filament is still on: once it is off (switched off or tripped) an older reading says nothing about the present pressure.
+- RGA readings used as evidence are scaled to 1 mA emission: the ion current is proportional to the emission current, so a reading at 0.1 mA would otherwise understate the pressure 10x.
 - The instrument's own filament protection still applies: an overpressure shuts the emission and the CDEM down (error FL6), and `get_status` reports it.
+- `all_off`, `filament_off` and `cdem_off` interrupt a running scan, mass measurement or leak check (which then returns an error and no data) instead of waiting for it to finish. `all_off` attempts every step even if one fails, and reports what failed.
 
 | Limit | Default | Meaning |
 |---|---|---|
 | `max_filament_pressure_torr` | 1e-4 Torr | Highest pressure at which the filament may be switched on or the ionizer degassed |
 | `max_cdem_pressure_torr` | 5e-6 Torr | Highest pressure at which the CDEM may be switched on |
 | `max_cdem_voltage_v` | 2000 V | Highest CDEM high voltage (hardware maximum 2490 V) |
-| `max_pressure_reading_age_s` | 60 s | Oldest RGA total-pressure reading accepted as evidence |
+| `max_pressure_reading_age_s` | 60 s | Oldest RGA total-pressure reading accepted as evidence (only while the filament stays on) |
 | `max_degas_minutes` | 3 min | Longest ionizer degas (hardware maximum 20 min) |
 | `max_scan_duration_s` | 900 s | Longest estimated analog/histogram scan |
 | `max_leak_check_duration_s` | 1800 s | Longest helium leak-check run |
@@ -123,6 +125,8 @@ Override at launch, e.g. `--limit max_cdem_voltage_v=2400 --limit max_filament_p
 - **Noise floor** (`NF0`-`NF7`) sets the speed and detection limit: from 2000 ms/amu and ~7e-15 A noise (NF0) to 15 ms/amu and ~5e-13 A (NF7). The factory default is NF4 (126 ms/amu).
 - **SRS RGA Ethernet adapter** login (`--option user=... --option password=...`, port 818) follows SRS's `srsinst.rga` driver and has not been tested on hardware. Generic raw-TCP serial servers need no login but must be set to 28,800 baud 8N1 with RTS/CTS.
 - After a scan or `measure_masses` the server switches the quadrupole RF off (`MR0`), as the manual recommends.
+- **`save_path`** (scans and `leak_check`) must end in `.csv` and must not exist yet: existing files are never overwritten. Missing folders are created, `~` is expanded, and the path is checked before the measurement starts.
+- **Link recovery.** If a scan's binary data doesn't arrive in time (or a safety tool interrupts it), the server discards the partial data, halts the scan with `IN0` and waits for its STATUS reply before the next command, so later replies stay in step.
 
 ## Hardware verification
 

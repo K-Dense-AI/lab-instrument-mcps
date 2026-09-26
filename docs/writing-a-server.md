@@ -36,7 +36,7 @@ servers/<domain>/<slug>/
 
 - A plain Python class that takes a `labmcp.Transport` (or, for SDK-based instruments, whatever handle the SDK gives you). No FastMCP imports.
 - Parse every reply strictly. Raise `InstrumentProtocolError` with a message that says **what the instrument said and what it means** ("Balance replied `S +`: overload, too much weight on the pan").
-- Hold `self.t.lock` for multi-step exchanges that must not interleave with other tool calls.
+- Hold `self.t.lock` for multi-step exchanges that must not interleave with other tool calls, but **only for one exchange at a time**. Tool calls run concurrently, and a SAFETY tool (stop, output off) has to take the same lock to send its command, so it waits for as long as another thread holds it. In long operations (sweeps, ramps, waits, acquisitions), take the lock per exchange and check a `threading.Event` that your stop tool sets between steps (see the Julabo and PalmSens drivers).
 - Implement `identify() -> dict` (manufacturer, model, serial, firmware…). `get_connection_info` shows it.
 - Implement `close()`.
 - Only implement commands you have **verified in the vendor's manual**. Cite the manual (title + document number/URL) in the module docstring.
@@ -89,11 +89,12 @@ If a HAZARD tool exists, a matching SAFETY tool (stop/off) must exist too.
 2. **Units in names**: `temperature_c`, `flow_ml_min`, `voltage_v`, `wavelength_nm`, `duration_s`. Use SI-ish units the field already uses.
 3. **Typed inputs with bounds**: `Annotated[float, Field(ge=0, le=2000, description="...")]`. Bounds that are hardware maxima go in `Field`; bounds a lab might want to tighten go in `Limit`s checked with `server.check(...)` **before** anything is sent.
 4. **Structured outputs**: return Pydantic models (or dicts) so clients get `structuredContent`. Include timestamps on measurements.
-5. **Long operations**: set `timeout=` on the tool, keep total runtime bounded by a `Limit`, and return summary statistics along with raw data.
-6. **Big data** (spectra, waveforms, images): return downsampled data plus summary stats by default, with a `max_points` parameter. Offer `save_path` to write full data to CSV/NPY/TIFF on disk.
-7. **Docstrings are prompts.** The first paragraph goes in the README tools table. Say what the tool does, what the prerequisites are, and what can go wrong.
-8. `instructions=`: 3–8 bullet points of instrument-specific operating guidance (e.g. "Always turn the heater off when finished").
-9. Instruments that **push** data (an analyzer sending results) should pass `connect_on_start=True` so the server connects at launch rather than on the first tool call.
+5. **Long operations**: keep total runtime bounded by a `Limit` and enforce that deadline in the driver, and return summary statistics along with raw data. Don't rely on the tool's `timeout=`: FastMCP can't interrupt a sync tool running in a worker thread, so the call still runs to completion (and keeps holding the transport lock).
+6. **Big data** (spectra, waveforms, images): return downsampled data plus summary stats by default, with a `max_points` parameter. Offer `save_path` to write full data to CSV/NPY/TIFF on disk. Check it with `labmcp.prepare_save_path(save_path, suffixes=(".csv",), overwrite=overwrite)` **before** acquiring, then open the returned path with mode `"x"` (or `"w"` if `overwrite`).
+7. **No NaN or infinity in results.** JSON has neither: FastMCP sends `null`, and clients that validate structured output against the schema reject a `null` in a `float` field, so the whole result is lost. Use `float | None` for values that can be missing or over range.
+8. **Docstrings are prompts.** The first paragraph goes in the README tools table. Say what the tool does, what the prerequisites are, and what can go wrong.
+9. `instructions=`: 3–8 bullet points of instrument-specific operating guidance (e.g. "Always turn the heater off when finished").
+10. Instruments that **push** data (an analyzer sending results) should pass `connect_on_start=True` so the server connects at launch rather than on the first tool call.
 
 ## 5. Tests (`tests/test_server.py`)
 

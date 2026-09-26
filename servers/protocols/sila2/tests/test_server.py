@@ -483,3 +483,309 @@ def test_undecodable_response_warns_command_was_executed():
             b.close()
     finally:
         srv.stop(0.2)
+
+
+# ------------------------------------------------------------------ regression tests (robustness review)
+
+BILLION_LAUGHS_FDL = """<?xml version="1.0"?>
+<!DOCTYPE Feature [
+  <!ENTITY a "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa">
+  <!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">
+  <!ENTITY c "&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;">
+]>
+<Feature SiLA2Version="1.0" FeatureVersion="1.0" Originator="org.example" Category="tests"
+         xmlns="http://www.sila-standard.org">
+  <Identifier>Bomb</Identifier><DisplayName>&c;</DisplayName><Description>d</Description>
+</Feature>"""
+
+
+def test_fdl_with_dtd_or_malformed_xml_is_refused():
+    with pytest.raises(ValueError, match="DOCTYPE"):
+        parse_feature(BILLION_LAUGHS_FDL)
+    with pytest.raises(ValueError, match="not well-formed"):
+        parse_feature("<Feature xmlns='http://www.sila-standard.org'><Identifier>X</Feature>")
+
+
+BOUNDS_FDL = """<?xml version="1.0" encoding="utf-8" ?>
+<Feature SiLA2Version="1.0" FeatureVersion="1.0" Originator="org.example" Category="tests"
+         xmlns="http://www.sila-standard.org">
+  <Identifier>Bounds</Identifier><DisplayName>b</DisplayName><Description>d</Description>
+  <Command><Identifier>Go</Identifier><DisplayName>g</DisplayName><Description>d</Description>
+    <Observable>No</Observable>
+    <Parameter><Identifier>Steps</Identifier><DisplayName>s</DisplayName><Description>d</Description>
+      <DataType><Constrained><DataType><Basic>Integer</Basic></DataType>
+        <Constraints><MaximalInclusive>10.0</MaximalInclusive></Constraints></Constrained></DataType></Parameter>
+    <Parameter><Identifier>Speed</Identifier><DisplayName>s</DisplayName><Description>d</Description>
+      <DataType><Constrained><DataType><Basic>Real</Basic></DataType>
+        <Constraints><MaximalInclusive>fast</MaximalInclusive></Constraints></Constrained></DataType></Parameter>
+    <Parameter><Identifier>Gain</Identifier><DisplayName>g</DisplayName><Description>d</Description>
+      <DataType><Basic>Real</Basic></DataType></Parameter>
+  </Command>
+</Feature>"""
+
+
+def test_unusual_constraint_bounds_and_huge_numbers_are_refused_cleanly():
+    """A vendor bound like "10.0" on an Integer, an unparseable bound, or an integer too big for a double
+    must refuse with FDLValidationError (fail closed), not leak ValueError/OverflowError."""
+    feat = parse_feature(BOUNDS_FDL)
+    params = feat.commands["Go"].parameters
+    conv = Converter(feat)
+    assert conv.convert(10, params[0].type, "Steps") == 10
+    with pytest.raises(FDLValidationError, match="<= 10.0"):
+        conv.convert(11, params[0].type, "Steps")
+    with pytest.raises(FDLValidationError, match="not a number"):
+        conv.convert(1.0, params[1].type, "Speed")
+    with pytest.raises(FDLValidationError, match="too large"):
+        conv.convert(10**400, params[2].type, "Gain")
+
+
+class _FakeService:
+    def __init__(self, fdls):
+        self._fdls = fdls
+        self.ImplementedFeatures = type("P", (), {"get": staticmethod(lambda: list(fdls))})()
+
+    def GetFeatureDefinition(self, fqi):  # noqa: N802 - sila2 naming
+        return type("R", (), {"FeatureDefinition": self._fdls[fqi]})()
+
+
+class _FakeClient:
+    def __init__(self, fdls, loaded):
+        self.SiLAService = _FakeService(fdls)
+        self._features = {name: object() for name in loaded}
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+def test_features_sila2_could_not_load_are_not_offered():
+    """A feature whose FDL sila2 rejected (so the client has no attribute for it) must not be listed:
+    calling it used to leak a raw AttributeError. A DTD-bearing FDL is skipped, not expanded."""
+    from labmcp import AuditLog
+
+    fdls = {
+        "org.labmcp/simulation/TemperatureController/v1": TEMPERATURE_CONTROLLER_FDL,
+        "org.example/tests/TypeZoo/v2": TYPES_FDL,
+        "org.example/tests/Bomb/v1": BILLION_LAUGHS_FDL,
+    }
+    audit = AuditLog()
+    client = _FakeClient(fdls, loaded={"SiLAService", "TemperatureController"})
+    b = SilaBridge(client, address="fake:1", audit=audit)
+    try:
+        assert set(b.features) == {"TemperatureController"}
+        events = " ".join(e["data"] for e in audit.recent(50))
+        assert "TypeZoo" in events and "Bomb" in events
+    finally:
+        b.close()
+    assert client.closed
+
+
+def test_open_client_deadline_leaves_no_blocking_thread():
+    """A server that accepts TCP but never answers: the connect deadline must fire and must not leave a
+    non-daemon thread behind (it was joined at interpreter exit, hanging `--check` and shutdown)."""
+    import socket
+    import threading
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    before = set(threading.enumerate())
+    try:
+        with pytest.raises(InstrumentConnectionError, match="within 0.5 s"):
+            open_client("127.0.0.1", port, insecure=False, root_certs=b"not a pem", private_key=None,
+                        cert_chain=None, timeout=0.5)
+        leftover = [t for t in threading.enumerate() if t not in before and t.is_alive() and not t.daemon]
+        assert leftover == []
+    finally:
+        listener.close()
+
+
+def test_call_deadline_hands_late_results_to_cleanup(bridge):
+    import time
+
+    late = []
+    with pytest.raises(drv.InstrumentTimeout, match="did not answer"):
+        bridge._call(lambda: (time.sleep(0.3), "sub")[1], "testing", timeout=0.05, on_late=late.append)
+    for _ in range(50):
+        if late:
+            break
+        time.sleep(0.02)
+    assert late == ["sub"]
+
+
+def test_cancel_accepts_any_uuid_spelling(bridge):
+    # braces / upper case are canonicalised; the server then reports the unknown execution
+    with pytest.raises(InstrumentProtocolError, match="InvalidCommandExecutionUUID"):
+        bridge.cancel("{00000000-0000-4000-8000-00000000ABCD}")
+
+
+def test_non_finite_progress_is_reported_as_none(bridge):
+    from types import SimpleNamespace
+
+    inst = SimpleNamespace(status=None, done=False, progress=float("nan"), estimated_remaining_time=None,
+                           lifetime_of_execution=None)
+    ex_id = "11111111-2222-4333-8444-555555555555"
+    bridge.executions[ex_id] = drv.Execution(ex_id, "TemperatureController", "ControlTemperature", inst, 0.0, {})
+    try:
+        assert bridge.status(ex_id)["progress"] is None
+    finally:
+        bridge.executions.pop(ex_id)
+
+
+PROBE_FDL = """<?xml version="1.0" encoding="utf-8" ?>
+<Feature SiLA2Version="1.0" FeatureVersion="1.0" Originator="org.example" Category="tests"
+         xmlns="http://www.sila-standard.org">
+  <Identifier>Probe</Identifier><DisplayName>Probe</DisplayName><Description>d</Description>
+  <Property><Identifier>Silent</Identifier><DisplayName>s</DisplayName><Description>never sends a value</Description>
+    <Observable>Yes</Observable><DataType><Basic>Real</Basic></DataType></Property>
+  <Property><Identifier>Broken</Identifier><DisplayName>b</DisplayName><Description>subscription fails</Description>
+    <Observable>Yes</Observable><DataType><Basic>Real</Basic></DataType></Property>
+</Feature>"""
+
+
+@pytest.fixture(scope="module")
+def probe_bridge():
+    import socket
+    from queue import Queue
+
+    from sila2.framework import Feature
+    from sila2.server import FeatureImplementationBase, SilaServer
+
+    class Impl(FeatureImplementationBase):
+        def __init__(self, parent_server):
+            super().__init__(parent_server=parent_server)
+            self._Silent_producer_queue = Queue()  # nothing is ever put: no value is sent
+            self._Broken_producer_queue = Queue()
+
+        def Silent_on_subscription(self, *, metadata):  # noqa: N802
+            return None
+
+        def Broken_on_subscription(self, *, metadata):  # noqa: N802
+            raise RuntimeError("sensor disconnected")
+
+    import logging
+
+    logging.getLogger("Probe").setLevel(logging.CRITICAL)
+    srv = SilaServer("probe", "Probe", "d", "1.0", "https://example.org")
+    srv.set_feature_implementation(Feature(PROBE_FDL), Impl(srv))
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    srv.start_insecure("127.0.0.1", port, enable_discovery=False)
+    client = open_client("127.0.0.1", port, insecure=True, root_certs=None, private_key=None, cert_chain=None,
+                         timeout=10)
+    b = SilaBridge(client, address=f"127.0.0.1:{port}", call_timeout=10)
+    yield b
+    b.close()
+    srv.stop(0.2)
+
+
+def test_observable_property_read_timeout_releases_stream_and_thread(probe_bridge):
+    """sila2's ObservableProperty.get() blocks forever if no value comes; the bridge must give up at the
+    deadline AND cancel the subscription so no thread stays blocked on it."""
+    import threading
+    import time
+
+    with pytest.raises(drv.InstrumentTimeout, match="did not answer"):
+        probe_bridge.get_property("Probe", "Silent", timeout=0.5)
+    for _ in range(100):
+        stuck = [t for t in threading.enumerate() if t.name.startswith("labmcp-sila2") and t.is_alive()]
+        if not stuck:
+            break
+        time.sleep(0.02)
+    assert stuck == []
+
+
+def test_failed_subscription_is_reported_not_silently_empty(probe_bridge):
+    with pytest.raises(InstrumentProtocolError, match="sensor disconnected"):
+        probe_bridge.subscribe_property("Probe", "Broken", 0.5, 10, 1.0)
+    silent = probe_bridge.subscribe_property("Probe", "Silent", 0.3, 10, 1.0)
+    assert silent["updates"] == []
+
+
+def test_invalid_timeout_options_are_refused():
+    for bad in ("0", "nan", "-5", "100000", "soon"):
+        server.configure(simulate=True, options={"call_timeout_s": bad})
+        info = server._connection_info()
+        assert info["connected"] is False and "call_timeout_s" in info["error"], bad
+    server.configure(simulate=True, options={})
+
+
+async def test_tool_timeouts_cover_the_longest_waits():
+    from labmcp_sila2 import server as srv_mod
+
+    longest_call = srv_mod.MAX_WAIT_S + 2 * drv.MAX_CALL_TIMEOUT_S
+    for name in ("call_command", "subscribe_property"):
+        assert (await server.mcp.get_tool(name)).timeout > longest_call
+    assert (await server.mcp.get_tool("discover_servers")).timeout > 120 + 3
+
+
+def test_discovery_suggests_parseable_addresses_and_short_lookups(monkeypatch):
+    import time
+    from types import SimpleNamespace
+
+    import zeroconf
+    from labmcp_sila2.server import _address_for
+
+    assert parse_address(_address_for({"addresses": ["fe80::1"], "port": 50052})) == ("fe80::1", 50052)
+    assert _address_for({"addresses": ["10.0.0.5"], "port": 50052}) == "10.0.0.5:50052"
+    assert _address_for({"addresses": [], "port": 50052}) == ""
+
+    seen = []
+
+    class FakeZC:
+        def get_service_info(self, type_, name, timeout=0):
+            seen.append(timeout)
+            return None
+
+        def close(self):
+            pass
+
+    class FakeBrowser:
+        def __init__(self, zc, type_, listener):
+            listener.add_service(zc, type_, "x._sila._tcp.local.")
+
+        def cancel(self):
+            pass
+
+    monkeypatch.setattr(zeroconf, "Zeroconf", FakeZC)
+    monkeypatch.setattr(zeroconf, "ServiceBrowser", FakeBrowser)
+    monkeypatch.setattr(drv, "time", SimpleNamespace(sleep=lambda s: None, time=time.time, monotonic=time.monotonic))
+    assert drv.discover(120) == []
+    assert seen and max(seen) <= 3000  # browser.cancel() joins the thread running these lookups
+
+    def no_network():
+        raise OSError("no multicast interface")
+
+    monkeypatch.setattr(zeroconf, "Zeroconf", no_network)
+    with pytest.raises(InstrumentConnectionError, match="mDNS discovery could not start"):
+        drv.discover(1)
+
+
+def test_self_cancelled_stream_error_counts_as_end():
+    """After our own cancel(), sila2 may queue the stream's CANCELLED error before the end marker."""
+
+    class Code:
+        name = "CANCELLED"
+
+    class Rpc(Exception):
+        def code(self):
+            return Code()
+
+    class Wrapped(Exception):
+        exception = Rpc()
+
+    class Sub:
+        def __init__(self, exc):
+            self.exc = exc
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            raise self.exc
+
+    assert drv._next_or_end(Sub(Wrapped("CANCELLED - Locally cancelled"))) is drv._END
+    with pytest.raises(ValueError, match="real"):
+        drv._next_or_end(Sub(ValueError("real error")))

@@ -1,6 +1,6 @@
 [project]
 name = "labmcp-epics"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP server for EPICS Channel Access (accelerators, synchrotrons, neutron sources, telescopes, physics labs): read, monitor and (guarded) write process variables via caproto."
 readme = "README.md"
 license = "Apache-2.0"

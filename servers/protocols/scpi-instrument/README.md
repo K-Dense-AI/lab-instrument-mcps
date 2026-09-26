@@ -57,7 +57,7 @@ claude mcp add scope -- uvx labmcp-scpi --address visa://TCPIP0::192.168.1.50::i
       "args": [
         "labmcp-scpi", "--address", "tcp://192.168.1.50:5025",
         "--option", "safe_state=OUTP OFF",
-        "--option", "write_denylist=^OUTP\\d*(:STAT)? (ON|1)$"
+        "--option", "write_denylist=^OUTP\\d*(:STAT)? (?!OFF\\b)"
       ]
     }
   }
@@ -81,7 +81,7 @@ Add `--read-only` to allow only queries. In read-only mode `scpi_write`, `scpi_b
 | `query_binary_block` | 👁 read | Read an IEEE 488.2 definite-length binary block (waveforms, trace data, screenshots, FORMat REAL/INTeger readings). The query must pass the same read-only checks as `scpi_query`. Returns length, SHA-256 and (optionally) decoded values with summary statistics, downsampled to max_points; use save_path for the full data. Blocks larger than the `max_block_bytes` limit are discarded. |
 | `reconnect` | 🛑 safety | Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged). |
 | `reset_instrument` | ⚠️ hazard | Reset the instrument to its default settings (*RST, then *CLS), wait for completion and check errors. SCPI requires outputs OFF after *RST, but every other setting (levels, ranges, triggers, limits) returns to its default and some instruments differ: check the manual before resetting anything connected to a device under test. |
-| `scpi_batch` | ⚠️ hazard | Run a short sequence of SCPI commands and queries in order, checking the error queue after every step. Every step is checked against the command policy BEFORE the first one is sent, so a refused step means nothing was sent. Returns per-step replies and errors. |
+| `scpi_batch` | ⚠️ hazard | Run a short sequence of SCPI commands and queries in order, checking the error queue after every step. Every step is checked against the command policy BEFORE the first one is sent, so a refused step means nothing was sent. Returns per-step replies and errors. Steps not started within ~14 minutes are not sent (status not_run). |
 | `scpi_primer` | 👁 read | Concise SCPI syntax guide (long/short forms, queries, compound commands, common commands, error queue, binary blocks) plus this server's active command policy. Works without a connection. |
 | `scpi_query` | 👁 read | Send ONE read-only SCPI query and return the instrument's text reply. |
 | `scpi_write` | ⚠️ hazard | Send any SCPI program message (settings, compound 'A;B' messages, queries with side effects) and then read the error queue. If the message contains a query, its reply is returned. This can change the instrument's state, including switching outputs on; say what the command does before calling it. Commands in the lab's denylist, or outside its allowlist, are refused before anything is sent. |
@@ -99,36 +99,37 @@ A generic server cannot know which SCPI commands are dangerous on *your* instrum
 | Single query only | `scpi_query`, `query_binary_block` (READ, allowed in read-only mode) | The header must end in `?` (parameters such as `VOLT? MAX` are fine). Messages with `;`, line breaks or control characters are refused. |
 | Built-in side-effect queries | `scpi_query`, `query_binary_block` | `*TST?` (self-test), `*CAL?`, `CALibration…?` and `DIAGnostic…?` are refused here. They must go through `scpi_write`. |
 | `--option query_denylist=REGEX` | `scpi_query`, `query_binary_block` | Extra queries that your lab treats as having side effects, e.g. `^(MEAS\|READ)` on an SMU. They then need `scpi_write`. |
-| `--option write_denylist=REGEX` (alias `denylist`) | every raw tool | No tool ever sends a matching command. |
-| `--option write_allowlist=REGEX` | `scpi_write`, `scpi_batch`, `reset_instrument` | If set, these tools may only send commands that match (queries that `scpi_query` accepts are always allowed). Compound `;` messages are refused. |
+| `--option write_denylist=REGEX` (alias `denylist`) | every raw tool | No tool ever sends a matching command. Setting both names to different patterns is a configuration error. |
+| `--option write_allowlist=REGEX` | `scpi_write`, `scpi_batch`, `reset_instrument` | If set, these tools may only send commands that match (queries that `scpi_query` accepts are always allowed). Any message containing `;` is refused, even inside quotes. |
 | `--option safe_state=MESSAGE` | `apply_safe_state` (SAFETY) | The program message that makes *your* instrument safe, e.g. `OUTP OFF`. It is sent as-is and never blocked by the lists. |
 | `--option error_query=QUERY` | all writes | Error-queue query, default `SYST:ERR?`. |
 
 Matching rules:
 - Patterns are Python regular expressions, matched case-insensitively.
-- Each `;`-separated message unit is checked in two forms. The first is the unit as sent, upper-cased, with collapsed whitespace and no leading colon. The second reduces every mnemonic to its SCPI short form (SCPI-99 Vol. 1 §6.2.1): `:OUTPut1:STATe ON` becomes `OUTP1:STAT ON`. So `^OUTP\d*(:STAT)? (ON|1)$` catches `OUTP ON`, `outp:stat 1`, `VOLT 5;:OUTPut:STATe ON` and `OUTPut2 ON`.
-- The denylist uses `re.search`. The allowlist must match a whole unit.
+- Each `;`-separated message unit is checked in two forms. The first is the unit as sent, upper-cased, with collapsed whitespace and no leading colon. The second reduces every mnemonic to its SCPI short form (SCPI-99 Vol. 1 §6.2.1): `:OUTPut1:STATe ON` becomes `OUTP1:STAT ON`. So `^OUTP\d*(:STAT)? (?!OFF\b)` catches `OUTP ON`, `outp:stat 1`, `VOLT 5;:OUTPut:STATe ON` and `OUTPut2 ON`.
+- SCPI booleans accept any number (it is rounded, and anything non-zero means ON), so `OUTP 2`, `OUTP 1.0` and `OUTP #H1` also switch an output on. Deny "everything except OFF", as above, rather than listing `(ON|1)`.
+- The denylist uses `re.search`. It also resolves relative headers (`OUTP:POL NORM;STAT ON` is checked as `OUTP:STAT ON`) and splits at every `;`, even inside quotes. The allowlist must match a whole unit.
 - Every step of `scpi_batch` is checked **before the first step is sent**.
 
 Examples:
 
 ```bash
-# Power supply: the agent may set levels, but only a human switches the output on
---option 'write_denylist=^OUTP\d*(:STAT)? (ON|1)$' --option 'safe_state=OUTP OFF'
+# Power supply: the agent may set levels and switch the output OFF, but only a human switches it on
+--option 'write_denylist=^OUTP\d*(:STAT)? (?!OFF\b)' --option 'safe_state=OUTP OFF'
 # DMM: allow measurement configuration only
 --option 'write_allowlist=(CONF|SENS|TRIG|INIT|FORM|ABOR)(:\S+)*( .*)?'
 # SMU: measuring can switch the output on, so require confirmation for it
 --option 'query_denylist=^(MEAS|READ)' --option 'safe_state=OUTP OFF'
 ```
 
-The environment variable `LABMCP_OPTIONS` splits on commas. Pass regular expressions that contain commas on the command line instead.
+The environment variable `LABMCP_OPTIONS` splits on commas. For regular expressions that contain commas, pass them on the command line or give `LABMCP_OPTIONS` as a JSON object (`{"write_denylist": "..."}`).
 
 ## Safety limits
 
 | Limit | Default | Meaning |
 |---|---|---|
 | `max_operation_wait_s` | 300 s | Longest `*OPC?` wait an agent may request (`wait_operation_complete`) |
-| `max_block_bytes` | 16777216 bytes | Largest binary block the server reads. Larger blocks are discarded before their payload is read. |
+| `max_block_bytes` | 16777216 bytes | Largest binary block the server keeps. The size is checked from the block header; a larger payload is thrown away as it arrives (VISA: device clear) and never held in memory. |
 
 Override at launch: `--limit max_block_bytes=67108864`. This server has no voltage or current limits because it cannot interpret arbitrary commands. Set limits on the instrument itself (OVP/OCP, compliance, output protection), use a denylist, or use an instrument-specific server.
 
@@ -148,7 +149,9 @@ Override at launch: `--limit max_block_bytes=67108864`. This server has no volta
 - **`*RST`**: SCPI-99 Vol. 2 §15.12 requires `OUTPut:STATe OFF` after `*RST`. But `*RST` also resets levels, ranges, limits and trigger settings, and not every instrument complies.
 - The error queue is read (and so cleared) after every `scpi_write`/`scpi_batch` step. The errors appear in the result. A query the instrument doesn't recognise produces **no reply**: the server times out (5 s by default, `--timeout` to change), resynchronises, and reports the `-113` from the queue.
 - Instruments that don't implement `SYSTem:ERRor?` (some older IEEE 488.2-only gear) report `error_check: "unavailable"`. Set `--option error_query=…` if your instrument uses a different error query.
-- `query_binary_block` reads definite-length blocks (`#<n><len><data>`) only. Indefinite `#0` blocks are refused. Byte order follows `FORMat:BORDer` (NORMal = big-endian).
+- `query_binary_block` reads definite-length blocks (`#<n><len><data>`) only. Indefinite `#0` blocks are refused. Byte order follows `FORMat:BORDer` (NORMal = big-endian). `timeout_s` covers the whole transfer. Decoded NaN and infinite values are returned as `null` (and counted in `non_finite`); the saved CSV keeps them as `nan`/`inf`.
+- `save_path` must end in `.csv` (decoded values with `decode_as`, otherwise the raw bytes), `.bin`, `.dat`, `.raw`, `.txt` or an image extension (`.png`, `.bmp`, `.jpg`, `.jpeg`, `.gif`, `.tif`, `.tiff`). `~` is expanded and missing folders are created. An existing file is never replaced unless you pass `overwrite=true`, and the check happens before anything is sent to the instrument.
+- `scpi_batch` stops starting new steps after about 14 minutes (its tool timeout is 15 minutes). Steps that were not sent are marked `not_run`.
 - Text is sent as ASCII. Commands with control or non-ASCII characters are refused, and the server adds the LF terminator.
 - A denylist is a guard rail, not a guarantee. It matches text, so vendor-specific aliases or macros (`*DMC`, user-defined sequences) can evade it. Keep the instrument's own protection limits set.
 

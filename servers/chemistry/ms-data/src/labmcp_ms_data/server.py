@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import numpy as np
@@ -20,6 +21,12 @@ def connect(ctx: ConnectContext) -> MsDataDriver:
     address = ctx.address
     if address and address.startswith("file://"):
         address = address[len("file://") :]
+    if not address and not ctx.simulate and Path.cwd().resolve() == Path(Path.cwd().anchor):
+        # MCP clients often start servers in '/': that would sandbox nothing.
+        raise InstrumentProtocolError(
+            "No data folder configured and the current directory is the filesystem root. Start the "
+            "server with `--address <folder with your MS files>`."
+        )
     root = DataRoot(address)
     converter = {k: v for k in ("converter", "converter_path", "docker_image") if (v := ctx.option(k))}
     if converter.get("converter", "auto").lower() not in CONVERTERS:
@@ -49,7 +56,8 @@ sandboxed to one data folder (`--address`, default: the current directory).
   Tolerances are in ppm (default) or Da; use ~5-10 ppm for Orbitrap/TOF data, 0.3-0.5 Da for
   ion traps / low-resolution data.
 - Chromatograms and spectra are summarised/downsampled (`max_points`, `top_n`); pass `save_path`
-  (a CSV inside the data folder) when the user needs the full data.
+  (a new .csv inside the data folder; existing files are kept unless `overwrite=true`) when the user
+  needs the full data.
 - XIC areas are trapezoidal integrals over RT in minutes without baseline subtraction; treat them
   as relative quantities, not absolute amounts.
 - The first call on a large file indexes every spectrum and can take tens of seconds.
@@ -274,8 +282,10 @@ MaxPoints = Annotated[
     int, Field(ge=10, le=10000, description="Maximum points returned (downsampled, max per bin)")
 ]
 SavePath = Annotated[
-    str | None, Field(description="Optional CSV path inside the data folder for the full-resolution data")
+    str | None,
+    Field(description="Optional new .csv file inside the data folder for the full-resolution data"),
 ]
+Overwrite = Annotated[bool, Field(description="Allow replacing an existing save_path file")]
 RtStart = Annotated[float | None, Field(ge=0, description="Only use spectra at or after this RT (min)")]
 RtEnd = Annotated[float | None, Field(ge=0, description="Only use spectra at or before this RT (min)")]
 Tolerance = Annotated[float, Field(gt=0, le=1000, description="m/z tolerance (± this value)")]
@@ -306,11 +316,25 @@ def _rt_mask(t: ScanTable, start: float | None, end: float | None) -> np.ndarray
     return mask
 
 
-def _save(save_path: str | None, header: list[str], cols: list[Any]) -> str | None:
+def _save_target(save_path: str | None, overwrite: bool) -> Path | None:
+    """Check save_path up front (sandbox, .csv, not an existing file), before any slow work."""
     if not save_path:
         return None
-    p = _drv().root.output_path(save_path, suffix=".csv")
-    return analysis.write_csv(p, header, cols)
+    return _drv().root.output_path(save_path, suffix=".csv", overwrite=overwrite)
+
+
+def _save(target: Path | None, header: list[str], cols: list[Any], overwrite: bool) -> str | None:
+    if target is None:
+        return None
+    try:
+        return analysis.write_csv(target, header, cols, overwrite=overwrite)
+    except FileExistsError:
+        raise InstrumentProtocolError(
+            f"{target.name} was created by something else meanwhile and was not overwritten. Choose another "
+            "save_path or pass overwrite=true."
+        ) from None
+    except OSError as exc:
+        raise InstrumentProtocolError(f"Could not write {target}: {exc}") from exc
 
 
 def _window(start: float | None, end: float | None) -> tuple[float, float] | None:
@@ -438,8 +462,10 @@ def _chromatogram(
     rt_end_min: float | None,
     max_points: int,
     save_path: str | None,
+    overwrite: bool,
 ) -> Chromatogram:
     drv, run = _open(path)
+    save_to = _save_target(save_path, overwrite)
     t = run.table
     mask = _rt_mask(t, rt_start_min, rt_end_min) & (t.ms_level == ms_level)
     idx = np.flatnonzero(mask)
@@ -454,11 +480,11 @@ def _chromatogram(
     if not np.isfinite(y).any():
         raise InstrumentProtocolError(f"This file does not record the {kind} values for its spectra.")
     y = np.nan_to_num(y, nan=0.0)
-    xs, ys = analysis.downsample_max(rt, y, max_points)
+    keep = analysis.downsample_max_indices(y, max_points)
+    xs, ys = rt[keep].tolist(), y[keep].tolist()
     bp: list[float | None] | None = None
     if kind == "BPC":
-        lookup = dict(zip(rt.tolist(), bpmz.tolist(), strict=True))
-        bp = [(_opt(lookup[x]) if x in lookup else None) for x in xs]
+        bp = [_opt(v) for v in bpmz[keep]]  # by index: equal RTs must not swap base-peak m/z values
         if run.format == "bruker_tdf":
             notes.append("TDF stores the base-peak intensity per frame but not its m/z.")
     i = int(np.argmax(y))
@@ -483,7 +509,7 @@ def _chromatogram(
         max_at_rt_min=round(float(rt[i]), 4),
         median_intensity=float(np.median(y)),
         area=analysis.trapezoid(y, rt),
-        saved_to=_save(save_path, header, cols),
+        saved_to=_save(save_to, header, cols, overwrite),
         notes=notes,
     )
 
@@ -499,11 +525,12 @@ def get_tic(
     rt_end_min: RtEnd = None,
     max_points: MaxPoints = 500,
     save_path: SavePath = None,
+    overwrite: Overwrite = False,
 ) -> Chromatogram:
     """Total ion chromatogram (sum of all intensities per spectrum vs retention time) for one MS
     level, downsampled to `max_points` (keeping the maximum in each bin so peaks survive).
     Returns the apex, median and area; `save_path` writes every point to CSV."""
-    return _chromatogram("TIC", path, ms_level, rt_start_min, rt_end_min, max_points, save_path)
+    return _chromatogram("TIC", path, ms_level, rt_start_min, rt_end_min, max_points, save_path, overwrite)
 
 
 @mcp.tool(**READ, timeout=900)
@@ -514,11 +541,12 @@ def get_bpc(
     rt_end_min: RtEnd = None,
     max_points: MaxPoints = 500,
     save_path: SavePath = None,
+    overwrite: Overwrite = False,
 ) -> Chromatogram:
     """Base peak chromatogram (intensity of the most intense peak per spectrum, with its m/z) vs
     retention time, downsampled to `max_points`. Cleaner than the TIC for spotting eluting
     compounds; the base-peak m/z tells you which ion dominates each part of the run."""
-    return _chromatogram("BPC", path, ms_level, rt_start_min, rt_end_min, max_points, save_path)
+    return _chromatogram("BPC", path, ms_level, rt_start_min, rt_end_min, max_points, save_path, overwrite)
 
 
 @mcp.tool(**READ, timeout=1800)
@@ -532,6 +560,7 @@ def extract_ion_chromatogram(
     rt_end_min: RtEnd = None,
     max_points: MaxPoints = 300,
     save_path: SavePath = None,
+    overwrite: Overwrite = False,
 ) -> XICResult:
     """Extracted ion chromatogram (XIC/EIC) for one or more m/z values: the summed intensity
     within ± tolerance (ppm or Da) in every MS1 spectrum (or another `ms_level`). For each target
@@ -542,6 +571,7 @@ def extract_ion_chromatogram(
     if any(m <= 0 for m in mz):
         raise InstrumentProtocolError("m/z values must be positive.")
     drv, run = _open(path)
+    save_to = _save_target(save_path, overwrite)
     t = run.table
     idx = np.flatnonzero(_rt_mask(t, rt_start_min, rt_end_min) & (t.ms_level == ms_level))
     if idx.size == 0:
@@ -591,7 +621,7 @@ def extract_ion_chromatogram(
                 f"m/z {target:.4f}: only {pk.points_across_peak} points across the peak; the area is imprecise."
             )
     header = ["rt_min"] + [f"xic_{m:.4f}" for m in targets]
-    saved = _save(save_path, header, [rt, *traces])
+    saved = _save(save_to, header, [rt, *traces], overwrite)
     return XICResult(
         path=drv.display_path(run),
         simulated=drv.simulated,
@@ -622,6 +652,7 @@ def get_spectrum(
     mz_min: Annotated[float | None, Field(ge=0, description="Only consider peaks above this m/z")] = None,
     mz_max: Annotated[float | None, Field(ge=0, description="Only consider peaks below this m/z")] = None,
     save_path: SavePath = None,
+    overwrite: Overwrite = False,
 ) -> SpectrumResult:
     """Read one spectrum, chosen by `index`, `scan_number`, `native_id` or nearest `rt_min`
     (give exactly one). Returns MS level, RT, polarity, centroid/profile, precursor m/z and
@@ -633,6 +664,9 @@ def get_spectrum(
     given = [x is not None for x in (index, scan_number, native_id, rt_min)]
     if sum(given) != 1:
         raise InstrumentProtocolError("Give exactly one of index, scan_number, native_id or rt_min.")
+    if mz_min is not None and mz_max is not None and mz_min > mz_max:
+        raise InstrumentProtocolError(f"mz_min ({mz_min}) is above mz_max ({mz_max}).")
+    save_to = _save_target(save_path, overwrite)
     if index is not None:
         if index >= len(t):
             raise InstrumentProtocolError(f"index {index} is out of range (0-{len(t) - 1}).")
@@ -694,7 +728,7 @@ def get_spectrum(
         )
     if rt_min is not None and abs(float(t.rt_min[i]) - rt_min) > 0.5:
         notes.append(f"The nearest MS{level} spectrum is {abs(float(t.rt_min[i]) - rt_min):.2f} min away.")
-    saved = _save(save_path, ["mz", "intensity"], [mzs, inten])
+    saved = _save(save_to, ["mz", "intensity"], [mzs, inten], overwrite)
     k = int(np.argmax(wi)) if wi.size else None
     return SpectrumResult(
         path=drv.display_path(run),
@@ -815,7 +849,10 @@ def summarise_run(path: PathArg = None) -> RunQC:
             ]
         if ms1.size >= 2:
             cycle = round(float(np.median(np.diff(rt1))) * 60.0, 3)
-            counts = np.diff(np.append(ms1, len(t))) - 1  # spectra between consecutive MS1 scans
+            # MS2 spectra after each MS1 scan up to the next one (MS3 and other scans are not counted)
+            cum2 = np.concatenate(([0], np.cumsum(t.ms_level == 2)))
+            bounds = np.append(ms1, len(t))
+            counts = cum2[bounds[1:]] - cum2[bounds[:-1]]
             per_cycle_med = float(np.median(counts))
             per_cycle_mean = round(float(np.mean(counts)), 2)
             per_cycle_max = int(counts.max())
@@ -896,6 +933,11 @@ def convert_to_mzml(
             "Simulation mode has no vendor files to convert. Start the server with --address <data folder>."
         )
     src = drv.root.resolve(path)
+    if src == drv.root.root:  # its parent folder (mounted for Docker, default output) is outside the sandbox
+        raise InstrumentProtocolError(
+            "The data folder itself cannot be converted; start the server with --address set to the folder "
+            "that contains the run."
+        )
     fmt = detect_format(src)
     if fmt is None:
         raise InstrumentProtocolError(f"{path!r} is not a recognised MS data file or vendor folder.")
@@ -934,9 +976,12 @@ def convert_to_mzml(
     if dry_run:
         report.notes.append("Dry run: nothing was executed.")
         return report
-    out_dir.mkdir(parents=True, exist_ok=True)
-    if plan.output.exists():
-        plan.output.unlink()
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        if plan.output.exists():
+            plan.output.unlink()
+    except OSError as exc:
+        raise InstrumentProtocolError(f"Cannot prepare the output {report.output}: {exc}") from exc
     server.audit.event(f"convert: {' '.join(plan.argv)}", "converter")
     res = run_conversion(plan, timeout_s)
     report.duration_s = round(res.duration_s, 1)
@@ -944,6 +989,12 @@ def convert_to_mzml(
     report.log_tail = (res.stderr_tail or res.stdout_tail).strip()
     if res.timed_out:
         report.notes.append(f"Timed out after {timeout_s:g} s; the converter was stopped.")
+        if plan.output.exists():  # it did not exist before the run, so this is a truncated file
+            try:
+                plan.output.unlink()
+                report.notes.append(f"The incomplete {report.output} was deleted.")
+            except OSError as exc:
+                report.notes.append(f"The incomplete {report.output} could not be deleted ({exc}); do not use it.")
         return report
     if plan.output.exists():
         report.success = res.returncode == 0

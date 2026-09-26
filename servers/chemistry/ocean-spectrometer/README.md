@@ -68,7 +68,7 @@ Add `--read-only` to allow acquisitions and absorbance measurements with the pre
 <!-- TOOLS:START -->
 | Tool | Kind | Description |
 |---|---|---|
-| `acquire_spectrum` | 👁 read | Acquire an intensity spectrum (raw counts) with optional averaging, boxcar smoothing and corrections. Returns downsampled (wavelength, counts), summary statistics, the most prominent peaks with FWHM, and a saturation check; `save_path` writes the full spectrum. |
+| `acquire_spectrum` | 👁 read | Acquire an intensity spectrum (raw counts) with optional averaging, boxcar smoothing and corrections. Returns downsampled (wavelength, counts), summary statistics, the most prominent peaks with FWHM, and a saturation check; `save_path` writes the full spectrum to a new .csv file (an existing file is never overwritten). |
 | `auto_integration_time` | 🎛 control | Adjust the integration time until the brightest raw pixel (optionally within a wavelength window) is within the target band of saturation (default 70-85 %). Stays within the device limits and the `max_integration_time_ms` safety limit. Re-take dark/reference afterwards. |
 | `detector_cooling_off` | 🛑 safety | Switch the detector thermo-electric cooler off (the detector warms to ambient). Does nothing on spectrometers without a TEC. |
 | `find_peaks` | 👁 read | Find peaks (or dips) with position, height, prominence and FWHM in the most recent spectrum (intensity, absorbance or transmittance). Acquires a fresh intensity spectrum if none has been taken yet. |
@@ -96,7 +96,7 @@ Add `--read-only` to allow acquisitions and absorbance measurements with the pre
 | `max_acquisition_duration_s` | 300 s | Longest single acquisition (scans × integration time) |
 | `min_tec_setpoint_c` | −20 °C | Coldest TEC setpoint (TE-cooled models). The QE Pro's temperature readback is linearised for −20…40 °C |
 
-Override at launch: `--limit max_integration_time_ms=60000`.
+Override at launch: `--limit max_integration_time_ms=60000`. Whatever the limits say, one acquisition (scans × integration time, plus the spectrum discarded after an integration-time change) must fit in 540 s, the time one tool call may take; `auto_integration_time` stops early for the same reason and says so.
 
 ## Example prompts
 
@@ -109,14 +109,15 @@ Override at launch: `--limit max_integration_time_ms=60000`.
 ## Notes
 
 - **Raw counts.** Intensities are detector counts, not irradiance. Radiometric calibration is out of scope.
-- **Saturation** is judged on the raw ADC counts of every averaged scan: a pixel is saturated at ≥ 98 % of `max_intensity`. Saturated pixels are flagged, and they're excluded from absorbance/transmittance. seabreeze notes that some detectors saturate below `max_intensity`, so keep peaks at 70–85 %.
+- **Saturation** is judged on the raw ADC counts of every averaged scan: a pixel is saturated at ≥ 98 % of `max_intensity`. Saturated pixels are flagged, and they're excluded from absorbance/transmittance (with boxcar smoothing, so are the pixels within the boxcar half width of them). seabreeze notes that some detectors saturate below `max_intensity`, so keep peaks at 70–85 %.
 - **Corrections.** `correct_dark_counts` subtracts the mean of the optically masked electric-dark pixels; `correct_nonlinearity` applies the EEPROM polynomial. The driver reads raw spectra and applies both corrections with the same formula as `seabreeze.spectrometers.Spectrometer.intensities`, so saturation can still be detected on raw data. A stored dark (`store_dark_reference`) is still required for absorbance, because electric-dark correction doesn't remove fixed-pattern dark signal.
 - **Absorbance** is A = −log10((S − D)/(R − D)). Pixels where the reference has less than 0.5 % of its peak signal above dark, or where the reference or sample is saturated, are returned as `null`. The dark, reference and sample must share integration time, boxcar and corrections; the server enforces this and asks you to re-take references when they differ.
 - **First spectrum after an integration-time change is discarded.** It may have been integrated partly with the old setting; the QE Pro manual notes that it returns the most recently *completed* spectrum.
 - **Boxcar** follows OceanView's convention: `boxcar_half_width` = pixels averaged on each side. Peaks are found on the full-resolution spectrum. The returned curve is bin-averaged down to `max_points`.
 - **TEC** tools use seabreeze's `thermo_electric` feature (`enable_tec`, `set_temperature_setpoint_degrees_celsius`, `read_temperature_degrees_celsius`) and only work when the backend exposes it for your model. In pyseabreeze 2.11 that is only the NIRQuest512. For the QE Pro it depends on libseabreeze (cseabreeze); this is **unverified on hardware**. The QE Pro manual says the TEC cools only ~15–40 °C below ambient.
 - **Not exposed:** shutter and lamp (`light_source`/`strobe_lamp`) control, trigger modes, and irradiance calibration. seabreeze documents these features, but device support isn't specified and several aren't implemented in pyseabreeze, so they could not be verified.
-- Dark and reference spectra live in the server's memory and are lost on `reconnect` or restart. Save data with `save_path`.
+- **Peaks next to invalid pixels.** Invalid (`null`) pixels are treated as unknown: a pixel next to one is not reported as a peak, and prominence and FWHM do not extend across them. When invalid pixels lie inside the requested range (for example the centre of a band too strong to measure), absorbance/transmittance results carry a warning.
+- Dark and reference spectra live in the server's memory and are lost on `reconnect` or restart. Save data with `save_path`: it must end in `.csv`, missing folders are created, and an existing file is never overwritten (choose a new name). The path is checked before the spectrum is acquired.
 
 ## Hardware verification
 

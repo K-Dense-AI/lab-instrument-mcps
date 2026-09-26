@@ -11,6 +11,15 @@ import numpy as np
 PROTON_MASS = 1.007276
 
 
+def downsample_max_indices(y: np.ndarray, max_points: int) -> np.ndarray:
+    """Indices kept by :func:`downsample_max` (the highest point of each of ``max_points`` bins)."""
+    y = np.asarray(y, dtype=float)
+    if y.size <= max_points:
+        return np.arange(y.size)
+    bins = np.array_split(np.arange(y.size), max_points)
+    return np.array([b[int(np.argmax(y[b]))] for b in bins if b.size], dtype=np.int64)
+
+
 def downsample_max(x: np.ndarray, y: np.ndarray, max_points: int) -> tuple[list[float], list[float]]:
     """Split into ``max_points`` contiguous bins and keep, per bin, the point with the highest ``y``.
 
@@ -18,10 +27,7 @@ def downsample_max(x: np.ndarray, y: np.ndarray, max_points: int) -> tuple[list[
     """
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
-    if x.size <= max_points:
-        return x.tolist(), y.tolist()
-    bins = np.array_split(np.arange(x.size), max_points)
-    idx = [b[int(np.argmax(y[b]))] for b in bins if b.size]
+    idx = downsample_max_indices(y, max_points)
     return x[idx].tolist(), y[idx].tolist()
 
 
@@ -44,9 +50,12 @@ class ChromPeak:
     points_across_peak: int
 
 
-def _half_crossing(x: np.ndarray, y: np.ndarray, i: int, level: float, step: int) -> float | None:
+def _half_crossing(
+    x: np.ndarray, y: np.ndarray, i: int, level: float, step: int, lo: int, hi: int
+) -> float | None:
+    """RT where the trace first falls below ``level`` walking from ``i``, within ``lo..hi`` only."""
     j = i
-    while 0 <= j + step < y.size:
+    while lo <= j + step <= hi:
         k = j + step
         if y[k] < level:
             frac = (y[j] - level) / (y[j] - y[k]) if y[j] != y[k] else 0.0
@@ -86,8 +95,9 @@ def integrate_apex_peak(
         return j
 
     lo, hi = walk(-1), walk(+1)
-    left = _half_crossing(rt, y, i, apex / 2, -1)
-    right = _half_crossing(rt, y, i, apex / 2, +1)
+    # FWHM of the apex peak only: a co-eluting neighbour beyond a valley must not widen it.
+    left = _half_crossing(rt, y, i, apex / 2, -1, lo, hi)
+    right = _half_crossing(rt, y, i, apex / 2, +1, lo, hi)
     fwhm = (right - left) * 60.0 if left is not None and right is not None else None
     return ChromPeak(
         apex_rt_min=float(rt[i]),
@@ -116,10 +126,13 @@ def local_maxima(mz: np.ndarray, intensity: np.ndarray) -> tuple[np.ndarray, np.
     return mz[keep], y[keep]
 
 
-def write_csv(path: Path, header: list[str], columns: list[np.ndarray | list]) -> str:
-    """Write equal-length columns to CSV and return the absolute path."""
+def write_csv(path: Path, header: list[str], columns: list[np.ndarray | list], *, overwrite: bool = False) -> str:
+    """Write equal-length columns to CSV and return the absolute path.
+
+    Without ``overwrite`` the file is created exclusively (``FileExistsError`` if it appeared meanwhile).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="") as fh:
+    with path.open("w" if overwrite else "x", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
         writer.writerow(header)
         for row in zip(*columns, strict=True):

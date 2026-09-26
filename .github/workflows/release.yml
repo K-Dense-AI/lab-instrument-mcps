@@ -22,30 +22,42 @@ jobs:
         id: pkg
         run: |
           TAG="${GITHUB_REF_NAME}"
-          PACKAGE="${TAG%-v*}"
-          VERSION="${TAG##*-v}"
+          PACKAGE="${TAG%-v*}"      # labmcp-ms-data-v0.1.0 -> labmcp-ms-data
+          VERSION="${TAG##*-v}"     # labmcp-ms-data-v0.1.0 -> 0.1.0
+          # Refuse anything that isn't a plain package name / version before it reaches a command line.
+          [[ "$PACKAGE" =~ ^labmcp(-[a-z0-9]+)*$ ]] || { echo "::error::Bad package name '$PACKAGE' in tag $TAG"; exit 1; }
+          [[ "$VERSION" =~ ^[0-9][0-9A-Za-z.+!-]*$ ]] || { echo "::error::Bad version '$VERSION' in tag $TAG"; exit 1; }
           if [ "$PACKAGE" = "labmcp" ]; then DIR="packages/labmcp"; else
-            DIR=$(grep -l "^name = \"$PACKAGE\"" servers/*/*/pyproject.toml | xargs dirname)
+            MATCHES=$(grep -lxF "name = \"$PACKAGE\"" servers/*/*/pyproject.toml || true)
+            [ "$(printf '%s' "$MATCHES" | grep -c .)" = 1 ] || { echo "::error::Expected one server package named $PACKAGE, found: ${MATCHES:-none}"; exit 1; }
+            DIR=$(dirname "$MATCHES")
           fi
-          test -n "$DIR" || { echo "No package named $PACKAGE"; exit 1; }
-          grep -q "^version = \"$VERSION\"" "$DIR/pyproject.toml" || { echo "Tag version $VERSION != pyproject version"; exit 1; }
+          grep -qxF "version = \"$VERSION\"" "$DIR/pyproject.toml" || { echo "::error::Tag version $VERSION != $DIR/pyproject.toml version"; exit 1; }
           echo "dir=$DIR" >> "$GITHUB_OUTPUT"
           echo "package=$PACKAGE" >> "$GITHUB_OUTPUT"
 
       - name: Test
+        env:
+          DIR: ${{ steps.pkg.outputs.dir }}
+          PACKAGE: ${{ steps.pkg.outputs.package }}
         run: |
           uv sync --all-packages --python 3.12
-          uv run pytest ${{ steps.pkg.outputs.dir }}
+          # A core release can break any server, so test everything; a server release tests itself.
+          if [ "$PACKAGE" = "labmcp" ]; then uv run pytest; else uv run pytest "$DIR"; fi
 
       - name: Build
-        run: uv build --package ${{ steps.pkg.outputs.package }} --out-dir dist
+        env:
+          PACKAGE: ${{ steps.pkg.outputs.package }}
+        run: uv build --package "$PACKAGE" --out-dir dist
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
 
       - name: Publish to the MCP Registry
         if: steps.pkg.outputs.package != 'labmcp'
+        env:
+          DIR: ${{ steps.pkg.outputs.dir }}
         run: |
-          curl -sL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
           ./mcp-publisher login github-oidc
-          cd ${{ steps.pkg.outputs.dir }} && ../../../mcp-publisher publish
+          cd "$DIR" && "$GITHUB_WORKSPACE/mcp-publisher" publish

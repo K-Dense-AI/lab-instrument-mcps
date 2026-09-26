@@ -205,3 +205,62 @@ def test_limit_error_type():
     with pytest.raises(SafetyLimitError):
         server.check("max_series_duration_s", 5)
     server.disconnect()
+
+
+def test_collect_gives_up_on_an_endless_reading_stream():
+    # Regression: _collect used a per-line timeout, so a circuit that kept streaming readings
+    # (continuous mode on, command ignored) kept the driver - and the connect lock - forever.
+    import time
+
+    class StreamingSim(EZOSimulator):
+        def handle(self, command):
+            return None  # e.g. just woken from sleep: the command is ignored
+
+        def poll(self):
+            return "7.012"  # a continuous reading is always due
+
+    t = SimulatedTransport(StreamingSim("pH"), read_termination="\r", write_termination="\r", timeout=0.5)
+    c = EZOCircuit(t, timeout=0.5)
+    start = time.monotonic()
+    with pytest.raises(Exception, match=r"No '\*OK'"):
+        c.command("C,0")
+    assert time.monotonic() - start < 2.0
+
+
+def test_reading_without_numbers_is_a_protocol_error():
+    c, sim = make_circuit("pH")
+    sim._reading = lambda: "garbage"
+    with pytest.raises(InstrumentProtocolError, match="contains no number"):
+        c.read()
+
+
+async def test_log_series_save_path_is_checked_before_reading(tmp_path):
+    async with simulated_client(server) as client:
+        with pytest.raises(Exception, match=r"must end in \.csv"):
+            await client.call_tool("log_series", {"count": 2, "interval_s": 1.0, "save_path": str(tmp_path / "x.txt")})
+        existing = tmp_path / "old.csv"
+        existing.write_text("keep me", encoding="utf-8")
+        with pytest.raises(Exception, match="already exists"):
+            await client.call_tool("log_series", {"count": 2, "interval_s": 1.0, "save_path": str(existing)})
+        assert existing.read_text(encoding="utf-8") == "keep me"
+        log = (await client.call_tool("get_command_log", {"limit": 200})).data
+        assert not any(entry["data"] == "R" for entry in log)  # no reading was taken
+        out = tmp_path / "sub" / "series.csv"
+        series = (await client.call_tool("log_series", {"count": 2, "interval_s": 1.0, "save_path": str(out)})).data
+        assert series.saved_to == str(out.resolve())
+        assert out.read_text(encoding="utf-8").startswith("timestamp,t_s,ph (pH)")
+
+
+async def test_series_longer_than_one_tool_call_is_refused():
+    # Regression: the tool timeout was 900 s although the README suggests raising the limit to 3600 s.
+    async with simulated_client(server, limits={"max_series_duration_s": 100_000}) as client:
+        with pytest.raises(Exception, match="single tool call"):
+            await client.call_tool("log_series", {"count": 1000, "interval_s": 10})
+
+
+def test_calibration_value_must_be_finite():
+    from labmcp_atlas_ezo.server import _validate_calibration
+
+    c, _ = make_circuit("PRS")  # PRS 'high' has no range check, so inf used to be sent as "Cal,inf"
+    with pytest.raises(InstrumentProtocolError, match="not a finite number"):
+        _validate_calibration(c, "high", float("inf"))

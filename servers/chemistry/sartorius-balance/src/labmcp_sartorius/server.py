@@ -15,6 +15,7 @@ from labmcp import (
     InstrumentServer,
     InstrumentTimeout,
     Limit,
+    SafetyLimitError,
 )
 from pydantic import BaseModel, Field
 
@@ -25,6 +26,9 @@ from labmcp_sartorius.simulator import SBISimulator
 ADJUST_POLL_S = 1.0
 #: If no adjustment status is seen within this time, assume the balance did not start one.
 ADJUST_NO_SIGN_S = 15.0
+#: A series must finish within its tool timeout, whatever `max_series_duration_s` is raised to.
+HARD_MAX_SERIES_S = 3600.0
+SERIES_TOOL_TIMEOUT_S = 3700.0
 
 
 def connect(ctx: ConnectContext) -> SBIBalance:
@@ -165,14 +169,20 @@ def read_weight(
     return _reading(r, drv.last_unit)
 
 
-@mcp.tool(**READ, timeout=900)
+@mcp.tool(**READ, timeout=SERIES_TOOL_TIMEOUT_S)
 def log_weight_series(
     count: Annotated[int, Field(ge=2, le=1000, description="Number of readings")] = 10,
     interval_s: Annotated[float, Field(ge=0.5, le=600, description="Seconds between readings")] = 1.0,
 ) -> WeightSeries:
     """Record a series of immediate (unfiltered) readings to monitor drift, evaporation,
     moisture uptake or stabilisation. Returns every reading plus summary statistics."""
-    server.check("max_series_duration_s", (count - 1) * interval_s, "series duration")
+    duration = (count - 1) * interval_s
+    server.check("max_series_duration_s", duration, "series duration")
+    if duration > HARD_MAX_SERIES_S:
+        raise SafetyLimitError(
+            f"Refused: a {duration:g} s series cannot run in a single tool call (maximum "
+            f"{HARD_MAX_SERIES_S:g} s). Record several shorter series."
+        )
     drv = _drv()
     readings: list[WeightReading] = []
     times: list[float] = []

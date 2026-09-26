@@ -1,13 +1,13 @@
 [project]
 name = "labmcp-atlas-ezo"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP server for Atlas Scientific EZO sensor circuits (pH, ORP, DO, EC, RTD, HUM, CO2, PRS) over UART: read, calibrate, compensate, log."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [{ name = "K-Dense and LabMCP contributors" }]
 keywords = ["mcp", "lab-instrument", "atlas-scientific", "ezo", "ph", "dissolved-oxygen", "conductivity", "bioreactor"]
-dependencies = ["labmcp>=0.1,<0.2"]
+dependencies = ["labmcp>=0.1.2,<0.2"]
 
 [project.scripts]
 labmcp-atlas-ezo = "labmcp_atlas_ezo.server:main"

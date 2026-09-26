@@ -8,11 +8,14 @@ the command identifier and a status character, e.g. ``S S     100.00 g``.
 
 from __future__ import annotations
 
+import math
 import re
+import threading
+import time
 from dataclasses import dataclass
 from decimal import Decimal
 
-from labmcp import InstrumentProtocolError, Transport
+from labmcp import InstrumentError, InstrumentProtocolError, InstrumentTimeout, Transport
 
 _WEIGHT_RE = re.compile(r"^(?P<id>[A-Z0-9]+)\s+(?P<status>[SDA])\s+(?P<value>[-+]?\d+(?:\.\d*)?)\s*(?P<unit>\S+)\s*$")
 
@@ -31,6 +34,16 @@ _ERRORS = {
 
 DOOR_POSITIONS = {0: "closed", 1: "right_open", 2: "left_open", 8: "error", 9: "intermediate"}
 
+#: Lines read while looking for the reply to a command before giving up (stale or unsolicited
+#: lines, e.g. from the balance's print key, are skipped).
+_MAX_SKIPPED_LINES = 5
+
+
+def _reply_id(cmd: str) -> str:
+    """Identifier an MT-SICS reply to ``cmd`` starts with (``S`` for ``SI``, ``I4`` for ``@``)."""
+    head = cmd.split(maxsplit=1)[0] if cmd.strip() else cmd
+    return {"SI": "S", "@": "I4"}.get(head, head)
+
 
 def _decimal(value: float) -> str:
     """Shortest exact decimal representation of ``value`` without an exponent."""
@@ -48,13 +61,44 @@ class Weight:
 class MTSICSBalance:
     def __init__(self, transport: Transport) -> None:
         self.t = transport
+        #: Set while an internal adjustment (C3) waits for its final reply.
+        self._adjusting = threading.Event()
+        #: Set by :meth:`reset` to end a running adjustment wait.
+        self._abort = threading.Event()
 
     # ------------------------------------------------------------ low level
 
     def command(self, cmd: str, timeout: float | None = None) -> str:
         """Send ``cmd`` and return the reply, raising on MT-SICS error replies."""
-        reply = self.t.query(cmd, timeout).strip()
-        return self._check(cmd, reply)
+        if self._adjusting.is_set():
+            raise InstrumentError(
+                f"An internal adjustment is running, so {cmd.split(maxsplit=1)[0]!r} was not sent. Wait "
+                "for it to finish (1-3 minutes) or call `reset_balance` to abort it."
+            )
+        return self._command(cmd, timeout)
+
+    def _command(self, cmd: str, timeout: float | None = None) -> str:
+        with self.t.lock:
+            # Anything waiting is stale (a reply that arrived after an earlier timeout, or a
+            # print-key transmission); reading it as this command's reply would put every later
+            # command out of step.
+            self.t.flush_input()
+            self.t.write(cmd)
+            return self._read_reply(cmd, timeout)
+
+    def _read_reply(self, cmd: str, timeout: float | None = None) -> str:
+        """Read the reply to ``cmd``, skipping lines that belong to another command."""
+        expected = _reply_id(cmd)
+        reply = ""
+        for _ in range(_MAX_SKIPPED_LINES):
+            reply = self.t.read(timeout).strip()
+            parts = reply.split()
+            if reply in _ERRORS or (parts and parts[0] == expected):
+                return self._check(cmd, reply)
+        raise InstrumentProtocolError(
+            f"No reply to {cmd!r} from the balance (last line received: {reply!r}). Try again; if it "
+            "persists, check that nothing else is sending commands to the balance."
+        )
 
     def _check(self, cmd: str, reply: str) -> str:
         if reply in _ERRORS:
@@ -69,7 +113,7 @@ class MTSICSBalance:
     @staticmethod
     def _parse_weight(cmd: str, reply: str) -> Weight:
         m = _WEIGHT_RE.match(reply)
-        if not m:
+        if not m or m["id"] != _reply_id(cmd):
             raise InstrumentProtocolError(f"Unexpected reply to {cmd!r}: {reply!r}")
         return Weight(float(m["value"]), m["unit"], m["status"] in {"S", "A"})
 
@@ -125,6 +169,11 @@ class MTSICSBalance:
         return self._parse_weight("TA", self.command("TA"))
 
     def preset_tare(self, value: float, unit: str) -> Weight:
+        if not math.isfinite(value) or value < 0:
+            raise InstrumentError(f"The tare weight must be a finite number >= 0 (got {value!r}). Nothing was sent.")
+        if not re.fullmatch(r"[A-Za-z]{1,8}", unit):
+            # Anything else (spaces, CR/LF) would end up on the wire as extra MT-SICS commands.
+            raise InstrumentError(f"Unit must be a unit symbol such as 'g' or 'mg' (got {unit!r}). Nothing was sent.")
         # Plain decimal notation without precision loss: ``:g`` would send "52.1873" for
         # 52.18734 and "1e-05" for 0.00001, which MT-SICS does not accept as a number.
         cmd = f"TA {_decimal(value)} {unit}"
@@ -134,14 +183,23 @@ class MTSICSBalance:
         self.command("TAC")
 
     def reset(self) -> str:
-        """``@``: reset to power-on state (no zeroing). Returns the serial number."""
-        reply = self.command("@")
+        """``@``: reset to power-on state (no zeroing), cancelling any pending command (also a
+        running internal adjustment). Returns the serial number."""
+        self._abort.set()  # a running adjustment wait gives up the transport lock within 0.5 s
+        reply = self._command("@")
+        self._adjusting.clear()
         quoted = self._quoted(reply)
         return quoted[0] if quoted else reply
 
     # ------------------------------------------------------------ display
 
     def display_text(self, text: str) -> None:
+        if any(not " " <= ch <= "~" for ch in text):
+            # A CR/LF would split the D command and send the rest as another MT-SICS command.
+            raise InstrumentError(
+                "The display text may only contain printable ASCII characters (no line breaks, tabs or "
+                "accented letters). Nothing was sent."
+            )
         safe = text.replace('"', "'")
         self.command(f'D "{safe}"')
 
@@ -151,12 +209,37 @@ class MTSICSBalance:
     # ------------------------------------------------------------ level 2
 
     def internal_adjustment(self, timeout: float = 300.0) -> None:
-        """``C3``: adjust with the internal reference weight. Blocks until done."""
+        """``C3``: adjust with the internal reference weight. Blocks until done.
+
+        The transport lock is released between short reads so :meth:`reset` can abort the
+        adjustment; other commands are refused meanwhile (their replies would be mixed up with
+        the final ``C3 A``).
+        """
         with self.t.lock:
             first = self.command("C3", timeout=10.0)
             if first != "C3 B":
                 raise InstrumentProtocolError(f"Adjustment did not start: {first!r}")
-            final = self.t.read(timeout=timeout).strip()
+            self._abort.clear()
+            self._adjusting.set()
+        try:
+            deadline = time.monotonic() + timeout
+            final = ""
+            while not final:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise InstrumentTimeout(
+                        f"The internal adjustment did not finish within {timeout:g} s. Call `reset_balance` "
+                        "to abort it."
+                    )
+                with self.t.lock:
+                    if self._abort.is_set():
+                        raise InstrumentProtocolError("The internal adjustment was aborted by a balance reset.")
+                    try:
+                        final = self.t.read(timeout=min(0.5, remaining)).strip()
+                    except InstrumentTimeout:
+                        continue
+        finally:
+            self._adjusting.clear()
         if final != "C3 A":
             raise InstrumentProtocolError(
                 f"Adjustment did not complete ({final!r}); stability may not have been reached."
@@ -174,17 +257,24 @@ class MTSICSBalance:
 
     def temperature_c(self) -> list[float]:
         """``M28``: read the built-in temperature probe(s) in °C."""
+        if self._adjusting.is_set():
+            self.command("M28")  # raises the "adjustment running" error
         with self.t.lock:
+            self.t.flush_input()
             self.t.write("M28")
             temps: list[float] = []
-            while True:
-                reply = self._check("M28", self.t.read().strip())
+            for _ in range(16):  # one line per probe; bounded in case the balance keeps sending
+                reply = self._read_reply("M28")
                 parts = reply.split()
-                if len(parts) < 4:
-                    raise InstrumentProtocolError(f"Unexpected reply to 'M28': {reply!r}")
-                temps.append(float(parts[3]))
+                try:
+                    if len(parts) < 4 or parts[1] not in {"A", "B"}:
+                        raise ValueError
+                    temps.append(float(parts[3]))
+                except ValueError:
+                    raise InstrumentProtocolError(f"Unexpected reply to 'M28': {reply!r}") from None
                 if parts[1] == "A":
                     return temps
+        raise InstrumentProtocolError("The balance sent more M28 lines than expected.")
 
     def close(self) -> None:
         self.t.close()

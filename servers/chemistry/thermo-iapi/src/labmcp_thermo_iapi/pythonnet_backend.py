@@ -463,6 +463,9 @@ class PythonNetBackend(OrbitrapBackend):
     # --------------------------------------------------------------------- scans
 
     def _handle_scan(self, sender: Any, e: Any) -> None:
+        on_scan = self._on_scan
+        if on_scan is None:  # closed: a late event must not reach the old driver
+            return
         try:
             scan = _net(e, "MsScanEventArgs.GetScan")()
         except Exception as exc:  # pragma: no cover - hardware only
@@ -475,8 +478,7 @@ class PythonNetBackend(OrbitrapBackend):
             return
         finally:
             _dispose(scan)  # "caution! You must dispose this, or you block shared memory!"
-        if self._on_scan is not None:
-            self._on_scan(record)
+        on_scan(record)
 
     def _copy_scan(self, scan: Any) -> ScanRecord:
         received = _now()
@@ -556,6 +558,14 @@ class PythonNetBackend(OrbitrapBackend):
         }
 
     def status(self) -> dict[str, Any]:
+        try:
+            return self._status()
+        except InstrumentError:
+            raise
+        except Exception as exc:
+            raise _translate(exc, "read the instrument status") from exc
+
+    def _status(self) -> dict[str, Any]:
         with self._lock:
             state = _net(self._acquisition, "IAcquisition.State")
             out: dict[str, Any] = {
@@ -586,15 +596,18 @@ class PythonNetBackend(OrbitrapBackend):
     def possible_parameters(self) -> list[ParameterDescription]:
         scans = self._scans_iface()
         out = []
-        for p in _net(scans, "IScans.PossibleParameters") or []:
-            out.append(
-                ParameterDescription(
-                    name=str(_net(p, "IParameterDescription.Name")),
-                    selection=str(_net(p, "IParameterDescription.Selection") or ""),
-                    default_value=str(_net(p, "IParameterDescription.DefaultValue") or ""),
-                    help=str(_net(p, "IParameterDescription.Help") or ""),
+        try:
+            for p in _net(scans, "IScans.PossibleParameters") or []:
+                out.append(
+                    ParameterDescription(
+                        name=str(_net(p, "IParameterDescription.Name")),
+                        selection=str(_net(p, "IParameterDescription.Selection") or ""),
+                        default_value=str(_net(p, "IParameterDescription.DefaultValue") or ""),
+                        help=str(_net(p, "IParameterDescription.Help") or ""),
+                    )
                 )
-            )
+        except Exception as exc:
+            raise _translate(exc, "read the possible scan parameters") from exc
         return out
 
     # --------------------------------------------------------------- acquisition
@@ -631,7 +644,11 @@ class PythonNetBackend(OrbitrapBackend):
             raise _translate(exc, "start the acquisition") from exc
 
     def pause_acquisition(self) -> None:
-        if not _net(self._acquisition, "IAcquisition.CanPause"):
+        try:
+            can_pause = _net(self._acquisition, "IAcquisition.CanPause")
+        except Exception as exc:
+            raise _translate(exc, "pause the acquisition") from exc
+        if not can_pause:
             raise InstrumentProtocolError(
                 "The instrument reports that the current operation cannot be paused."
             )
@@ -641,7 +658,11 @@ class PythonNetBackend(OrbitrapBackend):
             raise _translate(exc, "pause the acquisition") from exc
 
     def resume_acquisition(self) -> None:
-        if not _net(self._acquisition, "IAcquisition.CanResume"):
+        try:
+            can_resume = _net(self._acquisition, "IAcquisition.CanResume")
+        except Exception as exc:
+            raise _translate(exc, "resume the acquisition") from exc
+        if not can_resume:
             raise InstrumentProtocolError("The instrument reports that there is nothing to resume.")
         try:
             _net(self._acquisition, "IAcquisition.Resume")()
@@ -708,15 +729,18 @@ class PythonNetBackend(OrbitrapBackend):
             raise _translate(exc, "cancel the repeating scan") from exc
 
     def close(self) -> None:
+        self._on_scan = None  # events still in flight are dropped (see _handle_scan)
         if self._scan_container is not None and self._handler is not None:
             try:
                 _net_subscribe(
                     self._scan_container, "IMsScanContainer.MsScanArrived", self._handler, add=False
                 )
-            except Exception:  # pragma: no cover - best effort
-                pass
+            except Exception as exc:  # pragma: no cover - best effort
+                log.warning("Could not unsubscribe from MsScanArrived: %s", exc)
+        self._handler = None
         if self._scans is not None:
             _dispose(self._scans)  # releases the IScans lock (IControl.GetScans docs)
         if self._container is not None:
             _dispose(self._container)
         self._scans = self._container = self._instrument = None
+        self._scan_container = self._control = self._acquisition = None

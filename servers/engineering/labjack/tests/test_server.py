@@ -1,11 +1,13 @@
 import csv
 import math
+import threading
+import time
 
 import pytest
 from labmcp import InstrumentConnectionError, InstrumentProtocolError, SafetyLimitError
 from labmcp.testing import simulated_client, tool_names
 from labmcp_labjack.driver import LabJackT, dio_index, dio_name, open_device
-from labmcp_labjack.server import server
+from labmcp_labjack.server import _downsample, server
 from labmcp_labjack.simulator import SimulatedLJM
 
 
@@ -222,8 +224,8 @@ async def test_tools_via_mcp(tmp_path):
                 {"channels": [0, 1], "scan_rate_hz": 2000, "duration_s": 0.2, "max_points": 50, "save_path": str(path)},
             )
         ).structured_content
-        assert st["scans"] == 400 and st["downsample_factor"] == 8
-        assert len(st["waveforms_v"]["AIN0"]) == 50
+        assert st["scans"] == 400 and st["downsample_factor"] == 16 and st["aborted"] is False
+        assert len(st["waveforms_v"]["AIN0"]) == 50 and len(st["time_s"]) == 50
         assert st["stats"][0]["peak_to_peak_v"] == pytest.approx(4.0, abs=0.4)
         rows = list(csv.reader(path.open()))
         assert rows[0] == ["time_s", "AIN0_v", "AIN1_v"] and len(rows) == 401
@@ -285,3 +287,87 @@ def test_limit_error_type():
     server.configure(simulate=True, limits={"max_dac_voltage_v": 1})
     with pytest.raises(SafetyLimitError):
         server.check("max_dac_voltage_v", 3)
+
+
+def test_safe_state_interrupts_a_running_stream():
+    d = make_driver("T7")
+    d.write_dac(0, 3.0)
+    result = {}
+    worker = threading.Thread(target=lambda: result.update(s=d.stream_ain([0], 1000, 30_000)))
+    worker.start()
+    time.sleep(0.4)
+    t0 = time.monotonic()
+    actions = d.safe_state()  # must not wait ~30 s for the stream to finish
+    assert time.monotonic() - t0 < 2.0
+    worker.join(5)
+    assert not worker.is_alive()
+    s = result["s"]
+    assert s.aborted and 0 < len(s.data[0]) < 30_000
+    assert "DAC0 and DAC1 set to 0 V" in actions and d.read_dacs() == [0.0, 0.0]
+    assert d.ljm.device.stream is None  # the stream was stopped
+    # the next stream is not affected by the earlier abort
+    assert not d.stream_ain([0], 1000, 100).aborted
+
+
+def test_downsample_keeps_spikes_and_bounds_length():
+    n = 10_000
+    times = [i * 1e-3 for i in range(n)]
+    col = [0.0] * n
+    col[4321] = 5.0  # a one-sample spike that striding by 40 would miss
+    col[777] = -3.0
+    col[900] = math.nan
+    t_out, (wave,), factor = _downsample(times, [col], 500)
+    assert len(t_out) == len(wave) <= 500 and factor == 40
+    assert max(wave) == 5.0 and min(wave) == -3.0
+    assert t_out == sorted(t_out) and t_out[0] == 0.0 and t_out[-1] == times[-1]
+    short_t, (short,), f1 = _downsample(times[:5], [[1.0, math.nan, 2.0, 3.0, 4.0]], 500)
+    assert f1 == 1 and short == [1.0, None, 2.0, 3.0, 4.0]
+
+
+async def test_low_scan_rate_cannot_exceed_the_duration_limit():
+    # At least two scans are taken: 2 scans at 1 Hz last 2 s, although duration_s is 1.
+    async with simulated_client(server, limits={"max_stream_duration_s": 1.5}) as client:
+        with pytest.raises(Exception, match="max_stream_duration_s"):
+            await client.call_tool("stream_analog", {"channels": [0], "scan_rate_hz": 1, "duration_s": 1})
+        # Below 1 scan/s one eStreamRead would block set_outputs_safe for longer than a second.
+        with pytest.raises(Exception, match="greater than or equal to 1"):
+            await client.call_tool("stream_analog", {"channels": [0], "scan_rate_hz": 0.01, "duration_s": 1})
+
+
+async def test_stream_save_path_refuses_existing_file_before_streaming(tmp_path):
+    existing = tmp_path / "old.csv"
+    existing.write_text("keep me", encoding="utf-8")
+    async with simulated_client(server) as client:
+        with pytest.raises(Exception, match="already exists"):
+            await client.call_tool("stream_analog", {"channels": [0], "duration_s": 0.1, "save_path": str(existing)})
+        with pytest.raises(Exception, match=r"\.csv"):
+            await client.call_tool("stream_analog", {"channels": [0], "duration_s": 0.1, "save_path": str(tmp_path / "a.txt")})
+        log = (await client.call_tool("get_command_log", {"limit": 200})).data
+        assert not any("eStreamStart" in e["data"] for e in log)
+    assert existing.read_text(encoding="utf-8") == "keep me"
+
+
+async def test_invalid_safe_dio_is_refused_at_connect_and_releases_the_device(monkeypatch):
+    created: list[SimulatedLJM] = []
+
+    def factory(model: str) -> SimulatedLJM:
+        created.append(SimulatedLJM(model=model))
+        return created[-1]
+
+    monkeypatch.setattr("labmcp_labjack.server.SimulatedLJM", factory)
+    async with simulated_client(server, options={"sim_model": "T4", "safe_dio": "FIO0"}) as client:
+        info = (await client.call_tool("get_connection_info", {})).data
+        assert info["connected"] is False and "safe_dio" in info["error"] and "DIO0" in info["error"]
+    assert created and all(ljm._handles == {} for ljm in created)  # the handle was closed again
+
+
+def test_failed_initialisation_releases_the_handle():
+    ljm = SimulatedLJM(model="T7")
+
+    def fail(*args):
+        raise ljm.LJMError(1239, errorString="LJME_RECONNECT_FAILED")
+
+    ljm.eReadNames = fail  # HARDWARE_INSTALLED cannot be read
+    with pytest.raises(InstrumentConnectionError):
+        open_device(ljm, "ANY", "ANY", "ANY")
+    assert ljm._handles == {}

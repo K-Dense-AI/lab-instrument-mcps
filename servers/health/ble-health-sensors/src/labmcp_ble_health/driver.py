@@ -654,6 +654,7 @@ class BleakBackend:
         self._adapter = adapter
         self._pair = pair
         self._client: Any = None
+        self._closed = False
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, name="labmcp-bleak", daemon=True)
         self._thread.start()
@@ -661,11 +662,26 @@ class BleakBackend:
     # -- plumbing ---------------------------------------------------------------
 
     def _call(self, coro: Any, timeout: float, what: str) -> Any:
-        fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        if self._closed:
+            coro.close()
+            raise InstrumentConnectionError(
+                "The Bluetooth connection was closed (reconnect or server shutdown). Call the tool again."
+            )
         try:
-            return fut.result(timeout)
+            fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        except RuntimeError as exc:  # the event loop was closed meanwhile
+            coro.close()
+            raise InstrumentConnectionError(f"The Bluetooth event loop is closed ({exc}). Call the tool again.") from exc
+        try:
+            try:
+                return fut.result(timeout)
+            except concurrent.futures.TimeoutError:
+                if fut.cancel():  # still running: the coroutine is cancelled (and cleans up after itself)
+                    raise
+                # It finished right at the deadline: use its outcome instead of dropping it (a
+                # dropped connected client would stay connected, and the device stops advertising).
+                return fut.result(0)
         except (concurrent.futures.TimeoutError, asyncio.TimeoutError, TimeoutError) as exc:
-            fut.cancel()
             raise InstrumentTimeout(
                 f"Bluetooth operation '{what}' timed out after {timeout:g} s. Is the device on, "
                 "in range and not connected to another app (phone, watch)?"
@@ -716,26 +732,31 @@ class BleakBackend:
 
         return self._call(run(), timeout_s + 10.0, "scan")
 
+    async def _connect_coro(self, timeout_s: float) -> Any:
+        device = await self._bleak.BleakScanner.find_device_by_address(
+            self.address, timeout=timeout_s, **self._scanner_kwargs()
+        )
+        if device is None:
+            raise InstrumentConnectionError(
+                f"Bluetooth device {self.address} was not found within {timeout_s:g} s. Make sure it "
+                "is switched on and advertising (many monitors only advertise right after a "
+                "measurement or when their Bluetooth button is pressed), is in range, and is not "
+                "connected to a phone app. Use `scan_devices` to see what is nearby."
+            )
+        client = self._bleak.BleakClient(device, timeout=timeout_s, **self._client_kwargs())
+        try:
+            await client.connect()
+        except BaseException:  # failed, timed out or cancelled: never leave a half-open link behind
+            with contextlib.suppress(Exception):
+                await client.disconnect()
+            raise
+        return client
+
     def connect(self, timeout_s: float) -> None:
         if self.address is None:
             raise InstrumentConnectionError("No device address configured (start the server with --address).")
-
-        async def run() -> Any:
-            device = await self._bleak.BleakScanner.find_device_by_address(
-                self.address, timeout=timeout_s, **self._scanner_kwargs()
-            )
-            if device is None:
-                raise InstrumentConnectionError(
-                    f"Bluetooth device {self.address} was not found within {timeout_s:g} s. Make sure it "
-                    "is switched on and advertising (many monitors only advertise right after a "
-                    "measurement or when their Bluetooth button is pressed), is in range, and is not "
-                    "connected to a phone app. Use `scan_devices` to see what is nearby."
-                )
-            client = self._bleak.BleakClient(device, timeout=timeout_s, **self._client_kwargs())
-            await client.connect()
-            return client
-
-        self._client = self._call(run(), timeout_s * 2 + 10.0, "connect")
+        self.disconnect()  # release a stale client (e.g. after the device dropped the link)
+        self._client = self._call(self._connect_coro(timeout_s), timeout_s * 2 + 10.0, "connect")
 
     def disconnect(self) -> None:
         client, self._client = self._client, None
@@ -767,9 +788,14 @@ class BleakBackend:
             self._call(self._client.stop_notify(char_uuid), 10.0, f"unsubscribe {char_uuid[4:8]}")
 
     def close(self) -> None:
+        if self._closed:
+            return
         self.disconnect()
+        self._closed = True  # later calls fail fast instead of waiting on a stopped loop
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=5.0)
+        if not self._thread.is_alive():
+            self._loop.close()  # releases the selector and self-pipe file descriptors
 
 
 def _translate_bleak_error(exc: Exception, what: str, address: str | None) -> InstrumentError:
@@ -808,6 +834,17 @@ class Packet:
     data: bytes
 
 
+class _Cancel(threading.Event):
+    """Set to stop a running listen; ``reason`` says why."""
+
+    reason = "cancelled"
+
+
+#: How long a new measurement waits for the one it replaces to unsubscribe and stop. Bounded by
+#: the Bluetooth call timeouts (connect <= 2 x 60 + 10 s, subscribe 15 s, unsubscribe 10 s).
+PREEMPT_WAIT_S = 180.0
+
+
 class BLEHealthSensor:
     """One Bluetooth LE health sensor, identified by its address."""
 
@@ -830,6 +867,12 @@ class BLEHealthSensor:
         self._chars: set[str] = set()
         self._services: set[str] = set()
         self._lock = threading.RLock()
+        # One listen at a time: a second subscription to the same characteristic would steal the
+        # first one's notifications, and the first one's unsubscribe would then silence the second.
+        self._listen_lock = threading.Lock()
+        self._guard = threading.Lock()
+        self._active: _Cancel | None = None
+        self._closed = False
 
     # -- helpers ----------------------------------------------------------------
 
@@ -915,6 +958,47 @@ class BLEHealthSensor:
 
     # -- notifications / indications -------------------------------------------
 
+    def _cancel_active(self, reason: str) -> None:
+        with self._guard:
+            if self._active is not None:
+                self._active.reason = reason
+                self._active.set()
+
+    def _begin_listen(self) -> _Cancel:
+        """Become the only running listen. A listen still running (e.g. one whose MCP call already
+        timed out on the client side, so nobody will read its result) is cancelled first."""
+        deadline = time.monotonic() + PREEMPT_WAIT_S
+        while True:
+            with self._guard:
+                if self._closed:
+                    raise InstrumentConnectionError(
+                        "This connection was closed (reconnect or shutdown). Call the tool again."
+                    )
+            self._cancel_active("a new measurement was started")
+            if self._listen_lock.acquire(timeout=0.25):
+                break
+            if time.monotonic() > deadline:
+                raise InstrumentError(
+                    f"The previous measurement did not stop within {PREEMPT_WAIT_S:g} s. Try again, or "
+                    "call `reconnect`."
+                )
+        cancel = _Cancel()
+        with self._guard:
+            self._active = cancel
+        return cancel
+
+    def _end_listen(self, cancel: _Cancel) -> None:
+        with self._guard:
+            if self._active is cancel:
+                self._active = None
+        self._listen_lock.release()
+
+    def _unsubscribe(self, subscribed: list[int]) -> None:
+        for char in subscribed:
+            with contextlib.suppress(InstrumentError):
+                self.backend.unsubscribe(uuid16(char))
+        subscribed.clear()
+
     def listen(
         self,
         chars: list[int],
@@ -932,7 +1016,11 @@ class BLEHealthSensor:
         (with ``partial_ok``, packets that did not satisfy ``done`` are returned instead).
         With ``reconnect`` it keeps (re)connecting until the deadline, which is how monitors
         that only advertise after a measurement are caught. Returns (packets, disconnected).
+
+        Only one listen runs at a time: starting another one (or closing the connection) cancels
+        this one, which then raises ``InstrumentError``.
         """
+        cancel = self._begin_listen()
         q: queue.Queue[tuple[int, float, bytes]] = queue.Queue()
         packets: list[Packet] = []
         t0 = time.monotonic()
@@ -943,13 +1031,15 @@ class BLEHealthSensor:
         satisfied = False
         try:
             while time.monotonic() < end:
+                if cancel.is_set():
+                    raise InstrumentError(f"The measurement was cancelled: {cancel.reason}.")
                 if not subscribed:
                     try:
                         self.ensure_connected(min(max(end - time.monotonic(), 1.0), self.connect_timeout_s))
                         if required:
                             self._require(*required)
                         for char in chars:
-                            if self.has(char):
+                            if self.has(char) and not cancel.is_set():
                                 self.backend.subscribe(
                                     uuid16(char), lambda data, c=char: q.put((c, time.monotonic(), data))
                                 )
@@ -961,8 +1051,9 @@ class BLEHealthSensor:
                         if not reconnect:
                             raise
                         last_error = exc
-                        subscribed.clear()
-                        time.sleep(min(1.0, max(end - time.monotonic(), 0)))
+                        # Undo a partial subscription so the retry does not subscribe twice.
+                        self._unsubscribe(subscribed)
+                        cancel.wait(min(1.0, max(end - time.monotonic(), 0)))
                         continue
                 try:
                     char, t, data = q.get(timeout=max(min(0.25, end - time.monotonic()), 0.001))
@@ -981,11 +1072,12 @@ class BLEHealthSensor:
                     satisfied = True
                     end = min(end, time.monotonic() + self.settle_s)
         finally:
-            for char in subscribed:
-                with contextlib.suppress(InstrumentError):
-                    self.backend.unsubscribe(uuid16(char))
-            if subscribed:
-                self._event(f"unsubscribed; {len(packets)} packets received")
+            try:
+                if subscribed:
+                    self._unsubscribe(subscribed)
+                    self._event(f"unsubscribed; {len(packets)} packets received")
+            finally:
+                self._end_listen(cancel)
         if done is not None and not satisfied:
             if partial_ok and packets:
                 return packets, disconnected
@@ -1017,14 +1109,34 @@ class BLEHealthSensor:
                 malformed += 1
         return samples, malformed, disconnected
 
-    def pulse_oximetry(self, mode: str, duration_s: float, timeout_s: float) -> list[PulseOximetryMeasurement]:
+    def _parse(self, packets: list[Packet], parse: Callable[[Packet], Any]) -> list[Any]:
+        """Parse pushed packets, skipping (and logging) malformed ones so one corrupted packet does
+        not discard a whole recording or the valid measurements around it. Raises the parse error
+        only if no packet at all could be decoded."""
+        out: list[Any] = []
+        error: InstrumentProtocolError | None = None
+        for p in packets:
+            try:
+                out.append(parse(p))
+            except InstrumentProtocolError as exc:
+                error = exc
+                self._event(f"malformed packet skipped: {exc}")
+        if error is not None and not out:
+            raise error
+        return out
+
+    def pulse_oximetry(
+        self, mode: str, duration_s: float, timeout_s: float
+    ) -> tuple[list[PulseOximetryMeasurement], int]:
         """``continuous``: collect 0x2A5F notifications for ``duration_s``.
-        ``spot_check``: wait up to ``timeout_s`` for 0x2A5E indications. ``auto`` picks
-        continuous when the device supports it."""
-        self.ensure_connected()
+        ``spot_check``: wait up to ``timeout_s`` for 0x2A5E indications (connecting whenever the
+        oximeter becomes available). ``auto`` connects and picks continuous when the device
+        supports it. Returns (measurements, malformed_packet_count)."""
         if mode == "auto":
+            self.ensure_connected()
             mode = "continuous" if self.has(CHR_PLX_CONTINUOUS) else "spot_check"
         if mode == "continuous":
+            self.ensure_connected()
             self._require(CHR_PLX_CONTINUOUS, "PLX Continuous Measurement", SVC_PULSE_OXIMETER)
             packets, _ = self.listen([CHR_PLX_CONTINUOUS], seconds=duration_s, reconnect=False)
             if not packets:
@@ -1032,15 +1144,18 @@ class BLEHealthSensor:
                     f"No PLX Continuous Measurement notifications within {duration_s:g} s. Is the "
                     "oximeter on a finger and measuring?"
                 )
-            return [parse_plx_continuous(p.data) for p in packets]
-        self._require(CHR_PLX_SPOT_CHECK, "PLX Spot-check Measurement", SVC_PULSE_OXIMETER)
+            parsed = self._parse(packets, lambda p: parse_plx_continuous(p.data))
+            return parsed, len(packets) - len(parsed)
+        # Spot-check oximeters often only advertise once a reading is ready, so do not insist on a
+        # connection up front: listen() keeps (re)connecting until the timeout.
         packets, _ = self.listen(
             [CHR_PLX_SPOT_CHECK],
             seconds=timeout_s,
             done=lambda ps: any(p.char == CHR_PLX_SPOT_CHECK for p in ps),
             required=(CHR_PLX_SPOT_CHECK, "PLX Spot-check Measurement", SVC_PULSE_OXIMETER),
         )
-        return [parse_plx_spot_check(p.data) for p in packets]
+        parsed = self._parse(packets, lambda p: parse_plx_spot_check(p.data))
+        return parsed, len(packets) - len(parsed)
 
     def blood_pressure(self, timeout_s: float) -> tuple[list[BloodPressureMeasurement], list[BloodPressureMeasurement]]:
         """Wait for Blood Pressure Measurement indications (0x2A35). Also listens to Intermediate
@@ -1052,7 +1167,10 @@ class BLEHealthSensor:
             done=lambda ps: any(p.char == CHR_BLOOD_PRESSURE_MEASUREMENT for p in ps),
             required=req,
         )
-        final = [parse_blood_pressure_measurement(p.data) for p in packets if p.char == CHR_BLOOD_PRESSURE_MEASUREMENT]
+        final = self._parse(
+            [p for p in packets if p.char == CHR_BLOOD_PRESSURE_MEASUREMENT],
+            lambda p: parse_blood_pressure_measurement(p.data),
+        )
         cuff: list[BloodPressureMeasurement] = []
         for p in packets:
             if p.char == CHR_INTERMEDIATE_CUFF_PRESSURE:
@@ -1079,8 +1197,9 @@ class BLEHealthSensor:
             required=(CHR_TEMPERATURE_MEASUREMENT, "Temperature Measurement", SVC_HEALTH_THERMOMETER),
             partial_ok=accept_intermediate,
         )
-        out = [
-            (
+        out = self._parse(
+            packets,
+            lambda p: (
                 p.char == CHR_TEMPERATURE_MEASUREMENT,
                 parse_temperature_measurement(
                     p.data,
@@ -1088,9 +1207,8 @@ class BLEHealthSensor:
                     if p.char == CHR_TEMPERATURE_MEASUREMENT
                     else "Intermediate Temperature (0x2A1E)",
                 ),
-            )
-            for p in packets
-        ]
+            ),
+        )
         sensor_type = None
         if self.has(CHR_TEMPERATURE_TYPE):
             try:
@@ -1112,9 +1230,15 @@ class BLEHealthSensor:
         if self.has(CHR_WEIGHT_SCALE_FEATURE):
             with contextlib.suppress(InstrumentError):
                 features = parse_weight_scale_feature(self.read_char(CHR_WEIGHT_SCALE_FEATURE))
-        return [parse_weight_measurement(p.data) for p in packets], features
+        return self._parse(packets, lambda p: parse_weight_measurement(p.data)), features
 
     def close(self) -> None:
+        with self._guard:
+            self._closed = True
+        self._cancel_active("the connection was closed (reconnect or server shutdown)")
+        # Let a cancelled listen unsubscribe while the link is still up (bounded wait).
+        if self._listen_lock.acquire(timeout=2.0):
+            self._listen_lock.release()
         self.backend.close()
 
 

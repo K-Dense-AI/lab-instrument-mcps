@@ -24,6 +24,7 @@ from __future__ import annotations
 import math
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Literal
@@ -218,30 +219,60 @@ class KeithleySMU:
         levels: list[float],
         delay_s: float = 0.0,
         stop_on_compliance: bool = False,
+        *,
+        clear_abort: bool = True,
+        deadline: float | None = None,
     ) -> SweepData:
         """Step through ``levels`` with the output on, measuring at each point.
 
         The source must already be configured (function, limit, range, NPLC). The output is
         switched on at the first level and ALWAYS switched off afterwards, including on errors
         and when :meth:`request_abort` is called from another thread.
+
+        The abort flag is checked under the transport lock right before the output is switched
+        on and before every level change and reading, so an abort that arrives at any moment
+        (even before the sweep starts, with ``clear_abort=False``) keeps the output off and never
+        leads to a reading with the output off. ``deadline`` (a ``time.monotonic()`` value) ends
+        the sweep early, output off, when the next point could not finish in time.
         """
-        self.abort.clear()
+        if clear_abort:
+            self.abort.clear()
         data = SweepData(levels=[], readings=[])
+
+        def aborted() -> bool:
+            if self.abort.is_set():
+                data.aborted, data.stop_reason = True, "aborted by output_off"
+                return True
+            return False
+
         try:
-            self.set_level(source, levels[0])
-            self.raise_errors("setting the first sweep level")
-            self.set_output(True)
+            with self.t.lock:
+                if aborted():
+                    return data
+                self.set_level(source, levels[0])
+                self.raise_errors("setting the first sweep level")
+                if aborted():
+                    return data
+                self.set_output(True)
             self.raise_errors("turning the output on")
             for level in levels:
-                if self.abort.is_set():
-                    data.aborted, data.stop_reason = True, "aborted by output_off"
+                if deadline is not None and time.monotonic() + delay_s > deadline:
+                    data.stop_reason = (
+                        "stopped early: the sweep would not finish within the tool's time budget"
+                    )
                     break
-                self.set_level(source, level)
-                self.raise_errors(f"setting the source level to {level:g}")
+                with self.t.lock:
+                    if aborted():
+                        break
+                    self.set_level(source, level)
+                    self.raise_errors(f"setting the source level to {level:g}")
                 if delay_s > 0 and self.abort.wait(delay_s):
-                    data.aborted, data.stop_reason = True, "aborted by output_off"
+                    aborted()
                     break
-                reading = self.read(source)
+                with self.t.lock:
+                    if aborted():
+                        break
+                    reading = self.read(source)
                 data.levels.append(level)
                 data.readings.append(reading)
                 if stop_on_compliance and reading.in_compliance:

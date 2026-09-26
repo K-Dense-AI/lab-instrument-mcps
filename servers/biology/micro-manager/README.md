@@ -80,7 +80,7 @@ Add `--read-only` to let the agent read positions and settings without imaging o
 | `set_config` | 🎛 control | Apply a config-group preset (e.g. switch the channel: filter cube, light source, emission filter). Objective/turret groups are refused here: use `set_objective`. |
 | `set_exposure` | 🎛 control | Set the camera exposure time (ms). Longer exposures give brighter images but more photobleaching. Returns the exposure the camera accepted. |
 | `set_objective` | ⚠️ hazard | Switch the objective (rotates the nosepiece/turret). A longer or immersion objective can hit the sample holder or need oil/water: confirm with the user first. Pixel size changes with the objective. |
-| `set_shutter` | 🎛 control | Open or close the current shutter, and optionally switch auto-shutter. An open shutter illuminates (and bleaches) the sample until it is closed again. |
+| `set_shutter` | ⚠️ hazard | Open or close the current shutter, and optionally switch auto-shutter. An open shutter illuminates (and bleaches) the sample until it is closed again. |
 | `snap_image` | 🎛 control | Acquire one image with the current channel, exposure and position. The sample is illuminated during the exposure. Saves the full image as TIFF and returns summary statistics (min/max/mean, saturation, sharpness) plus an optional contrast-stretched preview. |
 | `stop_stage` | 🛑 safety | Immediately stop XY and Z stage motion and abort any z-stack or time-lapse in progress. |
 <!-- TOOLS:END -->
@@ -95,7 +95,7 @@ Add `--read-only` to let the agent read positions and settings without imaging o
 | `max_xy_step_um` | 20000 µm | Largest XY stage move in one call (straight-line distance) |
 | `max_exposure_ms` | 10000 ms | Longest camera exposure |
 | `max_frames` | 500 | Most images in one z-stack or time-lapse (slices or timepoints x channels) |
-| `max_acquisition_duration_s` | 3600 s | Longest time-lapse |
+| `max_acquisition_duration_s` | 3600 s | Longest time-lapse (one tool call can run at most 3600 s whatever this is set to) |
 
 Override at launch, e.g. `--limit max_z_step_um=10 --limit max_frames=2000`.
 
@@ -122,8 +122,8 @@ Every Z and XY move, every z-stack slice and every autofocus result is checked a
 - **Objective crashes.** Moving the focus drive toward the sample can drive the objective into the coverslip or dish. `get_position` / `get_system_info` report `focus_direction` (whether increasing Z moves the objective toward the sample, as declared by the device adapter; often `unknown`). Configure `z_min_um` / `z_max_um` for every microscope you connect.
 - **Objective changes** (`set_objective`) rotate the nosepiece and are marked as hazardous; `set_config` refuses config groups whose names look like objective or turret groups (`Objective`, `Nosepiece`, `Turret`, `Magnification`, `Lens`). Other groups are applied as-is: if one of your presets moves hardware near the sample, name the group accordingly or leave it out of the configuration.
 - **Light exposure.** With auto-shutter on (the default), the light path only opens while the camera exposes. `set_shutter(open=True)` leaves the sample lit until `close_shutter` is called.
-- **Images** are saved as TIFF files (ImageJ hyperstacks with pixel size, Z spacing and frame interval) in `save_path`, or in `--option data_dir=...` (default: the system temp folder, `labmcp-micro-manager/`). Existing files are never overwritten. Tools return statistics (min/max/mean/std, saturated fraction, a sharpness score) and a small contrast-stretched PNG preview, never the full image.
-- **Acquisitions** (`acquire_z_stack`, `acquire_time_lapse`) snap image by image with the current camera settings; they do not use hardware-triggered sequencing, so they are slower than Micro-Manager's MDA engine but behave identically on every device. `stop_stage` or `close_shutter` aborts them between frames; partial data is saved. A z-stack returns the focus to its starting position unless it was aborted.
+- **Images** are saved as TIFF files (ImageJ hyperstacks with pixel size, Z spacing and frame interval) in `save_path`, or in `--option data_dir=...` (default: the system temp folder, `labmcp-micro-manager/`). `save_path` must end in `.tif`/`.tiff` and must not be a folder; it is checked before anything moves or is exposed. Existing files are never overwritten (a numeric suffix is added). Tools return statistics (min/max/mean/std, saturated fraction, a sharpness score) and a small contrast-stretched PNG preview, never the full image.
+- **Acquisitions** (`acquire_z_stack`, `acquire_time_lapse`) snap image by image with the current camera settings; they do not use hardware-triggered sequencing, so they are slower than Micro-Manager's MDA engine but behave identically on every device. `stop_stage` or `close_shutter` aborts them between frames; partial data is saved (an incomplete slice or timepoint is dropped). A z-stack returns the focus to its starting position unless it was aborted. An acquisition must fit in one tool call: one whose exposure time alone exceeds 3600 s is refused, and one that runs long because of stage, filter or camera overheads stops between slices/timepoints and reports why in `note`. Channels cannot come from an objective/turret group.
 - **Autofocus** uses the configured autofocus device (`fullFocus`). Software autofocus plugins from the Micro-Manager Java app are not available.
 - pymmcore-plus is imported only when a real configuration is loaded, so `--simulate` works without Micro-Manager's native libraries.
 

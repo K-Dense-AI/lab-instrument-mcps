@@ -1,4 +1,5 @@
 import ast
+import asyncio
 import csv
 import time
 from pathlib import Path
@@ -11,10 +12,19 @@ from labmcp.testing import simulated_client, tool_names
 from labmcp_thermo_iapi.backend import ParameterDescription
 from labmcp_thermo_iapi.driver import OrbitrapDriver, parse_selection, summarize_scan, validate_scan_values
 from labmcp_thermo_iapi.iapi_members import BCL_MEMBERS, VERIFIED_IAPI_MEMBERS
-from labmcp_thermo_iapi.server import server
+from labmcp_thermo_iapi.server import AcquisitionWatchdog, acquisition_watchdog, custom_scan_window, server
 from labmcp_thermo_iapi.simulator import FakeOrbitrap
 
 FAST = {"sim_speed": "25"}
+
+
+@pytest.fixture(autouse=True)
+def _fresh_rate_window():
+    """The rate-limit window is process-wide (it survives `reconnect`); each test is a new run."""
+    custom_scan_window.clear()
+    yield
+    custom_scan_window.clear()
+    acquisition_watchdog.disarm()  # process-wide too: never let one test's timer fire in another
 
 
 def make_driver(**kwargs) -> tuple[OrbitrapDriver, FakeOrbitrap]:
@@ -478,3 +488,186 @@ def test_pythonnet_backend_uses_only_verified_iapi_names():
         assert url.startswith(
             "https://github.com/thermofisherlsms/iapi/blob/c246dcc8772d03c9c32e9b2fde486e97572c8fbf/"
         )
+
+
+# ------------------------------------------------------------------ regression tests (review)
+
+
+def test_validation_sends_the_instruments_spelling_and_rejects_non_finite_numbers():
+    possible = [
+        ParameterDescription("ActivationType", "CID,HCD"),
+        ParameterDescription("OrbitrapResolution", "15000,60000,120000"),
+        ParameterDescription("Microscans", "1-100"),
+        ParameterDescription("IsolationWidth", "0.4-1200.0"),
+        ParameterDescription("Polarity", "Positive,Negative"),
+    ]
+    ok = validate_scan_values(
+        {
+            "ActivationType": "cid;hcd",
+            "OrbitrapResolution": "60000.0",
+            "Microscans": "2.0",
+            "IsolationWidth": "1.2; 2.0",
+            "polarity": "negative",
+        },
+        possible,
+    )
+    # IAPI silently ignores values it doesn't recognise, so accepted values go out as listed.
+    assert ok == {
+        "ActivationType": "CID;HCD",
+        "OrbitrapResolution": "60000",
+        "Microscans": "2",
+        "IsolationWidth": "1.2;2.0",
+        "Polarity": "Negative",
+    }
+    for bad in ("nan", "inf", "-inf"):  # used to escape as a raw ValueError / OverflowError
+        with pytest.raises(InstrumentProtocolError, match="not a number"):
+            validate_scan_values({"Microscans": bad}, possible)
+
+
+async def test_start_acquisition_reports_success_in_every_mode():
+    async with simulated_client(server, options=FAST) as client:
+        msg = (await client.call_tool("start_acquisition", {"mode": "until_stopped"})).data
+        assert msg.startswith("Acquisition started until stopped. It will be cancelled automatically")
+        await client.call_tool("stop_acquisition", {})
+        msg = (await client.call_tool("start_acquisition", {"mode": "scan_count", "scan_count": 100})).data
+        assert msg.startswith("Acquisition started for 100 scans. It will be cancelled automatically")
+        await client.call_tool("stop_acquisition", {})
+
+
+async def test_limit_also_bounds_until_stopped_and_scan_count_acquisitions():
+    async with simulated_client(server, options=FAST, limits={"max_acquisition_duration_s": 1}) as client:
+        msg = (await client.call_tool("start_acquisition", {"mode": "until_stopped"})).data
+        assert "cancelled automatically after 1 s" in msg
+        for _ in range(50):
+            if not fake().acquiring:
+                break
+            await asyncio.sleep(0.1)
+        assert not fake().acquiring and "CancelAcquisition" in fake().calls
+
+
+def test_acquisition_watchdog_ignores_stale_timers():
+    stops: list[int] = []
+    dog = AcquisitionWatchdog(lambda: stops.append(1))
+    dog.arm(100)
+    stale = dog._generation
+    dog.disarm()  # stop_acquisition
+    dog._fire(stale)  # the first acquisition's timer going off late
+    assert stops == []
+    dog.arm(100)
+    stale = dog._generation
+    dog.arm(100)  # a new acquisition re-arms: the previous timer must not stop it
+    dog._fire(stale)
+    assert stops == []
+    dog._fire(dog._generation)
+    assert stops == [1]
+    dog.disarm()
+
+
+async def test_stop_acquisition_attempts_every_step(monkeypatch):
+    async with simulated_client(server, options=FAST) as client:
+        sim = fake()
+
+        def refuse():
+            raise InstrumentProtocolError("CancelAcquisition failed: the instrument is busy")
+
+        monkeypatch.setattr(sim, "cancel_acquisition", refuse)
+        monkeypatch.setattr(sim, "cancel_repeating_scan", lambda: False)
+        with pytest.raises(ToolError, match="instrument is busy") as exc:
+            await client.call_tool("stop_acquisition", {"standby": True})
+        msg = str(exc.value)
+        assert "repeating scan cancelled: IAPI reports" in msg and "Done: custom scans cancelled" in msg
+        assert sim.calls[-2:] == ["CancelCustomScan", "SetMode(Standby)"]
+        log = (await client.call_tool("get_command_log", {"limit": 10})).data
+        assert any("CancelAcquisition() -> error" in e["data"] for e in log)
+
+
+async def test_custom_scan_rate_limit_survives_reconnect():
+    async with simulated_client(server, options=FAST, limits={"max_custom_scans_per_minute": 2}) as client:
+        for _ in range(2):
+            await client.call_tool("submit_custom_scan", {"scan_type": "Full"})
+        await client.call_tool("reconnect", {})
+        with pytest.raises(ToolError, match="max_custom_scans_per_minute"):
+            await client.call_tool("submit_custom_scan", {"scan_type": "Full"})
+        assert fake().sent_custom_scans == []  # the new connection sent nothing
+
+
+def test_custom_scan_result_that_arrived_before_the_wait_is_returned():
+    drv, sim = make_driver()
+    drv.set_custom_scan({"ScanType": "Full", "OrbitrapResolution": "15000"}, 7)
+    sim.pump(3)  # the scan ran before anyone asked for it
+    rec = drv.wait_for_scan(0.2, access_id=7)
+    assert rec is not None and summarize_scan(rec)["access_id"] == 7
+    assert drv.wait_for_scan(0.2, ms_order=1) is None  # other waits still mean "the next one"
+
+
+async def test_wait_for_custom_scan_after_it_arrived_via_mcp():
+    async with simulated_client(server, options=FAST) as client:
+        n = (await client.call_tool("submit_custom_scan", {"scan_type": "Full"})).structured_content[
+            "running_number"
+        ]
+        deadline = time.monotonic() + 10
+        while not server.driver.recent_scans(1, access_id=n) and time.monotonic() < deadline:
+            time.sleep(0.02)  # the agent's next tool call comes seconds later
+        got = (await client.call_tool("wait_for_scan", {"timeout_s": 0.5, "access_id": n})).structured_content
+        assert got["found"] and got["scan"]["access_id"] == n
+
+
+async def test_multi_valued_values_do_not_stop_the_simulator():
+    async with simulated_client(server, options=FAST) as client:
+        res = (
+            await client.call_tool(
+                "submit_custom_scan",
+                {
+                    "scan_type": "SIM",
+                    "precursor_mz": 524.26,
+                    "extra_parameters": {"IsolationWidth": "10;-1", "FirstMass": "350;-1"},
+                },
+            )
+        ).structured_content
+        got = (
+            await client.call_tool("wait_for_scan", {"timeout_s": 10, "access_id": res["running_number"]})
+        ).structured_content
+        assert got["found"] and got["scan"]["scan_mode"] == "SIM"
+        assert (await client.call_tool("wait_for_scan", {"timeout_s": 10})).structured_content["found"]
+
+
+async def test_multi_valued_max_injection_time_checked_per_element():
+    async with simulated_client(server, options=FAST) as client:
+        res = await client.call_tool("submit_custom_scan", {"extra_parameters": {"MaxIT": "50;120"}})
+        assert res.structured_content["values"]["MaxIT"] == "50;120"
+        with pytest.raises(ToolError, match="2000 ms exceeds"):
+            await client.call_tool("submit_custom_scan", {"extra_parameters": {"MaxIT": "50;2000"}})
+
+
+def test_pythonnet_errors_are_translated_not_leaked():
+    class CommunicationException(Exception):
+        pass
+
+    class Down:
+        def __getattr__(self, name):
+            raise CommunicationException("service down")
+
+    b = pnb.PythonNetBackend(family="tribrid", assembly_dir=None)
+    b._acquisition = b._instrument = b._control = b._scans = Down()
+    for call in (b.status, b.possible_parameters, b.pause_acquisition, b.resume_acquisition):
+        with pytest.raises(InstrumentConnectionError, match="Tune running"):
+            call()
+
+
+def test_pythonnet_close_drops_late_scan_events():
+    got: list = []
+    fetched: list = []
+
+    class Event:
+        def GetScan(self):
+            fetched.append(1)
+            return object()
+
+    b = pnb.PythonNetBackend(family="tribrid", assembly_dir=None)
+    b._copy_scan = lambda scan: "record"
+    b._on_scan = got.append
+    b._handle_scan(None, Event())
+    assert got == ["record"]
+    b.close()
+    b._handle_scan(None, Event())  # an event still in flight after close
+    assert got == ["record"] and len(fetched) == 1

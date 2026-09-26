@@ -23,6 +23,15 @@ def boxcar(y: np.ndarray, half_width: int) -> np.ndarray:
     return (c[hi] - c[lo]) / (hi - lo)
 
 
+def dilate(mask: np.ndarray, half_width: int) -> np.ndarray:
+    """Pixels within ``half_width`` of a True pixel: the pixels a boxcar of that half width mixes
+    a flagged (e.g. saturated) pixel into."""
+    mask = np.asarray(mask, dtype=bool)
+    if half_width <= 0 or not mask.any():
+        return mask.copy()
+    return boxcar(mask.astype(float), half_width) > 0
+
+
 def downsample(x: np.ndarray, y: np.ndarray, max_points: int) -> tuple[list[float], list[float | None]]:
     """Average contiguous pixel bins so at most ``max_points`` remain. NaN (masked) pixels are
     ignored; a bin with no valid pixel becomes ``None``."""
@@ -47,11 +56,14 @@ class Peak:
 
 
 def _crossing(y: np.ndarray, start: int, level: float, step: int) -> float | None:
-    """Fractional index where ``y`` first drops below ``level`` walking from ``start``."""
+    """Fractional index where ``y`` first drops below ``level`` walking from ``start``; None if
+    it runs off the edge or into invalid (NaN) pixels first."""
     n = y.size
     i = start
     while 0 <= i + step < n:
         j = i + step
+        if not np.isfinite(y[j]):
+            return None
         if y[j] < level:
             # linear interpolation between i (>= level) and j (< level)
             return i + step * (y[i] - level) / (y[i] - y[j])
@@ -69,39 +81,42 @@ def find_peaks(
 ) -> list[Peak]:
     """Local maxima ranked by topographic prominence, with FWHM measured at half prominence.
 
-    ``min_prominence`` defaults to 5 % of the data range. NaN values are ignored.
+    ``min_prominence`` defaults to 5 % of the data range. NaN (invalid) pixels are unknown values:
+    a pixel next to one is never reported as a peak (the true maximum may lie in the gap, e.g. the
+    centre of a band too strong to measure), and prominence and FWHM do not extend across them.
     """
     x = np.asarray(x_nm, dtype=float)
-    y = np.asarray(y, dtype=float)
-    finite = np.isfinite(y)
+    raw = np.asarray(y, dtype=float)
+    finite = np.isfinite(raw)
     if finite.sum() < 3:
         return []
-    y = np.where(finite, y, np.nanmin(y))
+    y = np.where(finite, raw, -np.inf)
     n = y.size
     if min_prominence is None:
-        min_prominence = 0.05 * float(y.max() - y.min())
+        min_prominence = 0.05 * float(raw[finite].max() - raw[finite].min())
     pitch = float(np.median(np.abs(np.diff(x)))) or 1.0
     sep_px = max(1, int(round(min_separation_nm / pitch)))
     # candidates: pixels that are the maximum of their +-sep_px window (first pixel of a plateau)
     pad = np.pad(y, sep_px, mode="constant", constant_values=-np.inf)
     window = np.lib.stride_tricks.sliding_window_view(pad, 2 * sep_px + 1)
-    is_max = (y >= window.max(axis=1)) & (y > np.concatenate(([-np.inf], y[:-1])))
+    is_max = finite & (y >= window.max(axis=1)) & (y > np.concatenate(([-np.inf], y[:-1])))
     candidates = np.flatnonzero(is_max)
     peaks: list[Peak] = []
     for i in candidates:
-        if i == 0 or i == n - 1:
+        if i == 0 or i == n - 1 or not (finite[i - 1] and finite[i + 1]):
             continue
-        left_higher = np.flatnonzero(y[:i] > y[i])
-        right_higher = np.flatnonzero(y[i + 1 :] > y[i])
-        lo = left_higher[-1] + 1 if left_higher.size else 0
-        hi = i + 1 + right_higher[0] if right_higher.size else n
+        # The peak's region ends at the nearest higher pixel or invalid pixel on each side.
+        left_block = np.flatnonzero((y[:i] > y[i]) | ~finite[:i])
+        right_block = np.flatnonzero((y[i + 1 :] > y[i]) | ~finite[i + 1 :])
+        lo = left_block[-1] + 1 if left_block.size else 0
+        hi = i + 1 + right_block[0] if right_block.size else n
         base = max(y[lo : i + 1].min(), y[i:hi].min())
         prominence = float(y[i] - base)
         if prominence < min_prominence or prominence <= 0:
             continue
         level = y[i] - prominence / 2.0
-        left = _crossing(y, i, level, -1)
-        right = _crossing(y, i, level, +1)
+        left = _crossing(raw, i, level, -1)
+        right = _crossing(raw, i, level, +1)
         pixels = np.arange(n)
         fwhm = None
         if left is not None and right is not None:
@@ -123,13 +138,12 @@ def find_peaks(
     return peaks[:max_peaks]
 
 
-def write_csv(path: str, header: list[str], columns: list[np.ndarray]) -> str:
-    """Write equal-length columns to CSV and return the absolute path."""
-    p = Path(path).expanduser()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("w", newline="") as fh:
+def write_csv(path: Path, header: list[str], columns: list[np.ndarray]) -> str:
+    """Write equal-length columns to CSV at ``path`` (checked with ``labmcp.prepare_save_path``)
+    and return it as a string."""
+    with Path(path).open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
         writer.writerow(header)
         for row in zip(*columns, strict=True):
             writer.writerow(["" if not np.isfinite(v) else f"{v:.6g}" for v in row])
-    return str(p.resolve())
+    return str(path)

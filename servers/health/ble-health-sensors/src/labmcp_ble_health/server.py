@@ -8,10 +8,17 @@ from __future__ import annotations
 
 import csv
 import statistics
-from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from labmcp import READ, ConnectContext, InstrumentProtocolError, InstrumentServer, Limit
+from labmcp import (
+    READ,
+    ConnectContext,
+    InstrumentConnectionError,
+    InstrumentProtocolError,
+    InstrumentServer,
+    Limit,
+    prepare_save_path,
+)
 from pydantic import BaseModel, Field
 
 from labmcp_ble_health.driver import (
@@ -36,6 +43,13 @@ from labmcp_ble_health.simulator import SIM_DEFAULT_ADDRESS, SimulatedBLEBackend
 
 _TRUE = {"1", "true", "yes", "on"}
 
+#: Longest device discovery + connection the `connect_timeout_s` option may ask for. A connect
+#: attempt can take 2 x this + 10 s, which the tool timeouts below allow for.
+MAX_CONNECT_TIMEOUT_S = 60.0
+#: Added to the longest wait/recording a tool allows: a final connect attempt, subscribe and
+#: unsubscribe calls, stopping a measurement this call replaces, and reading feature values.
+_TOOL_SLACK_S = 400
+
 
 def _make_backend(address: str | None, simulate: bool, options: dict[str, str]) -> Any:
     if simulate:
@@ -54,8 +68,15 @@ def connect(ctx: ConnectContext) -> BLEHealthSensor:
         address = normalize_address(ctx.address) if ctx.address else SIM_DEFAULT_ADDRESS
     else:
         address = normalize_address(ctx.require_address())
+    try:
+        timeout = float(ctx.option("connect_timeout_s") or ctx.settings.timeout or 20.0)
+    except ValueError as exc:
+        raise InstrumentConnectionError(f"connect_timeout_s must be a number of seconds: {exc}") from exc
+    if not 1.0 <= timeout <= MAX_CONNECT_TIMEOUT_S:
+        raise InstrumentConnectionError(
+            f"connect_timeout_s must be between 1 and {MAX_CONNECT_TIMEOUT_S:g} s, got {timeout:g}."
+        )
     backend = _make_backend(address, ctx.simulate, ctx.settings.options)
-    timeout = float(ctx.option("connect_timeout_s") or ctx.settings.timeout or 20.0)
     return BLEHealthSensor(backend, address, audit=ctx.audit, connect_timeout_s=timeout)
 
 
@@ -91,7 +112,7 @@ diagnosis, triage or treatment advice from these readings; refer health concerns
     option_help={
         "pair": "true to pair/bond before connecting (Linux/Windows; macOS pairs on demand)",
         "adapter": "Bluetooth adapter to use on Linux, e.g. hci1 (default: system default)",
-        "connect_timeout_s": "seconds to look for and connect to the device (default 20)",
+        "connect_timeout_s": "seconds to look for and connect to the device (default 20, max 60)",
     },
 )
 mcp = server.mcp
@@ -180,6 +201,7 @@ class PulseOximetryReading(BaseModel):
     pulse_rate_mean_bpm: float | None
     samples: int
     unavailable_samples: int = Field(description="Packets whose SpO2 or PR was a special value (NaN, NRes, ...)")
+    malformed_packets: int = Field(0, description="Packets that could not be decoded (skipped)")
     pulse_amplitude_index_pct: float | None
     measurement_status: list[str] = Field(description="Measurement Status flags of the latest packet")
     device_sensor_status: list[str] = Field(description="Device and Sensor Status flags of the latest packet")
@@ -305,7 +327,7 @@ def scan_devices(
     )
 
 
-@mcp.tool(**READ, timeout=90)
+@mcp.tool(**READ, timeout=360)
 def get_device_info() -> DeviceInfo:
     """Read the device's identity (manufacturer, model, serial, firmware), the standard health
     services it exposes and its features.
@@ -316,18 +338,20 @@ def get_device_info() -> DeviceInfo:
     return DeviceInfo(**info, timestamp=utc_now())
 
 
-@mcp.tool(**READ, timeout=90)
+@mcp.tool(**READ, timeout=180)
 def read_battery() -> BatteryReading:
     """Read the device's battery level (Battery Service, 0-100 %)."""
     level = server.driver.battery_level()
     return BatteryReading(battery_pct=level, address=server.driver.address, timestamp=utc_now())
 
 
-@mcp.tool(**READ, timeout=3720)
+@mcp.tool(**READ, timeout=3600 + _TOOL_SLACK_S)
 def record_heart_rate(
     duration_s: Annotated[float, Field(ge=5, le=3600, description="Recording length in seconds")] = 60.0,
     max_points: Annotated[int, Field(ge=10, le=5000, description="Max points returned per series")] = 300,
-    save_path: Annotated[str | None, Field(description="Optional CSV path for the full recording")] = None,
+    save_path: Annotated[
+        str | None, Field(description="Optional new .csv file for the full recording (never overwrites a file)")
+    ] = None,
 ) -> HeartRateRecording:
     """Record heart rate for `duration_s`: bpm series, RR intervals and time-domain HRV (mean HR,
     SDNN, RMSSD, pNN50).
@@ -335,6 +359,7 @@ def record_heart_rate(
     The sensor must be worn with good skin contact. HRV statistics are for research, not clinical
     ECG analysis. Use `save_path` to keep every packet as CSV."""
     server.check("max_record_duration_s", duration_s, "recording duration")
+    path = prepare_save_path(save_path, suffixes=(".csv",)) if save_path else None  # before recording
     driver = server.driver
     started = utc_now()
     samples, malformed, disconnected = driver.record_heart_rate(duration_s)
@@ -358,9 +383,7 @@ def record_heart_rate(
     if malformed:
         notes.append(f"{malformed} malformed packet(s) were skipped.")
     saved_to = None
-    if save_path:
-        path = Path(save_path).expanduser()
-        path.parent.mkdir(parents=True, exist_ok=True)
+    if path is not None:
         with path.open("w", newline="") as fh:
             w = csv.writer(fh)
             w.writerow(["t_s", "bpm", "sensor_contact", "energy_expended_kj", "rr_intervals_ms"])
@@ -393,11 +416,14 @@ def record_heart_rate(
     )
 
 
-@mcp.tool(**READ, timeout=1860)
+@mcp.tool(**READ, timeout=1800 + _TOOL_SLACK_S)
 def read_pulse_oximetry(
     mode: Annotated[
         Literal["auto", "continuous", "spot_check"],
-        Field(description="auto: continuous if the oximeter supports it, else wait for a spot-check"),
+        Field(
+            description="auto: connect, then continuous if the oximeter supports it, else wait for a spot-check. "
+            "spot_check: wait for a reading even if the oximeter is not advertising yet"
+        ),
     ] = "auto",
     duration_s: Annotated[float, Field(ge=1, le=600, description="Continuous mode: seconds to average over")] = 10.0,
     timeout_s: Annotated[float, Field(ge=5, le=1800, description="Spot-check mode: seconds to wait")] = 60.0,
@@ -413,9 +439,11 @@ def read_pulse_oximetry(
     if mode in ("auto", "continuous"):
         server.check("max_record_duration_s", duration_s, "continuous measurement duration")
     driver = server.driver
-    driver.ensure_connected()
-    use = mode if mode != "auto" else ("continuous" if driver.has(CHR_PLX_CONTINUOUS) else "spot_check")
-    ms = driver.pulse_oximetry(use, duration_s, timeout_s)
+    use = mode
+    if mode == "auto":  # needs the device's characteristics; explicit spot_check waits for it instead
+        driver.ensure_connected()
+        use = "continuous" if driver.has(CHR_PLX_CONTINUOUS) else "spot_check"
+    ms, malformed = driver.pulse_oximetry(use, duration_s, timeout_s)
     valid = [m for m in ms if m.spo2_pct.value is not None and m.pulse_rate_bpm.value is not None]
     latest = valid[-1] if valid else ms[-1]
     spo2 = [m.spo2_pct.value for m in valid if m.spo2_pct.value is not None]
@@ -431,6 +459,7 @@ def read_pulse_oximetry(
         pulse_rate_mean_bpm=round(statistics.fmean(prs), 1) if prs else None,
         samples=len(ms),
         unavailable_samples=len(ms) - len(valid),
+        malformed_packets=malformed,
         pulse_amplitude_index_pct=pai.value if pai else None,
         measurement_status=latest.measurement_status,
         device_sensor_status=latest.device_sensor_status,
@@ -439,7 +468,7 @@ def read_pulse_oximetry(
     )
 
 
-@mcp.tool(**READ, timeout=1860)
+@mcp.tool(**READ, timeout=1800 + _TOOL_SLACK_S)
 def wait_for_blood_pressure(
     timeout_s: Annotated[float, Field(ge=5, le=1800, description="Seconds to wait for a measurement")] = 120.0,
 ) -> BloodPressureReading:
@@ -487,7 +516,7 @@ def wait_for_blood_pressure(
     )
 
 
-@mcp.tool(**READ, timeout=1860)
+@mcp.tool(**READ, timeout=1800 + _TOOL_SLACK_S)
 def read_temperature(
     timeout_s: Annotated[float, Field(ge=5, le=1800, description="Seconds to wait for a measurement")] = 60.0,
     accept_intermediate: Annotated[
@@ -518,7 +547,7 @@ def read_temperature(
     )
 
 
-@mcp.tool(**READ, timeout=1860)
+@mcp.tool(**READ, timeout=1800 + _TOOL_SLACK_S)
 def read_weight(
     timeout_s: Annotated[float, Field(ge=5, le=1800, description="Seconds to wait for a measurement")] = 60.0,
 ) -> WeightReading:

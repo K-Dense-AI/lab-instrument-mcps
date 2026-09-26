@@ -252,7 +252,7 @@ async def test_sweep_saves_csv(tmp_path):
                 {"start_hz": 100, "stop_hz": 100000, "points": 4, "log_spacing": True, "save_path": str(out)},
             )
         ).structured_content
-        assert sweep["saved_to"] == str(out)
+        assert sweep["saved_to"] == str(out.resolve())
         assert len(out.read_text().strip().splitlines()) == 5
         freqs = [p["frequency_hz"] for p in sweep["points"]]
         assert freqs[0] == pytest.approx(100) and freqs[-1] == pytest.approx(100000)
@@ -324,3 +324,87 @@ def test_sr86x_snapshot_is_one_coherent_snap():
     snaps = [c for c in sent if c.upper().startswith("SNAP?")]
     assert snaps == ["SNAP? 0,1,3"]
     assert snap.r == pytest.approx(math.hypot(snap.x, snap.y))
+
+
+async def test_stop_during_sweep_setup_is_not_lost_and_empty_result_is_valid():
+    # set_amplitude_minimum arriving while the sweep reads its settings must stop the sweep (the
+    # flag used to be cleared afterwards), and a sweep with no points must still return a valid
+    # result (the peak used to be NaN, which fails the output schema on the client).
+    async with sim_client(limits={"max_amplitude_v": 1.0}) as client:
+        await client.call_tool("get_connection_info", {})
+        lockin = server.driver
+        original = lockin.filter_slope_db
+
+        def slope_then_stop():
+            lockin.set_amplitude_minimum()
+            return original()
+
+        lockin.filter_slope_db = slope_then_stop
+        sweep = (
+            await client.call_tool("frequency_sweep", {"start_hz": 900, "stop_hz": 1100, "points": 3})
+        ).structured_content
+        lockin.filter_slope_db = original
+        assert sweep["count"] == 0 and sweep["completed"] is False
+        assert sweep["peak_frequency_hz"] is None and sweep["peak_r"] is None
+        assert any("set_amplitude_minimum" in w for w in sweep["warnings"])
+        assert lockin.frequency_hz() == pytest.approx(1000.0)  # never stepped
+
+
+def test_amplitude_minimum_is_best_effort():
+    lockin, sim, _ = make_driver("SR860")
+    lockin.set_amplitude_v(0.5)
+    lockin.write("SOFF 1.5")
+
+    def broken(v):
+        raise InstrumentProtocolError("SLVL failed")
+
+    lockin.set_amplitude_v = broken
+    with pytest.raises(InstrumentProtocolError, match="SLVL"):
+        lockin.set_amplitude_minimum()
+    assert sim.dc_level == 0.0  # the DC level was still zeroed
+    assert lockin.abort.is_set()
+
+
+def test_out_of_range_indices_raise_protocol_errors():
+    lockin, sim, _ = make_driver()
+    sim.oflt = 25
+    with pytest.raises(InstrumentProtocolError, match="OFLT"):
+        lockin.time_constant_s()
+    sim.oflt, sim.sens = 8, -1  # a negative index must not wrap to the end of the table
+    with pytest.raises(InstrumentProtocolError, match="sensitivity"):
+        lockin.sensitivity_v()
+
+
+async def test_sweep_save_path_checked_first_and_duration_budget(tmp_path):
+    existing = tmp_path / "sweep.csv"
+    existing.write_text("keep me", encoding="utf-8")
+    async with sim_client(limits={"max_sweep_duration_s": 1e6}) as client:
+        with pytest.raises(Exception, match="already exists"):
+            await client.call_tool(
+                "frequency_sweep", {"start_hz": 900, "stop_hz": 1100, "points": 3, "save_path": str(existing)}
+            )
+        await client.call_tool("set_time_constant", {"time_constant_s": 10})
+        with pytest.raises(Exception, match="one call can take"):
+            # 10 s time constant, 12 dB/oct: 70 s per point x 60 points ~ 4200 s
+            await client.call_tool("frequency_sweep", {"start_hz": 900, "stop_hz": 1100, "points": 60})
+        settings = (await client.call_tool("get_settings", {})).structured_content
+        assert settings["reference_frequency_hz"] == pytest.approx(1000.0)  # nothing was swept
+    assert existing.read_text(encoding="utf-8") == "keep me"
+
+
+def test_connect_closes_the_transport_if_identification_fails(monkeypatch):
+    from labmcp_srs_lockin import server as server_module
+
+    closed = []
+
+    class Other(SRSLockInSimulator):
+        def _dispatch(self, head, query, args):
+            return "ACME,THING,1,1" if head == "*IDN" else super()._dispatch(head, query, args)
+
+    monkeypatch.setattr(server_module, "SRSLockInSimulator", lambda **kw: Other())
+    monkeypatch.setattr(SimulatedTransport, "close", lambda self: closed.append(True))
+    server.configure(simulate=True, options={})
+    with pytest.raises(Exception, match="not a Stanford"):
+        server.driver  # noqa: B018
+    assert closed
+    server.disconnect()

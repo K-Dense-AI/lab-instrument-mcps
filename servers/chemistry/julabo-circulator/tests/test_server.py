@@ -240,3 +240,13 @@ def test_limit_error_type():
     server.configure(simulate=True, limits={"min_temperature_c": 10})
     with pytest.raises(SafetyLimitError):
         server.check("min_temperature_c", 4)
+
+
+@pytest.mark.parametrize("option", [{"command_delay_s": "-1"}, {"command_delay_s": "abc"}, {"keepalive_s": "nan"}])
+async def test_invalid_timing_options_are_refused_at_connect(option):
+    # Regression: a negative command_delay_s made every OUT command, including the stop command,
+    # fail later with a raw "sleep length must be non-negative" ValueError.
+    async with simulated_client(server, options=option) as client:
+        info = (await client.call_tool("get_connection_info", {})).data
+        assert info["connected"] is False and "--option" in info["error"]
+    server.configure(options={})

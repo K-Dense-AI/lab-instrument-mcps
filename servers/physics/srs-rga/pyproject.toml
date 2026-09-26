@@ -7,7 +7,7 @@ license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [{ name = "K-Dense and LabMCP contributors" }]
 keywords = ["mcp", "lab-instrument", "rga", "residual-gas-analyzer", "mass-spectrometry", "vacuum", "srs", "leak-detection"]
-dependencies = ["labmcp>=0.1,<0.2"]
+dependencies = ["labmcp>=0.1.2,<0.2"]
 
 [project.scripts]
 labmcp-srs-rga = "labmcp_srs_rga.server:main"

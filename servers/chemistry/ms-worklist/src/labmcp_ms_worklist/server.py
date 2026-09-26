@@ -12,8 +12,23 @@ from typing import Annotated, Any, Literal
 from labmcp import CONTROL, READ, ConnectContext, InstrumentServer, Limit
 from pydantic import Field
 
-from labmcp_ms_worklist.driver import ControlPlan, Defaults, ValidationReport, Worklist, WorklistStore
-from labmcp_ms_worklist.formats import FORMATS, NOT_IMPLEMENTED, POSITION_PATTERNS, FormatName, Sample
+from labmcp_ms_worklist.driver import (
+    ControlPlan,
+    Defaults,
+    ValidationReport,
+    Worklist,
+    WorklistError,
+    WorklistStore,
+)
+from labmcp_ms_worklist.formats import (
+    FORMATS,
+    NOT_IMPLEMENTED,
+    POSITION_PATTERNS,
+    FormatName,
+    Sample,
+    parse_number,
+    volume_overrides,
+)
 from labmcp_ms_worklist.simulator import simulated_store
 
 DEFAULT_DIR = "./worklists"
@@ -27,7 +42,13 @@ def connect(ctx: ConnectContext) -> WorklistStore:
     address = ctx.address or DEFAULT_DIR
     if address.startswith("file://"):
         address = address[len("file://") :]
-    return WorklistStore(os.path.expanduser(address))
+    try:
+        return WorklistStore(os.path.expanduser(address))
+    except OSError as exc:
+        raise WorklistError(
+            f"Cannot create or use the worklist folder {address!r}: {exc}. Start the server with "
+            "`--address <writable folder>`."
+        ) from exc
 
 
 server = InstrumentServer(
@@ -71,6 +92,13 @@ def _check_volumes(samples: list[Sample]) -> None:
     for s in samples:
         if s.injection_volume_ul is not None:
             server.check("max_injection_volume_ul", s.injection_volume_ul, f"injection volume for {s.sample_name!r}")
+        for header, raw in volume_overrides(s):  # 'extra' columns are written verbatim
+            try:
+                v = parse_number(raw)
+            except ValueError:
+                continue  # not a number: validation reports it and blocks export
+            if v is not None:
+                server.check("max_injection_volume_ul", v, f"injection volume ({header!r}) for {s.sample_name!r}")
 
 
 def _to_samples(items: list[Sample | str]) -> list[Sample]:
@@ -183,7 +211,7 @@ def create_worklist(
     volume, tray positions, data-file naming pattern). Nothing is written to disk until
     export_worklist. Injection volumes above the max_injection_volume_ul limit are refused."""
     items = _to_samples(samples)
-    _check_volumes(items)
+    _check_volumes([*items, Sample(sample_name="vendor_columns", extra=vendor_columns or {})])
     if injection_volume_ul is not None:
         server.check("max_injection_volume_ul", injection_volume_ul, "default injection volume")
     defaults = Defaults(
@@ -283,14 +311,12 @@ def get_worklist(
 def list_worklists() -> dict[str, Any]:
     """List the draft worklists in memory and the files in the output folder."""
     store = _store()
-    return {
-        "output_dir": str(store.root),
-        "drafts": [
+    with store.lock:  # another tool call may be adding a draft
+        drafts = [
             {"name": wl.name, "format": wl.format, "sample_count": len(store.samples(wl))}
-            for wl in store.drafts.values()
-        ],
-        "files": store.list_files(),
-    }
+            for wl in list(store.drafts.values())
+        ]
+    return {"output_dir": str(store.root), "drafts": drafts, "files": store.list_files()}
 
 
 @mcp.tool(**READ)
@@ -360,6 +386,20 @@ def import_worklist(
     folder into a draft, so it can be validated, edited or exported in another vendor's format.
     Columns without a neutral equivalent are kept verbatim. Only reads; nothing is written."""
     wl, warnings = _store().import_file(path, fmt=format, name=name, replace=replace)
+    limit = _max_vol()
+    for row, s in enumerate(_store().samples(wl), start=1):
+        values = [("injection volume", s.injection_volume_ul)]
+        for header, raw in volume_overrides(s):
+            try:
+                values.append((header, parse_number(raw)))
+            except ValueError:
+                pass  # already reported as "not a number"
+        for what, v in values:
+            if v is not None and v > limit:
+                warnings.append(
+                    f"Row {row}: {what} {v:g} µL exceeds max_injection_volume_ul={limit:g} µL; this worklist "
+                    "cannot be exported until the file is corrected and imported again."
+                )
     view = _view(wl)
     view["import_warnings"] = warnings
     return view

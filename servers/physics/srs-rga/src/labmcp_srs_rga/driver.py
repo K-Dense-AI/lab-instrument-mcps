@@ -27,10 +27,13 @@ from __future__ import annotations
 
 import re
 import struct
+import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
-from labmcp import InstrumentProtocolError, InstrumentTimeout, Transport
+from labmcp import InstrumentError, InstrumentProtocolError, InstrumentTimeout, Transport
 
 #: Scan rate (ms/amu) and single-mass measurement time (ms) per noise-floor setting NF0..NF7.
 #: Manual, "RGA Electronics Control Unit" chapter, "Electrometer" section, p. 4-9.
@@ -130,6 +133,10 @@ class PressureEvidence:
     monotonic: float = field(default_factory=time.monotonic)
 
 
+class OperationAborted(InstrumentError):
+    """A scan or measurement loop was interrupted by a safety tool (all_off, filament_off...)."""
+
+
 class RGAError(InstrumentProtocolError):
     """The RGA reported a non-zero STATUS byte after a command."""
 
@@ -150,12 +157,49 @@ class SrsRga:
         self.finished_degas: DegasState | None = None
         self._has_cdem: bool | None = None
         self.last_total_pressure: PressureEvidence | None = None
+        # Safety tools set this (without waiting for the transport lock) so that a running scan or
+        # measurement loop stops at its next checkpoint and releases the lock.
+        self._abort = threading.Event()
+        self._abort_users = 0
+        self._abort_guard = threading.Lock()
 
     # ------------------------------------------------------------ low level
 
     @staticmethod
     def _clean(text: str) -> str:
         return text.strip("\r\n\t ")
+
+    @contextmanager
+    def safety_priority(self) -> Iterator[None]:
+        """Interrupt any running scan / measurement loop, then hold the transport lock.
+
+        Used by the SAFETY tools: without it an emergency ``all_off`` would wait for the whole
+        scan or leak check (up to the duration limits) that holds the lock.
+        """
+        with self._abort_guard:
+            self._abort_users += 1
+            self._abort.set()
+        try:
+            with self.t.lock:
+                yield
+        finally:
+            with self._abort_guard:
+                self._abort_users -= 1
+                if not self._abort_users:
+                    self._abort.clear()
+
+    def check_abort(self, what: str) -> None:
+        if self._abort.is_set():
+            raise OperationAborted(
+                f"The {what} was interrupted by a safety tool (all_off / filament_off / cdem_off); "
+                "no data was returned."
+            )
+
+    def pause(self, seconds: float, what: str) -> None:
+        """Sleep, returning early (with :class:`OperationAborted`) if a safety tool needs the RGA."""
+        if seconds > 0:
+            self._abort.wait(seconds)
+        self.check_abort(what)
 
     def _guard(self) -> None:
         """Handle a degas cycle that is running (commands would abort it) or has finished."""
@@ -489,24 +533,52 @@ class SrsRga:
             return (stop - start + 1) * NF_SINGLE_MASS_MS[nf] / 1000.0 + 2.0
         return max(stop - start, 1) * NF_SCAN_MS_PER_AMU[nf] / 1000.0 + 2.0
 
+    def _halt_scan(self) -> None:
+        """Stop a scan that is still streaming and resynchronise the link.
+
+        The partial binary data is discarded first: it can contain CR bytes, so reading "up to
+        CR" would return early and leave the IN0 STATUS reply to be read as the answer to the
+        next query (every later reply would then be off by one).
+        """
+        self.t.flush_input()
+        self.t.write("IN0")  # halt the scan and clear both buffers (manual p. 6-12)
+        try:
+            self.t.read_until(b"\n\r", timeout=10.0)  # the STATUS byte ends with LF CR
+        except InstrumentTimeout:
+            pass
+        time.sleep(0.01 if self._simulated else 0.3)
+        self.t.flush_input()
+
+    def _read_scan(self, nbytes: int, timeout: float) -> bytes:
+        """Read a binary scan in short slices so a safety tool can interrupt it."""
+        deadline = time.monotonic() + timeout
+        while True:
+            if self._abort.is_set():
+                self._halt_scan()
+                self.check_abort("scan")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._halt_scan()
+                raise InstrumentTimeout(
+                    f"Scan data incomplete ({nbytes} bytes expected within {timeout:.0f} s); the RGA was "
+                    "reset with IN0."
+                )
+            try:
+                # Partial data stays in the transport buffer between slices.
+                return self.t.read_bytes(nbytes, min(remaining, 0.25))
+            except InstrumentTimeout:
+                continue
+
     def _run_scan(self, trigger: str, points_query: str, start: int, stop: int, sa: int) -> ScanResult:
         with self.t.lock:
+            self.check_abort("scan")
             nf = self.noise_floor()
             n = self.query_int(points_query)
             histogram = trigger.startswith("HS")
             timeout = self.estimate_scan_s(start, stop, nf, histogram) * 2.0 + 15.0
             self._guard()
             self.t.write(trigger)
-            try:
-                data = self.t.read_bytes(4 * (n + 1), timeout)
-            except InstrumentTimeout as exc:
-                self.t.write("IN0")  # halt the scan and clear both buffers (manual p. 6-12)
-                try:
-                    self.t.read(10.0)
-                except InstrumentTimeout:
-                    pass
-                self.t.flush_input()
-                raise InstrumentTimeout(f"Scan data incomplete ({exc}); the RGA was reset with IN0.") from exc
+            data = self._read_scan(4 * (n + 1), timeout)
         values = list(struct.unpack(f"<{n + 1}i", data))
         return ScanResult(values[:n], values[n], start, stop, sa if not histogram else 1, nf)
 

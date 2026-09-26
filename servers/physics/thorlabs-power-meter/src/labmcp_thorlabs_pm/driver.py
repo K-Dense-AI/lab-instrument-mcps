@@ -202,7 +202,8 @@ class ThorlabsPowerMeter(SCPIDriver):
         self.command(f"{self._sens}:AVER:COUN {int(count)}")
         return self.averaging()
 
-    def _measure_timeout(self) -> float:
+    def measure_timeout(self) -> float:
+        """Reply timeout for one ``MEAS:POW?`` at the present averaging (the longest a reading takes)."""
         # PM100 series: one sample takes ~3 ms (PM100D manual 6.4.2.3.5). Newer consoles are faster.
         count = self._averaging if self._averaging is not None else self.averaging()
         return 3.0 + count * 0.003 * 1.5
@@ -219,7 +220,7 @@ class ThorlabsPowerMeter(SCPIDriver):
             )
         with self.t.lock:
             unit = self.power_unit()
-            value = self._query_number(f"{self._meas}:POW?", timeout=self._measure_timeout())
+            value = self._query_number(f"{self._meas}:POW?", timeout=self.measure_timeout())
         if not math.isfinite(value) or abs(value) >= _OVERFLOW:
             raise InstrumentProtocolError(
                 f"Power meter reports the signal is out of the measurement range ({value!r}). "

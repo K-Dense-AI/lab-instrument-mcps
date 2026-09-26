@@ -204,3 +204,70 @@ def test_limit_error_type():
     server.configure(simulate=True, limits={"max_log_duration_s": 1})
     with pytest.raises(SafetyLimitError):
         server.check("max_log_duration_s", 5)
+
+
+async def test_log_save_path_is_checked_before_logging(tmp_path):
+    existing = tmp_path / "log.csv"
+    existing.write_text("keep me", encoding="utf-8")
+    async with sim_client() as client:
+        await client.call_tool("get_connection_info", {})
+        sim = server.driver.t.simulator
+        before = len(sim.log)
+        with pytest.raises(Exception, match="already exists"):
+            await client.call_tool("log_pressure_series", {"duration_s": 5, "save_path": str(existing)})
+        with pytest.raises(Exception, match=r"must end in \.csv"):
+            await client.call_tool(
+                "log_pressure_series", {"duration_s": 5, "save_path": str(tmp_path / "x.json")}
+            )
+        assert "PRX" not in sim.log[before:]  # refused before the first reading
+    assert existing.read_text(encoding="utf-8") == "keep me"
+
+
+async def test_log_longer_than_the_tool_timeout_is_refused():
+    async with sim_client(limits={"max_log_duration_s": 86400}) as client:
+        with pytest.raises(Exception, match="7200"):
+            await client.call_tool("log_pressure_series", {"duration_s": 86400})
+
+
+def test_malformed_integer_replies_raise_protocol_errors():
+    tpg, sim = make_driver()
+    original = sim._enquiry
+    sim._enquiry = lambda: "garbage" if sim.last and sim.last[0] in {"UNI", "SEN"} else original()
+    with pytest.raises(InstrumentProtocolError, match="UNI"):
+        tpg.unit()
+    with pytest.raises(InstrumentProtocolError, match="SEN"):
+        tpg.sensor_states()
+
+
+async def test_switch_gauge_off_still_tries_when_the_status_query_fails():
+    async with sim_client(options={"model": "tpg366"}) as client:
+        await client.call_tool("get_connection_info", {})
+        tpg = server.driver
+        sim = tpg.t.simulator
+        original = tpg.sensor_states
+        tpg.sensor_states = lambda: (_ for _ in ()).throw(InstrumentProtocolError("garbled SEN reply"))
+        with pytest.raises(Exception, match="garbled SEN reply"):  # the summary afterwards also needs SEN
+            await client.call_tool("switch_gauge_off", {"channel": 1})
+        assert "SEN,1,0,0,0,0,0" in sim.log  # but the gauge was switched off first
+        assert sim.gauges[0].on is False
+        tpg.sensor_states = original
+
+
+def test_connect_closes_the_transport_if_identification_fails(monkeypatch):
+    from labmcp import SimulatedTransport
+    from labmcp_pfeiffer_tpg import server as server_module
+
+    closed = []
+
+    class Silent(TPGSimulator):
+        def handle_bytes(self, data):
+            return b""
+
+    monkeypatch.setattr(server_module, "TPGSimulator", lambda **kw: Silent())
+    monkeypatch.setattr(SimulatedTransport, "close", lambda self: closed.append(True))
+    server.configure(simulate=True, options={}, timeout=0.2)
+    with pytest.raises(Exception, match="Timed out"):
+        server.driver  # noqa: B018
+    assert closed
+    server.disconnect()
+    server.settings.timeout = None  # configure() cannot unset it

@@ -84,7 +84,12 @@ class SCPIDriver:
             ndigits = int(head[1:2])
             if ndigits == 0:  # indefinite-length block
                 return self.t.read_until(self.t.read_termination.encode(), timeout)
-            length = int(self.t.read_bytes(ndigits, timeout))
+            digits = self.t.read_bytes(ndigits, timeout)
+            if not digits.isdigit():
+                raise InstrumentProtocolError(
+                    f"Malformed binary block header from {command!r}: {head + digits!r}"
+                )
+            length = int(digits)
             data = self.t.read_bytes(length, timeout)
             consume_block_terminator(self.t, timeout)
             return data

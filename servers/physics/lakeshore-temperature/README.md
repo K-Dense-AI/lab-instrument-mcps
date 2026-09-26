@@ -63,13 +63,13 @@ Add `--read-only` to allow reading temperatures and heater status but block setp
 <!-- TOOLS:START -->
 | Tool | Kind | Description |
 |---|---|---|
-| `all_heaters_off` | 🛑 safety | Turn every output off (heater range 0 on outputs 1-4), like the front-panel All Off key, and stop any running wait. Reports the read-back range of each output. |
+| `all_heaters_off` | 🛑 safety | Turn every output off (heater range 0 on outputs 1-4), like the front-panel All Off key, and stop any running wait. Reports the read-back range of each output and `all_off`. |
 | `get_command_log` | 👁 read | Return the most recent raw commands sent to / replies received from the instrument (newest last). Useful for debugging and for recording what was done. |
 | `get_connection_info` | 👁 read | Report which instrument is connected (identity, address, simulated or real), whether the server is read-only, and the active safety limits. Call this first. |
 | `get_heater_status` | 👁 read | Report each output's control mode and input, heater range, output %, setpoint (and in kelvin), ramp state, PID values and heater errors (open/short). Reading a heater error clears it on the controller. |
 | `read_temperatures` | 👁 read | Read every (or the selected) sensor input: kelvin, raw sensor units, sensor type, input name and decoded reading status (invalid, under/overrange). Disabled inputs are listed with null readings. |
 | `reconnect` | 🛑 safety | Close and re-open the connection to the instrument (e.g. after it was power cycled or a cable was re-plugged). |
-| `set_heater_range` | ⚠️ hazard | Set an output's heater range (each step is ~10x more power). Anything above 0 lets the output heat: in closed loop as the PID demands, in open loop at the front-panel manual output. Refused above `max_heater_range`. Start with the lowest range that can reach the setpoint. |
+| `set_heater_range` | ⚠️ hazard | Set an output's heater range (each step is ~10x more power). Anything above 0 lets the output heat: in closed loop as the PID demands, in open loop at the front-panel manual output. Refused above `max_heater_range`, or if the setpoint already programmed on a closed-loop, zone or warm-up output is above `max_setpoint_k`. Start with the lowest range that can reach the setpoint. |
 | `set_pid` | 🎛 control | Set the P, I and D values of an output's control loop (Lake Shore conventions). |
 | `set_ramp` | 🎛 control | Turn setpoint ramping on or off for an output's control loop and set the rate. With ramping on, the next setpoint change moves the setpoint gradually - gentler on samples and wiring. |
 | `set_setpoint` | ⚠️ hazard | Set the control setpoint of an output's loop in kelvin. If setpoint ramping is on, the setpoint moves toward the new value at the ramp rate. Heating only happens if the output is in closed-loop mode and its heater range is not off. Refused above `max_setpoint_k`. |
@@ -82,7 +82,7 @@ Add `--read-only` to allow reading temperatures and heater status but block setp
 
 | Limit | Default | Meaning |
 |---|---|---|
-| `max_setpoint_k` | 325 K | Highest setpoint `set_setpoint` accepts (room temperature plus margin). Raise it only if your stage, wiring and sensors are rated higher |
+| `max_setpoint_k` | 325 K | Highest setpoint `set_setpoint` accepts (room temperature plus margin). `set_heater_range` also reads back the setpoint of a closed-loop, zone or warm-up output before letting it heat, so a higher setpoint entered on the front panel is refused too (as is a setpoint in sensor units, which cannot be checked). Raise it only if your stage, wiring and sensors are rated higher |
 | `max_heater_range` | 3 | Highest heater range index. On the 335/336 3 = High (full power); on the 350 ranges go 1-5 in decade steps, so 3 is 1/100 of full power |
 | `max_wait_s` | 3600 s | Longest `wait_for_stable_temperature` call |
 
@@ -103,7 +103,7 @@ Override at launch: `--limit max_setpoint_k=420 --limit max_heater_range=2`.
 - Every command is followed by `*ESR?`; command (CME) and execution (EXE) errors are reported instead of being ignored. The server leaves at least 50 ms between messages, as the manuals require (`--option min_interval_s=`).
 - `get_heater_status` reads `HTRST?`, which clears a latched heater open/short error on the controller.
 - `wait_for_stable_temperature` needs the setpoint to have stopped ramping (`RAMPST?`) as well as the temperature to be in tolerance. `all_heaters_off` stops a running wait.
-- `all_heaters_off` sends `RANGE n,0` to every output and reads it back, like the front-panel **All Off** key. It does not change setpoints or output modes. Consider also setting a hardware temperature limit (`TLIMIT`, front panel) as a last line of defence.
+- `all_heaters_off` sends `RANGE n,0` to every output and reads it back, like the front-panel **All Off** key. Every output is tried even if another fails; `all_off` is true only when every output read back as off. It does not change setpoints or output modes. Consider also setting a hardware temperature limit (`TLIMIT`, front panel) as a last line of defence.
 - The 3062 scanner option (inputs D1-D5), zone tables, autotune, curves, alarms and relays are not exposed. The Model 372 AC resistance bridge was not verified and is refused at connect time.
 
 ## Hardware verification

@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Literal
@@ -516,7 +517,24 @@ def parse_number(text: str) -> float | None:
         t = t.replace(",", ".")
     if not t:
         return None
-    return float(t)
+    value = float(t)
+    if not math.isfinite(value):  # 'nan' / 'inf' would slip past every limit comparison
+        raise ValueError(f"{text!r} is not a finite number")
+    return value
+
+
+def volume_overrides(s: Sample) -> list[tuple[str, str]]:
+    """``extra`` entries that any supported format would read as an injection volume.
+
+    ``extra`` values are written verbatim (and override mapped columns), so they must be checked
+    against the injection-volume limit like ``injection_volume_ul`` itself.
+    """
+    out = []
+    for key, value in s.extra.items():
+        norm = normalise_header(key)
+        if any(spec.aliases.get(norm) == "injection_volume_ul" for spec in FORMATS.values()):
+            out.append((key, value))
+    return out
 
 
 def resolve_columns(
@@ -617,12 +635,21 @@ class Parsed:
 
 
 def decode(data: bytes) -> str:
-    for enc in ("utf-8-sig", "cp1252"):
-        try:
-            return data.decode(enc)
-        except UnicodeDecodeError:
-            continue
-    return data.decode("latin-1")
+    """Text of an import file: UTF-8 (with or without BOM), UTF-16 with BOM (Excel "Unicode Text"),
+    else Windows-1252. Raises ValueError for binary / BOM-less UTF-16 data."""
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        text = data.decode("utf-16")
+    else:
+        for enc in ("utf-8-sig", "cp1252", "latin-1"):
+            try:
+                text = data.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+    if "\x00" in text:
+        raise ValueError("the file contains NUL bytes (binary, or UTF-16 without a byte-order mark); save it as "
+                         "UTF-8 or ANSI text")
+    return text
 
 
 def _split_first_line(text: str) -> tuple[str, str]:
@@ -742,7 +769,7 @@ def check_position(position: str, pattern: str, plate_size: int, max_vial: int) 
     regex, desc = POSITION_PATTERNS[pattern]
     if regex is None:
         return None
-    m = re.match(regex, position)
+    m = re.fullmatch(regex, position)
     if not m:
         return f"position {position!r} does not match the {pattern} pattern ({desc})"
     if pattern == "vial_number":
@@ -766,9 +793,12 @@ def generate_positions(pattern: str, plate_size: int, max_vial: int, start: str,
     regex, desc = POSITION_PATTERNS[pattern]
     if regex is None:
         raise ValueError("Automatic positions need a position_pattern other than 'any'.")
-    m = re.match(regex, start)
+    m = re.fullmatch(regex, start)
     if not m:
         raise ValueError(f"first_position {start!r} does not match the {pattern} pattern ({desc}).")
+    problem = check_position(start, pattern, plate_size, max_vial)
+    if problem:  # e.g. 'A13' on a 96-well plate used to become 'B1' silently
+        raise ValueError(f"first_position: {problem}.")
     out: list[str] = []
     if pattern == "vial_number":
         n0 = int(m.group(1))
@@ -805,7 +835,10 @@ def generate_positions(pattern: str, plate_size: int, max_vial: int, start: str,
 # --------------------------------------------------------------------------- file names
 
 WINDOWS_ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+WINDOWS_RESERVED = {
+    "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
+    *(f"{dev}{i}" for dev in ("COM", "LPT") for i in (*"0123456789", "\u00b9", "\u00b2", "\u00b3")),
+}  # fmt: skip
 
 
 def filename_problem(name: str) -> str | None:
@@ -821,6 +854,16 @@ def filename_problem(name: str) -> str | None:
         return f"uses the reserved Windows device name {name.split('.')[0].upper()!r}"
     if len(name) > 200:
         return f"is {len(name)} characters long (keep data file names well under 255)"
+    return None
+
+
+CONTROL_CHARS = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
+
+
+def control_char_problem(text: str) -> str | None:
+    """Line breaks and other control characters break line-based vendor importers."""
+    if CONTROL_CHARS.search(text):
+        return "contains a line break or another control character"
     return None
 
 

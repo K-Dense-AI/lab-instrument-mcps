@@ -16,6 +16,7 @@ from labmcp import (
     InstrumentProtocolError,
     InstrumentServer,
     Limit,
+    prepare_save_path,
 )
 from pydantic import BaseModel, Field
 
@@ -26,13 +27,16 @@ from labmcp_palmsens.driver import (
     bandwidth_for_rate,
     build_script,
     encode_literal,
+    script_current_ranges,
     script_potentials,
     select_pgstat_mode,
 )
 from labmcp_palmsens.simulator import MethodScriptSimulator
 
 HARD_MAX_DURATION_S = 3600.0  # one tool call must finish within the tool timeout below
-TOOL_TIMEOUT_S = 3700.0
+#: Measurements run with a script timeout of 1.2 x duration + 30 s (up to 4350 s), then up to 15 s
+#: to end after an abort and ~30 s for a cell_off script; the tool must not be cut off before that.
+TOOL_TIMEOUT_S = 4500.0
 
 
 def connect(ctx: ConnectContext) -> MethodScriptDevice:
@@ -50,7 +54,11 @@ def connect(ctx: ConnectContext) -> MethodScriptDevice:
         timeout=2.0,
     )
     device = MethodScriptDevice(transport)
-    device.identify()  # learn the device type: potential windows and PGStat modes depend on it
+    try:
+        device.identify()  # learn the device type: potential windows and PGStat modes depend on it
+    except Exception:
+        transport.close()  # otherwise the port stays open and every reconnect finds it busy
+        raise
     return device
 
 
@@ -133,14 +141,16 @@ class ScriptOutput(BaseModel):
     duration_s: float
     output_lines: list[str] = Field(description="Raw output lines (truncated to max_lines)")
     total_lines: int
-    packages: list[dict[str, float]] = Field(
-        description="Data packages as {VarType: value}, truncated to max_lines"
+    packages: list[dict[str, float | None]] = Field(
+        description="Data packages as {VarType: value} (None for 'nan'), truncated to max_lines"
     )
     total_packages: int
     texts: list[str] = Field(description="send_string output")
     error: str | None
     cell_off_after_error: bool | None = Field(
-        None, description="After a runtime error (on_finished: is skipped): True if the cell was switched off"
+        None,
+        description="After a runtime error (on_finished: is skipped) or a timeout: True if the server's "
+        "cell_off script succeeded, False if it failed (the cell may still be on)",
     )
     aborted: bool
     timed_out: bool
@@ -160,7 +170,9 @@ Equilibration = Annotated[
     float, Field(ge=0, le=600, description="Seconds to hold the begin potential before the technique starts")
 ]
 MaxPoints = Annotated[int, Field(ge=10, le=100_000, description="Maximum number of points to return")]
-SavePath = Annotated[str | None, Field(description="Write every point to this CSV file (optional)")]
+SavePath = Annotated[
+    str | None, Field(description="Write every point to this new .csv file (optional; never overwrites a file)")
+]
 
 
 def _check_common(e_min: float, e_max: float, current_range_a: float, duration_s: float) -> None:
@@ -173,17 +185,22 @@ def _check_common(e_min: float, e_max: float, current_range_a: float, duration_s
         )
 
 
-def _points(result: ScriptResult, dt: float | None) -> tuple[list[DataPoint], list[int]]:
-    points, status = [], []
+def _points(result: ScriptResult, dt: float | None) -> tuple[list[DataPoint], list[int], int]:
+    """Data points, their current status flags, and how many packages had a 'nan' value (dropped:
+    a NaN would make every summary meaningless and is not valid JSON for the output schema)."""
+    points, status, invalid = [], [], 0
     for k, (scan, variables) in enumerate(result.packets):
         by_type = {v.type: v for v in variables}
         if "ba" not in by_type or "da" not in by_type:
             continue
         cur = by_type["ba"]
         t = by_type["eb"].value if "eb" in by_type else (k + 1) * (dt or 0.0)
+        if not all(math.isfinite(v) for v in (t, by_type["da"].value, cur.value)):
+            invalid += 1
+            continue
         points.append(DataPoint(time_s=t, potential_v=by_type["da"].value, current_a=cur.value, scan=scan))
         status.append(cur.status)
-    return points, status
+    return points, status, invalid
 
 
 def _downsample(points: list[DataPoint], max_points: int) -> list[DataPoint]:
@@ -196,10 +213,8 @@ def _downsample(points: list[DataPoint], max_points: int) -> list[DataPoint]:
     return out
 
 
-def _save_csv(path: str, points: list[DataPoint], status: list[int]) -> str:
-    target = Path(path).expanduser()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("w", newline="") as fh:
+def _save_csv(target: Path, points: list[DataPoint], status: list[int]) -> str:
+    with target.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
         writer.writerow(["index", "scan", "time_s", "potential_v", "current_a", "status"])
         for i, (p, s) in enumerate(zip(points, status, strict=True)):
@@ -265,6 +280,8 @@ def _run(
 ) -> tuple[MeasurementResult, list[DataPoint]]:
     """Check limits, build and run the script; return the result (without summary) and all points."""
     _check_common(e_min, e_max, current_range_a, duration_s)
+    # Checked before the measurement, so a bad path cannot waste it (or lose its data afterwards).
+    target = prepare_save_path(save_path, suffixes=(".csv",)) if save_path else None
     device = server.driver
     bandwidth = bandwidth_for_rate(points_per_s)
     mode = select_pgstat_mode(device.device_type, e_min, e_max, bandwidth)
@@ -282,8 +299,12 @@ def _run(
     )
     started = _now()
     result = device.execute(script, timeout_s=duration_s * 1.2 + 30.0)
-    points, status = _points(result, dt)
+    points, status, invalid = _points(result, dt)
     warnings = []
+    if invalid:
+        warnings.append(f"{invalid} point(s) had an invalid ('nan') value and were left out.")
+    if result.malformed:
+        warnings.append(f"{len(result.malformed)} data line(s) could not be decoded and were skipped.")
     if result.error:
         cell = (
             " The cell was switched off afterwards."
@@ -303,7 +324,7 @@ def _run(
     timing = sum(1 for s in status if s & 0x1)
     if timing:
         warnings.append(f"{timing} point(s) did not meet the requested timing (instrument too busy).")
-    saved = _save_csv(save_path, points, status) if save_path and points else None
+    saved = _save_csv(target, points, status) if target is not None and points else None
     data = _downsample(points, max_points)
     result_model = MeasurementResult(
         technique=technique,
@@ -610,9 +631,11 @@ def run_methodscript(
 ) -> ScriptOutput:
     """Advanced: run a raw MethodSCRIPT and return its raw output and decoded data packages. Literal
     potentials of set_e / set_range_minmax da and the CV, LSV, DPV, SWV, NPV, ACV, CA, PAD, EIS and
-    fast CV/CA techniques are checked against `max_potential_v`; values computed at run time are
+    fast CV/CA techniques are checked against `max_potential_v`, and literal `set_range ba` /
+    `set_autoranging ba` currents against `max_current_range_a`; values computed at run time are
     not. Aborted after `timeout_s`; add `on_finished:` + `cell_off` to your script so the cell is
-    switched off after an abort. After a runtime error the server switches the cell off itself."""
+    switched off after an abort. After a runtime error, a timeout or `abort_measurement` the server
+    switches the cell off itself."""
     lines = [ln for ln in script.splitlines() if ln.strip()]
     if lines and lines[0].strip() == "e":
         lines = lines[1:]
@@ -620,12 +643,17 @@ def run_methodscript(
         raise ValueError("The script is empty.")
     for number, value in script_potentials(lines):
         server.check("max_potential_v", abs(value), f"potential on script line {number}")
+    for number, value in script_current_ranges(lines):
+        server.check("max_current_range_a", value, f"current range on script line {number}")
     server.check("max_duration_s", timeout_s, "script timeout")
     device = server.driver
     result = device.execute(lines, timeout_s=timeout_s)
+    cell_off = result.cell_off_sent
     if result.timed_out:
-        device.execute(["cell_off"], timeout_s=5.0)
-    packages = [{v.type: v.value for v in variables} for _, variables in result.packets]
+        cell_off = device.cell_off()
+    packages = [
+        {v.type: v.value if math.isfinite(v.value) else None for v in variables} for _, variables in result.packets
+    ]
     return ScriptOutput(
         simulated=server.settings.simulate,
         duration_s=round(result.duration_s, 3),
@@ -635,7 +663,7 @@ def run_methodscript(
         total_packages=len(packages),
         texts=result.texts,
         error=result.error,
-        cell_off_after_error=result.cell_off_sent,
+        cell_off_after_error=cell_off,
         aborted=result.aborted,
         timed_out=result.timed_out,
         timestamp=_now(),

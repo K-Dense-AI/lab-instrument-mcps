@@ -203,3 +203,45 @@ def test_limit_error_type():
     server.configure(simulate=True, limits={"max_rate_ml_min": 1})
     with pytest.raises(SafetyLimitError):
         server.check("max_rate_ml_min", 5)
+
+
+# ------------------------------------------------------------------ regressions (bug review)
+
+
+def test_stop_retries_when_a_stop_packet_is_lost():
+    # Regression: a lost reply to the first STP raised out of stop(), leaving the pump running.
+    clock = FakeClock()
+
+    class LossySim(NewEraSimulator):
+        lost = 0
+
+        def handle(self, command):
+            if command.strip() == "STP" and self.lost == 0:
+                self.lost += 1
+                return None  # packet lost on the wire: not executed, no reply
+            return super().handle(command)
+
+    sim = LossySim(clock=clock)
+    pump = NewEraPump(SimulatedTransport(sim, read_termination="\x03", write_termination="\r", timeout=0.2))
+    pump.set_diameter(14.43)
+    pump.start_pumping("INF", 1.0, 1.0)
+    clock.now = 5.0
+    st = pump.stop()
+    assert sim.lost == 1 and st.prompt == "S" and not sim.running
+
+
+def test_stop_raises_when_the_pump_never_answers():
+    sim = NewEraSimulator(address=42)  # the pump ignores every packet sent to address 0
+    pump = NewEraPump(SimulatedTransport(sim, read_termination="\x03", write_termination="\r", timeout=0.05))
+    with pytest.raises(InstrumentProtocolError, match="Could not confirm that the pump stopped"):
+        pump.stop()
+
+
+def test_unrepresentable_volume_is_refused_before_the_rate_is_sent():
+    pump, sim, _ = make_pump()
+    pump.set_diameter(4.699)  # BD 1 mL: the pump works in µL, so 12 mL = 12000 µL (> 4 digits)
+    before = dict(sim.phases[1])
+    with pytest.raises(InstrumentProtocolError, match="works in µL"):
+        pump.start_pumping("INF", 12.0, 0.5)
+    assert sim.phases[1]["rate"] == before["rate"] and sim.phases[1]["vol"] == before["vol"]
+    assert not sim.running

@@ -13,6 +13,7 @@ from labmcp import (
     SAFETY,
     ConnectContext,
     InstrumentConnectionError,
+    InstrumentError,
     InstrumentProtocolError,
     InstrumentServer,
     Limit,
@@ -286,8 +287,13 @@ def clear_dispensed_volume() -> DispensedVolume:
 @mcp.tool(**SAFETY)
 def stop_pump() -> PumpStatus:
     """Stop the pump immediately (STP). A paused program is also cancelled so it cannot resume."""
-    server.driver.stop()
-    return get_status()
+    st = server.driver.stop()
+    try:
+        return get_status()
+    except InstrumentError as exc:
+        raise InstrumentProtocolError(
+            f"STP was sent and the pump reports '{st.state}', but reading its full status failed: {exc}"
+        ) from exc
 
 
 def main() -> None:

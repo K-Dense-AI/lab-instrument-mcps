@@ -8,6 +8,7 @@ from labmcp.errors import InstrumentConnectionError
 from labmcp.transports.base import Transport
 
 _PARITY = {"N": "N", "E": "E", "O": "O", "M": "M", "S": "S"}
+_READ_SLICE_S = 0.1
 
 
 class SerialTransport(Transport):
@@ -27,13 +28,16 @@ class SerialTransport(Transport):
         super().__init__(**kwargs)
         import serial  # pyserial
 
-        self.description = f"serial://{port} @ {baudrate} {bytesize}{parity.upper()}{stopbits:g}"
+        parity_code = _PARITY.get(str(parity).strip().upper()[:1])
+        if parity_code is None:
+            raise InstrumentConnectionError(f"Unknown serial parity {parity!r}: use N, E, O, M or S.")
+        self.description = f"serial://{port} @ {baudrate} {bytesize}{parity_code}{stopbits:g}"
         try:
             self._port = serial.Serial(
                 port=port,
                 baudrate=int(baudrate),
                 bytesize=int(bytesize),
-                parity=_PARITY[parity.upper()[0]],
+                parity=parity_code,
                 stopbits=float(stopbits) if float(stopbits) == 1.5 else int(stopbits),
                 rtscts=bool(rtscts),
                 xonxoff=bool(xonxoff),
@@ -52,7 +56,12 @@ class SerialTransport(Transport):
         self._port.flush()
 
     def _read(self, max_bytes: int, timeout: float) -> bytes:
-        self._port.timeout = max(timeout, 0.001)
+        # Setting pyserial's timeout reconfigures the port (tcsetattr / SetCommState), so wait
+        # in fixed slices instead of re-setting it on every call; the base class loops until
+        # its own deadline, and a read returns as soon as a byte arrives.
+        slice_s = min(max(timeout, 0.001), _READ_SLICE_S)
+        if self._port.timeout != slice_s:
+            self._port.timeout = slice_s
         first = self._port.read(1)
         if not first:
             return b""

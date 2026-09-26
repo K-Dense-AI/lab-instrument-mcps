@@ -1,10 +1,12 @@
 import csv
+import threading
+import time
 
 import pytest
 from labmcp import InstrumentConnectionError, InstrumentProtocolError, SafetyLimitError
 from labmcp.testing import simulated_client, tool_names
 from labmcp_ni_daqmx.driver import NIDAQ, expand_channels
-from labmcp_ni_daqmx.server import server
+from labmcp_ni_daqmx.server import _downsample, server
 from labmcp_ni_daqmx.simulator import SimulatedNIDAQmx
 
 
@@ -140,7 +142,8 @@ async def test_tools_via_mcp(tmp_path):
                  "rate_hz": 20_000, "max_points": 100, "save_path": str(path)},
             )
         ).structured_content
-        assert acq["downsample_factor"] == 10 and len(acq["waveforms"]["Dev1/ai0"]) == 100
+        assert acq["downsample_factor"] == 20 and len(acq["waveforms"]["Dev1/ai0"]) == 100
+        assert len(acq["time_s"]) == 100
         assert acq["stats"][0]["rms"] == pytest.approx(0.707, abs=0.1)
         rows = list(csv.reader(path.open()))
         assert rows[0] == ["time_s", "Dev1/ai0_v", "Dev1/ai1_v"] and len(rows) == 1001
@@ -200,3 +203,80 @@ def test_limit_error_type():
     server.configure(simulate=True, limits={"max_ao_voltage_v": 1})
     with pytest.raises(SafetyLimitError):
         server.check("max_ao_voltage_v", 2)
+
+
+def test_safe_state_does_not_wait_for_a_running_acquisition():
+    d, sim = make_driver()
+    d.write_voltage("ao0", 3.0)
+    d.write_lines("port0/line2", [True])
+    result = {}
+    worker = threading.Thread(target=lambda: result.update(a=d.read_voltage("ai0", samples=30_000, rate_hz=10_000)))
+    worker.start()
+    time.sleep(0.3)
+    t0 = time.monotonic()
+    d.safe_state()  # the 3 s acquisition holds the analog-input lock, not the output lock
+    assert time.monotonic() - t0 < 1.0
+    hw = sim.hardware["Dev1"]
+    assert hw.ao_value["dev1/ao0"] == 0.0 and hw.line_output["dev1/port0/line2"] is False
+    worker.join(10)
+    assert len(result["a"].data[0]) == 30_000  # the acquisition itself was not disturbed
+
+
+def test_safe_state_drives_other_lines_low_when_one_fails(monkeypatch):
+    d, sim = make_driver()
+    d.write_lines("port0/line0:2", [True])
+    original = d.write_lines
+
+    def flaky(lines, levels):
+        if "Dev1/port0/line1" in lines:
+            raise InstrumentProtocolError("line1 is broken")
+        return original(lines, levels)
+
+    monkeypatch.setattr(d, "write_lines", flaky)
+    with pytest.raises(InstrumentProtocolError, match="line1 is broken"):
+        d.safe_state()
+    hw = sim.hardware["Dev1"]
+    assert hw.line_output["dev1/port0/line0"] is False and hw.line_output["dev1/port0/line2"] is False
+
+
+def test_line_names_are_canonical_so_safe_state_has_no_case_duplicates():
+    d, sim = make_driver(safe_do_lines="port0/line1")
+    names = d.write_lines("PORT0/LINE1", [True])
+    assert names == ["Dev1/port0/line1"] and list(d.do_last) == ["Dev1/port0/line1"]
+    d.safe_state()
+    assert sim.hardware["Dev1"].line_output["dev1/port0/line1"] is False
+
+
+def test_invalid_safe_do_lines_and_huge_ranges_are_refused():
+    with pytest.raises(InstrumentConnectionError, match="safe_do_lines"):
+        make_driver(safe_do_lines="port7/line0")
+    with pytest.raises(InstrumentProtocolError, match="at most 1024"):
+        expand_channels("ai0:100000000", "Dev1")
+
+
+def test_downsample_keeps_spikes():
+    n = 10_000
+    times = [i * 1e-4 for i in range(n)]
+    col = [0.0] * n
+    col[5003] = 9.0
+    col[17] = -4.0
+    t_out, (wave,), factor = _downsample(times, [col], 500)
+    assert len(wave) == len(t_out) <= 500 and factor == 40
+    assert max(wave) == 9.0 and min(wave) == -4.0 and t_out == sorted(t_out)
+
+
+async def test_acquisition_longer_than_the_tool_timeout_is_refused():
+    async with simulated_client(server, limits={"max_acquisition_s": 1e6, "max_samples": 1e7}) as client:
+        with pytest.raises(Exception, match="single tool call"):
+            await client.call_tool("read_analog", {"channels": "ai0", "samples": 1_000_000, "rate_hz": 1000})
+
+
+async def test_save_path_refuses_existing_file_before_acquiring(tmp_path):
+    existing = tmp_path / "old.csv"
+    existing.write_text("keep me", encoding="utf-8")
+    async with simulated_client(server) as client:
+        with pytest.raises(Exception, match="already exists"):
+            await client.call_tool("read_analog", {"channels": "ai0", "samples": 10, "rate_hz": 100, "save_path": str(existing)})
+        log = (await client.call_tool("get_command_log", {"limit": 100})).data
+        assert not any(e["data"].startswith("AI voltage") for e in log)
+    assert existing.read_text(encoding="utf-8") == "keep me"

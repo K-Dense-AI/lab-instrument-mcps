@@ -270,8 +270,26 @@ def output_on(channel: Channel) -> OutputStatus:
         _check_setpoints_against_limits(channel, set_v, set_i)
     else:
         _check_setpoints_against_limits(channel, spec.max_voltage_v, None)
-    psu.set_output(channel, True)
-    status = _status(psu, channel)
+    try:
+        psu.set_output(channel, True)
+    except InstrumentConnectionError:
+        raise
+    except InstrumentError as exc:
+        # The ON command was written but the supply then reported an error: the state is uncertain,
+        # so switch the output off again rather than leave it energised behind an error message.
+        try:
+            psu.set_output(channel, False)
+            outcome = "The output was switched OFF again to be safe."
+        except InstrumentError as off_exc:
+            outcome = f"Switching it OFF again also failed ({off_exc}): check the front panel and call `output_off`."
+        raise InstrumentProtocolError(f"CH{channel} reported an error when switched on ({exc}). {outcome}") from exc
+    try:
+        status = _status(psu, channel)
+    except InstrumentError as exc:
+        raise InstrumentProtocolError(
+            f"CH{channel} was switched ON, but its status could not be read back ({exc}). The output is probably "
+            "energised: call `output_off` if in doubt."
+        ) from exc
     if status.output_on is False:
         raise InstrumentProtocolError(
             f"CH{channel} did not turn on (a protection trip or front-panel lock may prevent it): {status.notes}"
@@ -285,8 +303,29 @@ def output_on(channel: Channel) -> OutputStatus:
 def output_off(channel: Channel) -> OutputStatus:
     """Switch a channel's output OFF. Safe to call at any time."""
     psu = server.driver
-    psu.set_output(channel, False)
-    status = _status(psu, channel, with_protection=False)
+    spec = psu.channel(channel)
+    notes: list[str] = []
+    try:
+        psu.set_output(channel, False)
+    except InstrumentConnectionError:
+        raise
+    except InstrumentError as exc:
+        # The OFF command was written; only the error-queue check after it complained (e.g. a stale
+        # error left by an earlier command). Judge success by the read-back state instead.
+        notes.append(f"The supply reported an error after the OFF command: {exc}")
+    try:
+        status = _status(psu, channel, with_protection=False)
+    except InstrumentError as exc:
+        # The full status could not be read (e.g. a measurement timed out): report the state alone.
+        vmax = _finite(spec.max_voltage_v)
+        status = OutputStatus(
+            channel=channel, timestamp=datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            output_on=psu.output_state(channel), set_voltage_v=None, set_current_a=None, measured_voltage_v=None,
+            measured_current_a=None, measured_power_w=None, mode=None, mode_source=None,
+            max_voltage_v=None if vmax is None else (-vmax if spec.negative else vmax),
+            max_current_a=_finite(spec.max_current_a), notes=[f"Could not read the full channel status: {exc}"],
+        )
+    status.notes += notes
     if status.output_on is True:
         raise InstrumentProtocolError(f"CH{channel} still reports ON. Switch it off at the front panel.")
     return status
