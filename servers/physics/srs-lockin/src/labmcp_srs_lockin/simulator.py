@@ -46,7 +46,7 @@ class SRSLockInSimulator(LineSimulator):
         self,
         model: str = "SR830",
         seed: int | None = 0,
-        clock: Callable[[], float] = time.monotonic,
+        clock: Callable[[], float] = time.perf_counter,  # monotonic ticks ~15.6 ms on Windows
     ) -> None:
         self.spec = MODELS[model.upper()]
         self.family = self.spec.family
