@@ -177,8 +177,11 @@ async def test_get_recent_scans_filters_and_caps(tmp_path: Path):
         for s in data["scans"]:
             assert s["ms_order"] == 2 and len(s["top_centroids"]) <= 3
             assert s["header"]["MSOrder"] == "2" and "Access Id:" in s["trailer"]
-        rows = list(csv.DictReader(out.open()))
-        assert rows and {r["ms_order"] for r in rows} == {"2"}
+        # An MS2 scan can legitimately have no centroids above the detection floor.
+        with out.open(newline="", encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+        assert len(rows) == sum(s["centroid_count"] for s in data["scans"])
+        assert all(r["ms_order"] == "2" for r in rows)
         await client.call_tool("stop_acquisition", {})
 
 
