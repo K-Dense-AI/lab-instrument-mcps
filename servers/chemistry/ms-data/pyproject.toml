@@ -37,6 +37,7 @@ models = ["Any LC-MS run in mzML/mzMLb", "Bruker timsTOF (TDF .d)", "Thermo .raw
 interfaces = ["File"]
 protocol = "mzML / mzMLb (pyteomics) / Bruker TDF (SQLite + timsrust) / msconvert & ThermoRawFileParser"
 summary = "Read and analyse LC-MS data from any vendor via open formats: find runs, run metadata, TIC/BPC, XICs with apex and area, spectra, MS2 search by precursor, quick QC, and conversion of vendor files with the user's own msconvert or ThermoRawFileParser."
+registry_description = "MCP server for LC-MS data in mzML/mzMLb and Bruker timsTOF files; vendor formats via msconvert."
 status = "simulated"
 
 [build-system]

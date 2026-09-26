@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.K-Dense-AI/labmcp-alicat",
   "title": "Alicat Mass Flow & Pressure Controller",
-  "description": "MCP server for Alicat mass flow and pressure meters/controllers: read flow, set setpoints, select ga",
+  "description": "MCP server for Alicat mass flow and pressure meters/controllers.",
   "version": "0.1.1",
   "repository": {
     "url": "https://github.com/K-Dense-AI/lab-instrument-mcps",

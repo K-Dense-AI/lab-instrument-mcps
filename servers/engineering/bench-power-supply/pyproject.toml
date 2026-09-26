@@ -24,6 +24,7 @@ models = ["Rigol DP832/DP831/DP822/DP821/DP811/DP813", "Rigol DP711/DP712", "Rig
 interfaces = ["USB (USB-TMC / virtual COM)", "LAN (VISA / raw socket)", "RS-232", "GPIB (via VISA)"]
 protocol = "SCPI (Rigol, Siglent) and Aim-TTi remote commands"
 summary = "Read setpoints and measured V/I/CV-CC per channel, set voltage and current limits, switch outputs on/off, set OVP/OCP, read errors."
+registry_description = "MCP server for programmable DC bench power supplies from Rigol, Siglent and Aim-TTi."
 status = "simulated"
 
 [build-system]

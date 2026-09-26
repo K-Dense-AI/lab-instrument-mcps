@@ -887,3 +887,23 @@ def test_new_server_scaffold_passes_the_basic_checklist(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "argv", [*sys.argv[:-4], "--name", 'Bad "Name"', "--vendor", "ACME"])
     with pytest.raises(SystemExit, match="quotes"):
         ns.main()
+
+
+def test_registry_description_fits_the_registry_limit_without_cutting_words(capsys):
+    bc = _load_script("build_catalog")
+    long_desc = (
+        "MCP server for JULABO heating and refrigerated circulators (CORIO, MAGIO, DYNEO): read "
+        "temperatures, set setpoints, start and stop."
+    )
+    assert bc.registry_description(long_desc, {}, "x") == (
+        "MCP server for JULABO heating and refrigerated circulators (CORIO, MAGIO, DYNEO)."
+    )
+    short = "MCP server for balances (MT-SICS): weigh, tare."
+    assert bc.registry_description(short, {}, "x") == short
+    no_colon = "MCP server for things (" + "a, " * 40 + "b) with more words after it"
+    out = bc.registry_description(no_colon, {}, "x")
+    assert len(out) <= 100 and out.endswith("…") and out.count("(") == out.count(")")
+    assert "registry_description" in capsys.readouterr().err
+    assert bc.registry_description(long_desc, {"registry_description": "Short."}, "x") == "Short."
+    with pytest.raises(SystemExit, match="1-100 characters"):
+        bc.registry_description(long_desc, {"registry_description": "x" * 101}, "x")

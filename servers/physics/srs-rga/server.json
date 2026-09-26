@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.K-Dense-AI/labmcp-srs-rga",
   "title": "SRS Residual Gas Analyzer",
-  "description": "MCP server for SRS RGA100/200/300 residual gas analyzers: spectra, partial pressures, leak checks, f",
+  "description": "MCP server for SRS RGA100/200/300 residual gas analyzers.",
   "version": "0.1.0",
   "repository": {
     "url": "https://github.com/K-Dense-AI/lab-instrument-mcps",

@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.K-Dense-AI/labmcp-ms-data",
   "title": "Mass Spectrometry Data (mzML, Bruker TDF, vendor conversion)",
-  "description": "MCP server for mass-spectrometry data files (mzML, mzMLb, Bruker timsTOF TDF; vendor files via mscon",
+  "description": "MCP server for LC-MS data in mzML/mzMLb and Bruker timsTOF files; vendor formats via msconvert.",
   "version": "0.1.0",
   "repository": {
     "url": "https://github.com/K-Dense-AI/lab-instrument-mcps",

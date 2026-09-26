@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.K-Dense-AI/labmcp-thorlabs-pm",
   "title": "Thorlabs Optical Power Meter",
-  "description": "MCP server for Thorlabs optical power meters (PM100D/PM100A/PM100USB/PM400/PM101/PM5020, SCPI over U",
+  "description": "MCP server for Thorlabs optical power meters (PM100 family, PM400, PM101, PM5020) over SCPI.",
   "version": "0.1.1",
   "repository": {
     "url": "https://github.com/K-Dense-AI/lab-instrument-mcps",

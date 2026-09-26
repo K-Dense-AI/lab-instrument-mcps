@@ -24,6 +24,7 @@ models = ["PM100D", "PM100A", "PM100USB", "PM400", "PM101 (unverified)", "PM5020
 interfaces = ["USB (USBTMC / VISA)"]
 protocol = "SCPI (Thorlabs PM100 / PM400 command set)"
 summary = "Read optical power (W and dBm), log power stability series, set wavelength correction, averaging and range, dark-zero the sensor, read sensor head temperature."
+registry_description = "MCP server for Thorlabs optical power meters (PM100 family, PM400, PM101, PM5020) over SCPI."
 status = "simulated"
 
 [build-system]

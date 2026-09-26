@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.K-Dense-AI/labmcp-srs-lockin",
   "title": "SRS Lock-in Amplifier",
-  "description": "MCP server for Stanford Research Systems lock-in amplifiers (SR810/SR830, SR860/SR865A): read X/Y/R/",
+  "description": "MCP server for Stanford Research Systems lock-in amplifiers (SR810/SR830, SR860/SR865A).",
   "version": "0.1.2",
   "repository": {
     "url": "https://github.com/K-Dense-AI/lab-instrument-mcps",

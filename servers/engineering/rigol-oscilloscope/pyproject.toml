@@ -24,6 +24,7 @@ models = ["DS1000Z / MSO1000Z (DS1054Z, DS1104Z...)", "DS1000Z-E (DS1202Z-E)", "
 interfaces = ["USB (USB-TMC)", "LAN (VXI-11 / raw socket)"]
 protocol = "SCPI (Rigol programming guides)"
 summary = "Read settings, autoscale, run/stop/single, set channels, timebase and edge trigger, take measurements, capture scaled waveforms (screen or deep memory) and screenshots."
+registry_description = "MCP server for Rigol oscilloscopes (DS1000Z, MSO5000, DHO series): measurements and waveforms."
 status = "simulated"
 
 [build-system]

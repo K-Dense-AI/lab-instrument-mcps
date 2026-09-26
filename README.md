@@ -12,7 +12,7 @@
 
 **LabMCP lets an AI assistant such as Claude operate your laboratory instruments.** You describe what you want in plain language, and the assistant weighs, heats, stirs, pumps, measures and logs for you. It stays inside safety limits you set, keeps a record of every command, and has a practice mode that needs no hardware.
 
-It supports balances, hotplate stirrers, syringe pumps, spectrometers, potentiostats, lock-in amplifiers, temperature controllers, vacuum gauges, flow controllers, biosensors, clinical analyzers and more. **You don't need to know how to program.** Setup means installing one free helper program and pasting a few lines into your AI app's settings.
+It supports balances, hotplate stirrers, syringe pumps, spectrometers, mass spectrometers, potentiostats, lock-in amplifiers, temperature controllers, vacuum gauges, flow controllers, biosensors, clinical analyzers and more. **You don't need to know how to program.** Setup means installing one free helper program and pasting a few lines into your AI app's settings.
 
 Free and open source, built by [K-Dense](https://www.k-dense.ai).
 
@@ -309,7 +309,7 @@ Add several instruments and the assistant can coordinate them:
 
 ## 🤝 Contributing
 
-**No coding needed for the most valuable contribution: testing a connector on your real instrument.** Most connectors are 🧪 simulated until someone who owns the instrument confirms they work. Run the connection check, try a few requests, and [file a short report](https://github.com/K-Dense-AI/lab-instrument-mcps/issues/new?template=hardware-verification.yml). You can also [request an instrument](https://github.com/K-Dense-AI/lab-instrument-mcps/issues/new?template=instrument-request.yml), or add 👍 to existing requests.
+**No coding needed for the most valuable contribution: testing a connector on your real instrument.** All connectors are currently 🧪 simulated: they stay that way until someone who owns the instrument confirms they work. Run the connection check, try a few requests, and [file a short report](https://github.com/K-Dense-AI/lab-instrument-mcps/issues/new?template=hardware-verification.yml). You can also [request an instrument](https://github.com/K-Dense-AI/lab-instrument-mcps/issues/new?template=instrument-request.yml), or add 👍 to existing requests.
 
 ### For developers
 

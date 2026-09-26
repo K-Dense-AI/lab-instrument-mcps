@@ -35,6 +35,7 @@ models = [
 interfaces = ["USB (serial dongle)", "Bluetooth LE", "WiFi", "Vendor SDK (via BrainFlow)"]
 protocol = "BrainFlow SDK (BoardShim / DataFilter)"
 summary = "List boards, stream, record N seconds (stats + downsampled traces + CSV), EEG band powers, event markers, per-channel signal quality (flat, railed, mains noise). Research use only."
+registry_description = "MCP server for EEG/EMG/ECG/PPG boards via BrainFlow (OpenBCI, Muse, Neurosity, Unicorn, BrainBit)."
 status = "simulated"
 
 [build-system]

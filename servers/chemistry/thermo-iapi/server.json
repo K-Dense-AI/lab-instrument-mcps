@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.K-Dense-AI/labmcp-thermo-iapi",
   "title": "Thermo Orbitrap (Instrument API)",
-  "description": "MCP server adapter for Thermo Fisher Orbitrap mass spectrometers via the licensed Instrument API (IA",
+  "description": "MCP server adapter for Thermo Fisher Orbitrap mass spectrometers via the licensed Instrument API.",
   "version": "0.1.0",
   "repository": {
     "url": "https://github.com/K-Dense-AI/lab-instrument-mcps",

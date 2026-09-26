@@ -111,7 +111,7 @@ uv run pytest servers/chemistry/ika-stirrer
 
 ## 6. Metadata and docs
 
-- Fill `[tool.labmcp]` in `pyproject.toml`: `name, domain, category, vendor, models, interfaces, protocol, summary, status`. New servers start as `status = "simulated"`; change it to `hardware-verified` only after someone has tested it on real hardware and reported the model and firmware.
+- Fill `[tool.labmcp]` in `pyproject.toml`: `name, domain, category, vendor, models, interfaces, protocol, summary, status`. If `[project] description` is longer than 100 characters, also set `registry_description` (at most 100 characters): it is the one-line description shown in the MCP Registry. New servers start as `status = "simulated"`; change it to `hardware-verified` only after someone has tested it on real hardware and reported the model and firmware.
 - Write the README following the reference server: setup on the instrument side, the `--check` command, client config, safety limits, example prompts, notes, hardware verification table.
 - Regenerate the catalog and the README tables:
 

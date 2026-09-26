@@ -33,6 +33,7 @@ models = [
 interfaces = ["GPIB (VISA)", "USBTMC (VISA)", "LAN VXI-11 / HiSLIP (VISA)", "LAN raw socket (e.g. port 5025)", "RS-232 / USB-serial"]
 protocol = "SCPI-99 / IEEE 488.2"
 summary = "Identify, query, write and batch raw SCPI with a query-only read path, configurable command allow/deny lists, error-queue checks, binary block transfer and a user-defined safe state."
+registry_description = "Generic MCP server for any SCPI instrument over VISA, TCP or serial, with command allow/deny lists."
 status = "simulated"
 
 [build-system]

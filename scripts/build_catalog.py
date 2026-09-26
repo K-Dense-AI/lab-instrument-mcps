@@ -78,6 +78,7 @@ def load_servers() -> list[dict]:
                 "package": project["name"],
                 "version": project["version"],
                 "description": project["description"],
+                "registry_description": registry_description(project["description"], meta, where),
                 "command": command,
                 "module": module,
                 "path": where,
@@ -86,6 +87,36 @@ def load_servers() -> list[dict]:
             }
         )
     return servers
+
+
+REGISTRY_DESCRIPTION_MAX = 100  # MCP Registry server.json schema limit
+
+
+def registry_description(description: str, meta: dict, where: str) -> str:
+    """The <=100-character description for the MCP Registry.
+
+    Uses ``[tool.labmcp] registry_description`` when set. Otherwise it shortens the project
+    description at the colon that ends "MCP server for X (details): ...", or at a word
+    boundary with an ellipsis (and warns, since a hand-written one reads better).
+    """
+    override = meta.get("registry_description")
+    if override is not None:
+        text = " ".join(str(override).split())
+        if not text or len(text) > REGISTRY_DESCRIPTION_MAX:
+            sys.exit(f"{where}: registry_description must be 1-{REGISTRY_DESCRIPTION_MAX} characters (got {len(text)})")
+        return text
+    text = " ".join(description.split())
+    if len(text) <= REGISTRY_DESCRIPTION_MAX:
+        return text
+    head, sep, _ = text.partition(": ")
+    if sep and 30 <= len(head) < REGISTRY_DESCRIPTION_MAX and head.count("(") == head.count(")"):
+        return head + "."
+    cut = text[: REGISTRY_DESCRIPTION_MAX - 1].rsplit(" ", 1)[0].rstrip(",;:(-/ ")
+    if cut.count("(") > cut.count(")"):
+        cut = cut[: cut.rfind("(")].rstrip()
+    print(f"warning: {where}: registry description shortened to {cut + '…'!r}; "
+          "set [tool.labmcp] registry_description", file=sys.stderr)
+    return cut + "…"
 
 
 def list_tools(module: str, where: str) -> list[dict]:
@@ -116,7 +147,7 @@ def server_json(s: dict) -> dict:
         "$schema": SCHEMA,
         "name": f"{REGISTRY_NAMESPACE}/{s['package']}",
         "title": s["name"],
-        "description": s["description"][:100],
+        "description": s["registry_description"],
         "version": s["version"],
         "repository": {"url": f"https://github.com/{REPO}", "source": "github", "subfolder": s["path"]},
         "websiteUrl": f"https://github.com/{REPO}/tree/main/{s['path']}",

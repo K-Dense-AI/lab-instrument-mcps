@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.K-Dense-AI/labmcp-epics",
   "title": "EPICS Channel Access",
-  "description": "MCP server for EPICS Channel Access (accelerators, synchrotrons, neutron sources, telescopes, physic",
+  "description": "MCP server for EPICS Channel Access: read, monitor and guarded writes of process variables.",
   "version": "0.1.1",
   "repository": {
     "url": "https://github.com/K-Dense-AI/lab-instrument-mcps",

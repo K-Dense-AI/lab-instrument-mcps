@@ -31,6 +31,7 @@ models = [
 interfaces = ["Ethernet (CA over UDP/TCP 5064/5065)"]
 protocol = "EPICS Channel Access v4.13 (caproto)"
 summary = "Read PVs with units, precision, alarms, timestamps and limits; monitor PVs for a bounded time; guarded writes (allow-list regex, access rights, DRVH/DRVL control limits, put-callback completion); configurable safe-state action."
+registry_description = "MCP server for EPICS Channel Access: read, monitor and guarded writes of process variables."
 status = "simulated"
 
 [build-system]

@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.K-Dense-AI/labmcp-brainflow",
   "title": "BrainFlow Biosensing Boards",
-  "description": "MCP server for EEG/EMG/ECG/PPG biosensing boards via BrainFlow (OpenBCI, Muse, Neurosity, g.tec Unic",
+  "description": "MCP server for EEG/EMG/ECG/PPG boards via BrainFlow (OpenBCI, Muse, Neurosity, Unicorn, BrainBit).",
   "version": "0.1.1",
   "repository": {
     "url": "https://github.com/K-Dense-AI/lab-instrument-mcps",

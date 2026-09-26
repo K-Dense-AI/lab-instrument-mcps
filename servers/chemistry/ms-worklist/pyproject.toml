@@ -24,6 +24,7 @@ models = ["Waters MassLynx 4.x", "SCIEX OS", "Agilent MassHunter Acquisition", "
 interfaces = ["File"]
 protocol = "Sample-list import files: MassLynx worksheet CSV, SCIEX OS batch CSV/TXT, MassHunter worklist CSV, Xcalibur sequence CSV"
 summary = "Build, randomise, validate, convert and export LC-MS sample queues as vendor import files (never starts a run)."
+registry_description = "MCP server that builds and validates LC-MS worklists for MassLynx, SCIEX OS, MassHunter, Xcalibur."
 status = "simulated"
 
 [build-system]

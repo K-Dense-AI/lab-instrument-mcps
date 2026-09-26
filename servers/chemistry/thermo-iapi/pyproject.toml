@@ -29,6 +29,7 @@ models = ["Orbitrap Fusion", "Orbitrap Fusion Lumos", "Orbitrap Eclipse", "Orbit
 interfaces = [".NET API (Windows)"]
 protocol = "Thermo Fisher Instrument API (IAPI)"
 summary = "Adapter for the licensed Thermo IAPI (bring your own assemblies): instrument status, live scan buffer with MS-order filters, validated and rate-limited custom and repeating scans, acquisitions to raw files, stop/cancel."
+registry_description = "MCP server adapter for Thermo Fisher Orbitrap mass spectrometers via the licensed Instrument API."
 status = "simulated"
 
 [build-system]

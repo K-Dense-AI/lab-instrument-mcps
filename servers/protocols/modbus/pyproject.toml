@@ -32,6 +32,7 @@ models = [
 interfaces = ["Ethernet (Modbus TCP)", "RS-485 / RS-232 (Modbus RTU, ASCII)", "Serial-to-Ethernet gateways"]
 protocol = "Modbus Application Protocol V1.1b3 (TCP, RTU, ASCII)"
 summary = "Read and write named, typed, scaled points from a YAML/JSON register map with per-point min/max, raw register/coil access, and a map-defined safe state."
+registry_description = "MCP server for Modbus TCP/RTU devices with typed, scaled register maps and per-point limits."
 status = "simulated"
 
 [build-system]
