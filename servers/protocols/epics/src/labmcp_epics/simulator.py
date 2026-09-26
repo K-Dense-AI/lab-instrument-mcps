@@ -47,9 +47,11 @@ def _free_port(kind: int) -> int:
 
 def _free_port_pair() -> int:
     """A port number free for both UDP (search) and TCP (circuit) on localhost."""
-    for _ in range(50):
-        port = _free_port(socket.SOCK_DGRAM)
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+    # Pick the TCP port first: Windows reserves whole TCP port ranges (Hyper-V/WinNAT)
+    # that the UDP allocator doesn't avoid, so UDP-first could fail every attempt.
+    for _ in range(200):
+        port = _free_port(socket.SOCK_STREAM)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             try:
                 s.bind(("127.0.0.1", port))
             except OSError:
